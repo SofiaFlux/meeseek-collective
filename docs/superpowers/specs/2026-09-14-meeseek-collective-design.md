@@ -1,6 +1,6 @@
 # Meeseek Collective — Design Specification
 
-**Status:** Approved conceptual design; awaiting written-spec review  
+**Status:** Revised after written-spec review; awaiting approval  
 **Date:** 2026-09-14  
 **Project:** Meeseek Collective  
 **Repository:** `SofiaFlux/meeseek-collective`  
@@ -26,10 +26,12 @@ The architecture is designed around a few non-negotiable properties:
 - distributed growth that adds capacity and resilience without changing semantics;
 - partition tolerance that can reduce authority but never increase it;
 - provenance-preserving knowledge rather than agent-answer accumulation;
+- technically enforceable capability boundaries for consequential effects;
+- explicit handling of unknown external-operation outcomes;
 - modular extension points so models, tools, storage systems, clouds, and harnesses remain replaceable;
 - complexity that must earn its existence.
 
-The first implementation must be a **semantic vertical slice** on a single Cube rather than a distributed-system demo. It must prove the complete lifecycle from authorized purpose to task execution, verification, knowledge update, audit, and economics before multi-Cube complexity is added.
+The first implementation must be a **semantic vertical slice** on a single Cube rather than a distributed-system demo. It must prove the complete lifecycle from authorized purpose to task execution, external-effect control, verification, knowledge update, audit, and economics before multi-Cube complexity is added.
 
 ---
 
@@ -48,9 +50,10 @@ Meeseek Collective shall:
 7. operate correctly as a single local node and scale outward only when capacity, locality, resilience, or capability access justifies it;
 8. continue useful safe work during network partitions without creating new sovereignty;
 9. understand the operational footprint it uses, controls, depends on, and affects;
-10. make consequential actions through deterministic commit and authority boundaries;
-11. support long-lived historical memory without allowing stale knowledge to masquerade as current truth;
-12. support open-source extension through stable semantic contracts.
+10. make consequential actions through deterministic, technically enforceable authority and commit boundaries;
+11. represent uncertain external effects explicitly rather than turning uncertainty into unsafe retries;
+12. support long-lived historical memory without allowing stale knowledge to masquerade as current truth;
+13. support open-source extension through stable semantic contracts.
 
 ### 2.2 Non-goals
 
@@ -92,7 +95,7 @@ A compute node that can participate in a Collective: laptop, desktop, server, VP
 
 ### 3.3 Meeseek Box
 
-The local runtime/daemon on a Cube. It discovers local capabilities, reports health and capacity, receives leased work, constrains executor access, starts or invokes executors, checkpoints work, and reports outcomes and resource usage.
+The local runtime/daemon on a Cube. It discovers local capabilities, reports health and capacity, receives leased work, constrains executor access, starts or invokes executors, checkpoints work, fences stale attempts, and reports outcomes and resource usage.
 
 ### 3.4 Meeseek
 
@@ -110,11 +113,21 @@ Possible implementations include:
 - Terraform operation;
 - workflow or service.
 
-### 3.5 Executors and harnesses
+### 3.5 Task, Attempt, and External Operation
+
+These are separate durable concepts:
+
+- a **Task** is governed work with purpose, acceptance criteria, dependencies, resource envelope, and final outcome;
+- an **Attempt** is one execution effort against a Task, performed by a Meeseek under a lease generation;
+- an **External Operation** is a consequential effect request that may outlive an Attempt and has its own durable identity and reconciliation state.
+
+A completed Attempt does not imply a successful Task, and a lost executor acknowledgement does not imply an External Operation did not happen.
+
+### 3.6 Executors and harnesses
 
 Claude Code, Codex, Gemini, shell, Python, Terraform, HTTP clients, and future systems are executors or capability implementations under a Box. They are not part of the naming hierarchy.
 
-### 3.6 Swarm
+### 3.7 Swarm
 
 A **Swarm** is an optional resource-bounded execution domain around a large goal or task subgraph. It is not a department, mini-Collective, new sovereignty, or required organizational layer.
 
@@ -144,6 +157,10 @@ The following invariants define the architecture.
 18. **Knowledge is preserved by default, but information the Collective is no longer authorized to retain must not be preserved.**
 19. **The Collective may maintain capabilities necessary for authorized purposes and obligations; it may not optimize its own existence as an independent objective.**
 20. **A consequential decision must be explainable using information available when the decision was made.**
+21. **A logical capability lease is a security boundary only when its limits are technically enforced somewhere in the execution path.**
+22. **Uncertain external effect is an explicit state; uncertainty must not be converted into a retry by optimism.**
+23. **Lease expiry revokes authority to create new authoritative effects from the stale attempt; it does not erase evidence or reverse effects already dispatched.**
+24. **A Task becomes successful only after acceptance; completion of an Attempt alone cannot unlock success dependencies.**
 
 ---
 
@@ -341,7 +358,7 @@ The complete semantics must work with:
 
 More Cubes add capacity, locality, redundancy, or parallel cognition; they do not change the meaning of the system.
 
-### 7.3 Work distribution
+### 7.3 Work distribution and effect semantics
 
 Boxes advertise:
 
@@ -353,7 +370,9 @@ Boxes advertise:
 - security context;
 - network/locality attributes.
 
-Work is preferably leased via pull/work-stealing semantics. Execution is at-least-once. External actions therefore need idempotency/deduplication where possible.
+Work is preferably leased via pull/work-stealing semantics. **Task Attempts** are at-least-once: a failed or lost Attempt may be replaced when policy permits.
+
+This does **not** mean that consequential external side effects are blindly at-least-once. Each consequential External Operation uses a durable operation identity and the commit/reconciliation semantics defined in §29. If an effect may have occurred and cannot yet be proven, it becomes `OUTCOME_UNKNOWN`; non-idempotent effects are not automatically re-dispatched while that state persists.
 
 ### 7.4 Child work
 
@@ -406,11 +425,13 @@ It may create new local tasks, diagnostics, recovery work, and other work justif
 
 ### 8.4 Partition invariants
 
-- `authority_during_partition <= authority_before_partition`
+- `authority_during_partition <= authority_before_partition`;
 - no new Constitution during isolation;
 - local authority changes cannot exceed previously granted scope;
 - potentially conflicting global commitments must respect partition-safe policy;
-- isolated work is journaled and reconciled later.
+- isolated work is journaled and reconciled later;
+- an island may not claim global exclusivity it cannot prove;
+- External Operations with uncertain global exclusivity or non-idempotent irreversible effects are denied unless a pre-authorized partition-safe mechanism exists.
 
 ### 8.5 Rogue detection and quarantine
 
@@ -774,7 +795,7 @@ No invoice does not mean no cost. A personally owned laptop may generate no invo
 
 ### 13.2 Resource Ledger
 
-Resource attribution should reach at least the level of a Meeseek attempt where useful, while allowing aggregation when measurement overhead would exceed the value of precision.
+Resource attribution should reach at least the level of a Meeseek Attempt where useful, while allowing aggregation when measurement overhead would exceed the value of precision.
 
 A Goal can accumulate the costs of planning, failed attempts, execution, verification, external services, data transfer, and human attention.
 
@@ -839,21 +860,41 @@ Revenue must be distinguished from spendable execution budget. Taxes, fees, requ
 
 A deterministic economic capability may compute an allowed execution budget using jurisdiction, legal entity, tax regime, payment type, contractual terms, reserves, and policy.
 
+### 13.8 Accounting knowledge versus spend authority
+
+The Collective must separate **what it knows about actual cost** from **what it is still exposed or authorized to spend**.
+
+An exact invoice may be unknown while a hard upper bound is known. Conversely, an executor may stop responding while still potentially accruing cost.
+
+Budget control therefore tracks at least:
+
+- settled cost;
+- active reservations;
+- unresolved committed exposure;
+- enforceable upper bounds;
+- remaining authorized budget.
+
+Parent work, child tasks, retries, verification, external operations, and recovery normally draw from a shared authorized pool unless the parent explicitly subdivides that pool. Spawning or retrying cannot create new budget.
+
+A **hard budget** may be claimed only when a technically enforceable upper bound exists—for example provider quota, prepaid credit, bounded reservation, cancellable resource with verified stop semantics, or another enforceable cap. If a provider can continue billing without a bounded maximum after control is lost, the Collective must represent that limitation honestly and use a policy-approved alternative, approval path, or softer budget classification.
+
 ---
 
 ## 14. Principle of Sufficient Effort and Opportunistic Surplus
 
 ### 14.1 Sufficient Effort
 
-Optimization is lexicographic:
+Optimization is lexicographic, but **constraints come first**:
 
-1. satisfy the required outcome;
-2. preserve all higher-level constraints;
-3. among sufficiently effective alternatives, prefer the least costly, complex, risky, and resource-intensive path.
+1. reject any candidate path that violates higher-level constraints, authority, policy, or required safety invariants;
+2. among the remaining legal/authorized paths, determine which are reasonably expected to satisfy the required outcome;
+3. among sufficiently effective paths, prefer the least costly, complex, risky, and resource-intensive option.
+
+If no legal/authorized path can satisfy the required outcome, the result is `BLOCKED`, `REQUIRE_APPROVAL`, a capability/authority proposal, or another explicit escalation. The Collective must not achieve the goal by violating a higher-level constraint.
 
 The principle is:
 
-> **Use no more than necessary—but never less than sufficient.**
+> **Use no more than necessary—but never less than sufficient, and never outside higher-level constraints.**
 
 This applies at every level:
 
@@ -862,7 +903,8 @@ This applies at every level:
 - install a package instead of provisioning a Cube when sufficient;
 - use existing evidence instead of researching when sufficient;
 - do not consume Owner attention when the Collective can safely decide;
-- escalate only until expected effectiveness is sufficient.
+- escalate resources only until expected effectiveness is sufficient;
+- escalate authority only through the authorized approval path, never by bypass.
 
 Future cost and option value matter. Spending more now to compile a durable capability may be globally cheaper than repeatedly choosing the locally cheapest option.
 
@@ -912,6 +954,7 @@ NO USEFUL WORK
 - lease management;
 - budget counters;
 - policy checks;
+- operation reconciliation triggers;
 - simple thresholds;
 - lightweight health checks.
 
@@ -938,6 +981,7 @@ Wake triggers include:
 - scheduled reviews;
 - task completion;
 - dependency resolution;
+- unresolved operation becoming reconcilable;
 - Known Unknown becoming testable;
 - experiment maturity.
 
@@ -952,6 +996,7 @@ It may inspect:
 - Mission status;
 - obligations;
 - Known Unknowns;
+- unresolved external operations/exposure;
 - KPI changes;
 - resource health;
 - process outcomes;
@@ -1140,7 +1185,8 @@ The Capability Registry tracks more than booleans. It may include:
 - cost history;
 - latency history;
 - limitations;
-- freshness of assessment.
+- freshness of assessment;
+- enforcement mode for authority-sensitive effects.
 
 ### 19.3 Capability gaps
 
@@ -1193,10 +1239,13 @@ Task
 → capability match
 → access/locality match
 → authority check
+→ enforcement-path check
 → Swarm/resource envelope
 → budget
 → eligible execution paths
 ```
+
+A path that cannot technically enforce the required authority boundary is not eligible for consequential work merely because the scheduler conceptually granted a logical lease.
 
 ### 20.2 Multi-dimensional scheduling pressure
 
@@ -1227,6 +1276,8 @@ Preemption considers restart/checkpoint cost:
 - near-complete expensive work may finish;
 - long checkpointable work may pause;
 - cheap stateless work may terminate.
+
+Preemption or lease loss does not by itself prove that previously dispatched External Operations stopped or incurred no further cost.
 
 ### 20.5 Backlog aging
 
@@ -1286,19 +1337,32 @@ Repeated planning patterns may later be compiled into deterministic heuristics o
 
 ---
 
-## 21. Task Lifecycle, Failure, Verification, and Challenge
+## 21. Task Lifecycle, Attempt Lifecycle, Failure, Verification, and Challenge
 
-### 21.1 Lifecycle
+### 21.1 Separate durable lifecycles
 
-A task/attempt model may include states such as:
+A **Task** and an **Attempt** have separate lifecycles.
+
+A Task may move through states such as:
 
 ```text
 CREATED
 → ELIGIBLE
+→ EXECUTING
+→ AWAITING_VERIFICATION
+→ SUCCEEDED | FAILED | BLOCKED | EXPIRED | CANCELLED | CHALLENGED
+```
+
+An Attempt may move through states such as:
+
+```text
+CREATED
 → LEASED
 → RUNNING
-→ ATTEMPT_COMPLETED | FAILED | BLOCKED | EXPIRED | CANCELLED | CHALLENGED
+→ COMPLETED | FAILED | BLOCKED | EXPIRED | CANCELLED | CHALLENGED
 ```
+
+Attempt completion means execution output exists. It does not mean the Task has met its acceptance criteria.
 
 ### 21.2 Challenge is legitimate
 
@@ -1330,34 +1394,69 @@ Failures should be classified where possible:
 
 Responses differ by class: retry/backoff, reassignment, capability gap, replan, Known Unknown, authority proposal, goal challenge, or diagnosis.
 
-Blind retry loops are prohibited as a strategy. Each retry should have a reason the next attempt has a greater chance of success.
+Blind retry loops are prohibited as a strategy. Each retry should have a reason the next Attempt has a greater chance of success.
+
+Unknown external effect is not classified as an ordinary execution failure; it follows External Operation reconciliation semantics.
 
 ### 21.4 Attempt records
 
 Attempts should preserve:
 
+- `attempt_id`;
+- task relationship;
+- lease/fencing generation;
 - approach;
 - executor;
 - capabilities used;
 - evidence;
-- cost;
+- cost/resource usage;
 - duration;
 - failure class/signature;
-- checkpoint/output references.
+- checkpoint/output references;
+- related External Operation IDs.
 
-### 21.5 Success semantics
+### 21.5 Durable verification and success semantics
 
-A worker completes an **attempt**. It does not automatically define task success.
+A worker completes an **Attempt**. It does not automatically define Task success.
+
+When an Attempt completes successfully enough to be evaluated:
+
+1. its output/evidence is durably linked to the Task;
+2. the Task transitions idempotently to `AWAITING_VERIFICATION`;
+3. verification becomes durable work/state;
+4. after acceptance, the Task transitions to `SUCCEEDED` and records the accepted Attempt, evidence, and acceptance record.
 
 `SUCCEEDED` means the Collective has sufficient evidence that acceptance criteria were met.
 
 Acceptance may be deterministic, independently verified, or Owner-approved according to risk and cognition policy.
+
+Dependencies that require a successful Task do not unlock on mere Attempt completion. A specialized dependency may explicitly consume unverified Attempt output, but that exception must be declared rather than implied.
+
+If the Box crashes after Attempt output is persisted but before verification runs, restart must resume verification from `AWAITING_VERIFICATION` rather than rerunning the successful Attempt unnecessarily.
+
+Verification failure may produce a new Attempt, replan, challenge, remediation, or final failure according to policy. Historical Attempts are not overwritten.
 
 Later evidence may invalidate an accepted outcome without rewriting history. The system records regression or outcome invalidation and creates remediation work.
 
 ### 21.6 Checkpointing
 
 Checkpoint effort scales with the cost of lost work. Tiny stateless operations need no elaborate checkpointing; long research, refactors, migrations, or expensive experiments should preserve recoverable progress.
+
+### 21.7 Lease generations and fencing
+
+Every leased Attempt carries a monotonically increasing lease generation or equivalent **fencing token** for that Task execution authority.
+
+Authoritative Task-state mutations, new resource reservations, and consequential External Operation commitments from that Attempt must present a currently valid fencing token at the trusted enforcement boundary.
+
+When a lease expires, is revoked, or is superseded:
+
+- the stale Attempt loses authority to mutate authoritative Task state;
+- it cannot create new reservations or new consequential commitments through controlled capabilities;
+- late artifacts, logs, or evidence may still be ingested with stale-attempt provenance;
+- late evidence cannot by itself mark the Task successful or overwrite the current Attempt state;
+- External Operations already dispatched remain governed by their durable operation records and cannot be “undone” by fencing.
+
+Fencing must be enforced by trusted state/commit/capability boundaries, not by relying on the stale worker to cooperate.
 
 ---
 
@@ -1407,7 +1506,10 @@ Known operational conditions should use deterministic metrics/events/rules where
 
 - missed deadlines;
 - lease loss;
+- stale-attempt commit rejection;
 - retry loops;
+- unresolved external operations;
+- unresolved spend exposure;
 - unexpected cost changes;
 - redundancy loss;
 - scheduled work failing to start.
@@ -1426,11 +1528,11 @@ Repeated useful detections should be candidates for Capability Compilation.
 
 The Collective Scheduler decides **what and when** at the logical Collective level.
 
-A Box Local Dispatcher decides **how physically** on a Cube: slot/executor placement, process invocation, checkpoint, pause, kill, and local reporting.
+A Box Local Dispatcher decides **how physically** on a Cube: slot/executor placement, process invocation, checkpoint, pause, kill, fencing, and local reporting.
 
 The global scheduler is logical, not a required single process. Durable state and takeover support future distribution.
 
-### 23.2 External capabilities
+### 23.2 External capabilities and direct access
 
 External access is capability-governed, not necessarily gateway-routed.
 
@@ -1443,11 +1545,24 @@ A Meeseek with a valid capability lease may directly use an allowed implementati
 - database;
 - storage API.
 
-Policy-governed does not mean centrally routed.
+However, **direct** does not mean **unenforced**. A consequential capability path is valid only if its effective authority limits are technically enforced somewhere that the executor cannot simply ignore. Examples include:
+
+- target-service IAM or scoped API permissions;
+- a short-lived scoped token that cannot perform disallowed operations;
+- an OS/container/process sandbox;
+- network policy;
+- a Box/Capability Provider that mediates the operation;
+- another trustworthy enforcement mechanism.
+
+An untrusted executor must not receive ambient credentials, filesystem access, network reachability, or machine privileges that allow it to reproduce the same protected effect outside the approved capability path.
+
+Policy-governed does not mean centrally routed, but **policy must be technically enforceable somewhere**.
+
+A logical lease with no technical enforcement is descriptive metadata, not a security boundary.
 
 ### 23.3 Interaction Brokers
 
-Brokers exist only where brokering adds value—for example scarce human attention, aggregation, protection, rate limiting, or shared transactional resources.
+Brokers exist only where brokering adds value—for example scarce human attention, aggregation, protection, rate limiting, shared transactional resources, or enforcement of a protected effect.
 
 The rule is: **broker only what benefits from brokering**.
 
@@ -1455,7 +1570,7 @@ The rule is: **broker only what benefits from brokering**.
 
 The scheduler should arbitrate meaningful units of work rather than every I/O operation.
 
-Sending 1,000 campaign emails may be one authorized scheduled task with a connector implementing the batch. It should not require 1,000 independent scheduling decisions.
+Sending 1,000 campaign emails may be one authorized scheduled task with a connector implementing the batch. It should not require 1,000 independent scheduling decisions, although the batch still remains subject to the applicable Commit Boundary and operation-record semantics.
 
 ### 23.5 Attention Broker
 
@@ -1477,17 +1592,37 @@ Interrupt only when expected cost of waiting exceeds expected cost of interrupti
 
 ---
 
-## 24. Security and Secrets
+## 24. Security, Trusted Enforcement Boundary, and Secrets
 
 ### 24.1 Task-Scoped Capability Lease
 
-Each task/Meeseek receives the minimum capability set needed for its work, expiring with the task or lease where technically possible.
+Each Task/Meeseek receives the minimum capability set needed for its work, expiring with the Task or lease where technically possible.
 
-A Cube may possess broad machine-level capabilities while an individual task sees only a restricted logical lease.
+A Cube may possess broad machine-level capabilities while an individual Task sees only a restricted capability lease **only if the restriction is technically enforced**.
 
 Additional capability needs require a new Policy Engine decision.
 
-### 24.2 Prefer operation over secret
+### 24.2 Trusted Enforcement Boundary
+
+The design assumes executors/harnesses may be buggy, compromised, prompt-injected, or intentionally adversarial. Therefore normal security guarantees rely on a small **Trusted Enforcement Boundary (TEB)** that executors cannot redefine through prompts or ordinary Task output.
+
+The conceptual TEB includes the mechanisms that enforce:
+
+- Constitution/Policy decisions relevant to action authorization;
+- principal and Cube identity;
+- lease generation/fencing validation;
+- capability scoping and credential release;
+- Commit Boundary checks;
+- protected budget/reservation state;
+- durable operation identity/deduplication state;
+- authoritative Task/Attempt state transitions;
+- isolation controls needed to prevent bypass of equivalent protected effects.
+
+The implementation technology is deferred, but the security property is not: an executor with shell/network access must not simultaneously possess ambient paths that let it bypass the TEB for effects that the architecture claims to govern.
+
+A capability can still be invoked directly against a target service when the target service or scoped credential itself supplies the trusted enforcement.
+
+### 24.3 Prefer operation over secret
 
 The preferred security model is:
 
@@ -1495,13 +1630,13 @@ The preferred security model is:
 
 The Box or Capability Provider should hold credentials outside the Meeseek when possible and perform the operation on its behalf.
 
-When an executor genuinely needs a credential, use the shortest-lived, narrowest-scope token feasible.
+When an executor genuinely needs a credential, use the shortest-lived, narrowest-scope token feasible, constrained so that its real permissions do not exceed the granted capability envelope where practical.
 
 Secrets do not belong in the Knowledge Graph.
 
-### 24.3 High-risk Owner grants
+### 24.4 High-risk Owner grants and guarantee downgrade
 
-The Owner may deliberately grant broad/root access for a bounded task or test. Such a grant is:
+The Owner may deliberately grant broad/root access for a bounded Task or test. Such a grant is:
 
 - explicitly high risk;
 - task/time scoped where possible;
@@ -1510,9 +1645,11 @@ The Owner may deliberately grant broad/root access for a bounded task or test. S
 - not a policy change;
 - not evidence of earned authority.
 
-This supports deliberate “Rogue King” testing without redefining trust semantics.
+If the grant gives an executor a path that can bypass normal enforcement—for example root access plus ambient credentials/network access—the runtime must mark this as an explicit **guarantee downgrade**. It must not claim that normal invariants such as non-bypassable least privilege, Commit Boundary enforcement, write/spend prevention, or stale-lease effect prevention remain technically guaranteed for that executor during the downgrade.
 
-### 24.4 Revocation and compromise containment
+The downgrade records scope, start/end conditions, affected guarantees, approving principal, and recovery/verification requirements. This supports deliberate “Rogue King” testing without lying about the trust model.
+
+### 24.5 Revocation and compromise containment
 
 Revocation should be faster and easier than granting.
 
@@ -1695,7 +1832,7 @@ It may need to know available RAM on a shared laptop without needing to know whi
 
 ---
 
-## 29. Commitments, Transactions, and Irreversible Actions
+## 29. Commitments, External Operations, Transactions, and Irreversible Actions
 
 ### 29.1 Intent to effect
 
@@ -1704,28 +1841,83 @@ Consequential external work should distinguish:
 ```text
 INTENT
 → PLAN
-→ COMMITMENT
-→ EFFECT
+→ PREPARED OPERATION
+→ DISPATCH
+→ EFFECT / NO EFFECT / OUTCOME UNKNOWN
 ```
 
 An internal decision is not the same as an external obligation or completed world-state change.
 
 ### 29.2 Deterministic Commit Boundary
 
-Consequential external actions pass through a deterministic Commit Boundary immediately before commitment.
+Consequential external actions pass through a deterministic Commit Boundary immediately before a new operation is authorized for dispatch.
 
 The boundary rechecks relevant dimensions including:
 
+- current lease/fencing generation;
 - authority;
 - policy;
+- technically enforceable capability path;
 - budget/resource reservation;
+- unresolved exposure from related Attempts/Operations;
 - freshness of material assumptions;
 - idempotency/deduplication;
 - current conflicting commitments.
 
 The purpose is not to ask the LLM “are you sure?” but to enforce runtime invariants.
 
-### 29.3 Reservations
+The Commit Boundary must live in, or rely on, the Trusted Enforcement Boundary. An executor path that can bypass it cannot be advertised as providing normal Commit Boundary guarantees.
+
+### 29.3 Durable External Operation Record
+
+Before dispatching a consequential External Operation, the Collective durably records an operation identity and intent. A record should include enough information to reconcile the world later, such as:
+
+- stable `operation_id` and idempotency key where supported;
+- Task ID and Attempt ID;
+- current fencing generation;
+- capability/action type;
+- target identity;
+- digest or normalized description of material parameters/effect;
+- authority/policy decision reference;
+- reservation/exposure references;
+- dispatch state and timestamps;
+- provider-side operation/reference ID when available;
+- evidence and reconciliation history.
+
+A conceptual operation lifecycle is:
+
+```text
+PREPARED
+→ DISPATCHED
+→ CONFIRMED_EFFECT | CONFIRMED_NO_EFFECT | OUTCOME_UNKNOWN
+OUTCOME_UNKNOWN → RECONCILING
+RECONCILING → CONFIRMED_EFFECT | CONFIRMED_NO_EFFECT | OUTCOME_UNKNOWN
+```
+
+Compensating work, when possible, is a new explicit operation linked to the original rather than history being rewritten.
+
+### 29.4 Unknown outcome and reconciliation
+
+If dispatch may have reached the external system but acknowledgement/evidence is lost, the operation becomes `OUTCOME_UNKNOWN`.
+
+The Collective then attempts reconciliation using available mechanisms such as:
+
+- provider idempotency/operation key lookup;
+- provider ledger/status API;
+- target-state inspection;
+- billing/transaction records;
+- independent evidence;
+- Owner or counterpart confirmation when justified.
+
+For a consequential **non-idempotent** operation, automatic re-dispatch is prohibited while outcome remains unknown unless policy defines a specific safe duplicate-handling mechanism.
+
+The rule is:
+
+> **Retry execution freely only where effects are idempotent or proven absent; uncertainty about an external effect is state, not failure.**
+
+If the outcome cannot be reconciled safely, the Task becomes blocked on reconciliation/decision rather than creating another potentially duplicate irreversible effect.
+
+### 29.5 Reservations and unresolved exposure
 
 Shared scarce resources must support reservations where double-spend is possible. Examples include:
 
@@ -1736,9 +1928,20 @@ Shared scarce resources must support reservations where double-spend is possible
 - human-attention slots;
 - exclusive infrastructure operations.
 
-Two tasks cannot independently spend the same remaining budget simply because each observed it before the other committed.
+Reservation/exposure states may include:
 
-### 29.4 Reversibility classes
+- `HELD` — reserved for an operation/Attempt not yet settled;
+- `SETTLED` — converted to known or bounded actual consumption;
+- `RELEASED` — proven no longer needed/consumable;
+- `UNRESOLVED` — operation or executor may still incur cost/effect and exposure cannot yet be safely released.
+
+A timeout, lost heartbeat, lease expiry, or lost acknowledgement does **not** automatically release a financial/resource reservation if the remote process or provider may still consume it.
+
+Retries, child Tasks, verification, and replacement Attempts consume the same authorized budget pool unless an explicit subdivision says otherwise. A new retry must account for unresolved prior exposure before a new reservation can be granted.
+
+Hard spend limits require enforceable upper bounds. Unknown exact cost is acceptable; unbounded unknown exposure is not equivalent to a hard budget.
+
+### 29.6 Reversibility classes
 
 Consequential actions may be classified as:
 
@@ -1750,7 +1953,7 @@ Consequential actions may be classified as:
 
 More irreversible actions require stronger freshness, verification, cognition, and—where policy says so—approval.
 
-Earned Authority may permit autonomous irreversible work, but it does not remove the Commit Boundary.
+Earned Authority may permit autonomous irreversible work, but it does not remove the Commit Boundary or unknown-outcome semantics.
 
 ---
 
@@ -1768,7 +1971,7 @@ Examples:
 - revocations;
 - trust/membership changes;
 - quarantine state;
-- high-consequence reservations.
+- high-consequence reservations and spend ceilings.
 
 When sufficiently current authority cannot be proven, fail closed for actions that require that proof.
 
@@ -1776,14 +1979,17 @@ When sufficiently current authority cannot be proven, fail closed for actions th
 
 Examples:
 
-- task leases;
+- Task leases and fencing generations;
+- authoritative Task/Attempt state;
 - exclusive resource reservations;
-- task state;
-- deduplication keys;
+- unresolved exposure state;
+- External Operation records and deduplication keys;
 - checkpoints;
 - scheduled deadlines.
 
-Normal operation coordinates these globally. Partition operation may use explicitly partition-scoped semantics with local journals and restricted authority.
+Normal operation coordinates these strongly enough that stale Attempts cannot commit authoritative state or protected effects. Every state/commit path that relies on a lease must validate its fencing generation at the trusted boundary.
+
+Partition operation may use explicitly partition-scoped semantics with local journals and restricted authority.
 
 #### Class C — Knowledge and Analytics
 
@@ -1825,7 +2031,9 @@ shared checkpoint
 → resolve / investigate / human review
 ```
 
-Duplicate completion may represent redundant verification rather than corruption. Reconciliation therefore considers task semantics and evidence, not timestamps alone.
+Duplicate completion may represent redundant verification rather than corruption. Reconciliation therefore considers Task semantics and evidence, not timestamps alone.
+
+Unresolved External Operations are reconciled against external reality before duplicate consequential effects are authorized.
 
 ### 30.5 Collective Epoch
 
@@ -1859,6 +2067,7 @@ The design expects stable semantic contracts resembling:
 - `EventSource`
 - `InteractionProvider`
 - `CostProvider`
+- `OperationReconciler`
 
 Exact API shapes are intentionally deferred to implementation design.
 
@@ -1888,11 +2097,24 @@ Extensions may be implemented as:
 - remote services;
 - another Collective via federation.
 
-Contracts must define timeouts, cancellation, idempotency expectations, cost/usage reporting, security context, and capability assessment.
+Contracts must define:
+
+- timeouts;
+- cancellation semantics and whether cancellation is provable;
+- idempotency expectations;
+- uncertain-outcome/reconciliation support for consequential operations;
+- cost/usage reporting;
+- whether a hard cost ceiling is technically enforceable;
+- security/enforcement context;
+- capability assessment.
+
+A remote executor that may continue running or billing after local timeout must expose that uncertainty to the Resource Ledger/reservation model rather than being treated as stopped.
 
 ### 31.5 Least privilege for extensions
 
-Extensions receive only the task data, allowed artifacts, scoped context, and capability lease they need. They do not automatically receive all Memory, all tasks, all secrets, or Policy Store access.
+Extensions receive only the Task data, allowed artifacts, scoped context, and capability lease they need. They do not automatically receive all Memory, all Tasks, all secrets, or Policy Store access.
+
+For authority-sensitive effects, least privilege must be technical rather than merely descriptive.
 
 ---
 
@@ -1937,6 +2159,7 @@ Owner
 → Meeseek
 → Executor
 → Attempt
+→ External Operation(s) when needed
 → Verification
 → Knowledge Delta
 → Memory
@@ -1948,22 +2171,26 @@ Owner
 The MVC must include:
 
 1. **Constitution and Authority Model** — model prompts never grant authority.
-2. **Durable Task Graph** — work survives Meeseeks and Box restart; attempts, lineage, child tasks, deadlines, failure classes, challenge, and acceptance are real concepts.
-3. **Executor abstraction** — at least two meaningfully different executor types, preferably one agentic harness and one deterministic executor, proving `Meeseek != LLM`.
-4. **Capability Registry and Assessment** — the Box discovers and verifies what it can actually do.
-5. **Deterministic single-node Scheduler** — task eligibility, capability matching, deadlines, resource envelopes, and leases are implemented with future multi-Cube semantics in mind.
-6. **Commit Boundary** — consequential actions cannot bypass deterministic authority/policy/budget/idempotency checks.
-7. **Memory** — evidence, events, claims, provenance, and temporal semantics are first-class.
-8. **Economics** — attempts can report duration and measurable executor/token/API/compute/network usage; unknown values remain unknown rather than invented.
-9. **Audit** — the system can answer why an action occurred, what authority and evidence supported it, what it cost, and what resulted.
-10. **Dormancy/wake semantics** — no useful work can correctly mean zero active Meeseeks.
+2. **Trusted Enforcement Boundary** — normal authority/commit guarantees cannot be bypassed by an ordinary executor path; any explicit Owner bypass is represented as a guarantee downgrade.
+3. **Durable Task Graph** — work survives Meeseeks and Box restart; Tasks and Attempts are separate, with lineage, child Tasks, deadlines, failure classes, challenge, and acceptance.
+4. **Durable Verification State** — completed Attempt output can survive restart in `AWAITING_VERIFICATION`, and Task dependencies unlock only from accepted Task outcomes unless explicitly configured otherwise.
+5. **Executor abstraction** — at least two meaningfully different executor types, preferably one agentic harness and one deterministic executor, proving `Meeseek != LLM`.
+6. **Capability Registry and Assessment** — the Box discovers and verifies what it can actually do and how authority-sensitive effects are enforced.
+7. **Deterministic single-node Scheduler** — Task eligibility, capability matching, deadlines, resource envelopes, leases, and fencing are implemented with future multi-Cube semantics in mind.
+8. **Commit Boundary and External Operation Record** — consequential operations cannot bypass deterministic authority/policy/budget/fencing/idempotency checks in normal mode; operation intent is durably recorded before dispatch.
+9. **Unknown Outcome and Reconciliation** — the system can represent `OUTCOME_UNKNOWN` and refuses unsafe duplicate non-idempotent re-dispatch while reconciliation is pending.
+10. **Budget Reservation and Exposure Semantics** — unresolved remote activity/external operations continue consuming authorized exposure; lease/timeout alone does not free budget.
+11. **Memory** — evidence, events, claims, provenance, and temporal semantics are first-class.
+12. **Economics** — Attempts and operations can report duration and measurable executor/token/API/compute/network usage; unknown values remain unknown rather than invented.
+13. **Audit** — the system can answer why an action occurred, what authority and evidence supported it, what it cost, and what resulted.
+14. **Dormancy/wake semantics** — no useful work can correctly mean zero active Meeseeks.
 
 ### 32.5 Deferred beyond MVC
 
 The first version deliberately defers full implementations of:
 
 - multi-Cube scheduling and failover;
-- Partition Islands and reconciliation;
+- Partition Islands and reconciliation between Cubes;
 - federation;
 - Swarms;
 - autonomous infrastructure provisioning;
@@ -1977,9 +2204,23 @@ The first version deliberately defers full implementations of:
 
 Schemas and contracts should carry future identifiers/fields where doing so is cheap and semantically justified—for example `collective_id`, `cube_id`, optional `partition_id`, and optional `swarm_id`—without prematurely implementing the distributed behaviors.
 
-### 32.6 First real validation scenario
+### 32.6 MVC failure-path acceptance scenarios
 
-The first validation should use a useful bounded Mission rather than a toy prompt. A suitable scenario is maintaining a selected repository in good health under an explicit budget and without autonomous merge authority.
+The MVC is not accepted merely because the happy path works. It must demonstrate at least these semantics on one Cube:
+
+1. **Unknown external result:** a consequential operation is dispatched, the acknowledgement is lost, and the Box restarts. The operation becomes/reconstructs as `OUTCOME_UNKNOWN`; a non-idempotent duplicate is not automatically sent; reconciliation determines or escalates the outcome.
+2. **Unresolved billing exposure:** a remote executor times out but may still be running/billing. Its reservation becomes or remains unresolved; a retry cannot overcommit the parent hard budget; exact cost may remain unknown while exposure is bounded or explicitly unresolved.
+3. **Stale Attempt:** Attempt A loses its lease, Attempt B receives the next generation, then A resumes. A’s authoritative state mutation and new consequential commit are rejected by fencing; A’s late evidence can still be stored with provenance.
+4. **Crash before verification:** an Attempt completes and output is durably stored, then the Box crashes before verification. Restart resumes from `AWAITING_VERIFICATION` without needlessly re-executing the Attempt; downstream success dependencies remain locked until acceptance.
+5. **Bypass attempt:** an agentic harness with shell/network attempts to reproduce a protected external effect outside its granted capability. In normal MVC mode, sandbox/credential/network/service enforcement blocks the path. If the Owner deliberately grants a bypass for a test, the runtime records a guarantee downgrade rather than claiming normal guarantees.
+6. **Constraint precedence:** a goal is achievable only by violating authority or another higher-level constraint. The result is block/escalation/proposal, not illegal execution.
+7. **Hard-budget honesty:** a provider whose cost cannot be technically capped must not be represented as satisfying a hard spend limit merely because an estimated cost exists.
+
+These scenarios are semantic requirements; they do not prescribe a specific database, sandbox, queue, cloud, or programming language.
+
+### 32.7 First real validation scenario
+
+The first useful validation should use a bounded Mission rather than a toy prompt. A suitable scenario is maintaining a selected repository in good health under an explicit budget and without autonomous merge authority.
 
 Example lifecycle:
 
@@ -1990,8 +2231,9 @@ Strategic Pulse
 → creates Task
 → scheduler selects executor
 → Meeseek diagnoses
-→ child task is created
+→ child Task is created
 → deterministic test validates a fix
+→ Task waits for verification
 → independent verifier evaluates outcome
 → Knowledge Delta is ingested
 → proposal is surfaced to Owner
@@ -2001,7 +2243,7 @@ Strategic Pulse
 
 This exercises the architecture without requiring distributed infrastructure.
 
-### 32.7 Criteria for adding a second Cube
+### 32.8 Criteria for adding a second Cube
 
 A second Cube should be introduced only to solve an observed need such as:
 
@@ -2021,6 +2263,7 @@ The following concise principles summarize recurring decisions:
 - **Kill the Meeseek. Keep the mission.**
 - **Tasks are durable; workers are disposable.**
 - **Meeseek is a unit of work, not a synonym for LLM.**
+- **Task, Attempt, and External Operation are distinct durable concepts.**
 - **No lower-level objective may override a higher-level constraint.**
 - **LLM is never the root of authority.**
 - **Identity ≠ Device.**
@@ -2031,18 +2274,23 @@ The following concise principles summarize recurring decisions:
 - **Discovery does not create ownership.**
 - **Information cannot grant authority.**
 - **Truth does not grant permissions.**
+- **A logical lease without technical enforcement is not a security boundary.**
+- **Direct access is permitted only when the effective authority boundary remains enforceable.**
+- **Lease expiry revokes authority for new effects; it does not erase evidence or undo dispatched effects.**
+- **Unknown external effect is a first-class state, not permission to retry.**
 - **Confidence cannot be inherited without provenance.**
 - **Meeseeks inherit knowledge, not context windows.**
 - **Spend cognition where uncertainty survives.**
 - **Cognition has a cost; reason about the cost of reasoning.**
 - **Autonomy is permission, not an objective.**
 - **Repeated cognition is a candidate for compilation.**
-- **Use no more than necessary—but never less than sufficient.**
+- **Use no more than necessary—but never less than sufficient, and never outside higher-level constraints.**
 - **Exploit valuable context while it is cheap without endangering the primary objective.**
 - **Backlog does not earn execution merely by aging.**
 - **A future deadline should influence present scheduling before it becomes urgent.**
 - **Deterministic core, cognitive edge.**
 - **The worker that performs the work does not automatically define whether it succeeded.**
+- **Task success is accepted evidence, not Attempt completion.**
 - **Observe enough to know when to investigate. Investigate only when investigation has expected value.**
 - **Broker only what benefits from brokering.**
 - **Prefer granting an operation over revealing a secret.**
@@ -2051,6 +2299,7 @@ The following concise principles summarize recurring decisions:
 - **No invoice does not mean no cost.**
 - **Idle capacity must justify its readiness cost.**
 - **Unknown is a valid economic value. Unnecessary precision is itself a cost.**
+- **Unresolved spend exposure remains exposure until proven otherwise.**
 - **Strong consistency where disagreement could violate authority, commitments, or exclusivity; eventual consistency where disagreement merely delays shared understanding.**
 - **Complexity must earn its existence.**
 
@@ -2060,16 +2309,20 @@ The following concise principles summarize recurring decisions:
 
 The design intentionally produces several consequences that should remain visible during implementation:
 
-1. A `Task` is not merely a prompt. It is a durable governed unit with purpose, acceptance criteria, lineage, resource envelope, authority needs, time semantics, and attempts.
-2. A `Meeseek` is not a long-lived identity whose survival should be optimized.
-3. Model vendors are replaceable implementation details.
-4. Human attention is modeled as a scarce capability/resource, not an infinite interrupt channel.
-5. Knowledge is a provenance-aware temporal model, not a vector store containing chat summaries.
-6. Economic optimization includes readiness and reconstruction, not only token invoices.
-7. Strong consistency is reserved for places where disagreement can break trust, commitments, or exclusivity.
-8. Partition autonomy requires intentionally reduced power rather than optimistic authority assumptions.
-9. Open-source extensions must never be able to grant themselves permission simply by exposing a capability.
-10. The simplest correct implementation is preferred over distributed sophistication until real workload evidence demands more.
+1. A `Task` is not merely a prompt. It is a durable governed unit with purpose, acceptance criteria, lineage, resource envelope, authority needs, time semantics, Attempts, and accepted outcome.
+2. An `Attempt` is not a Task result; it is one execution effort with a lease generation and evidence.
+3. An `External Operation` may survive the Attempt that initiated it and must have durable identity, reservation, and reconciliation semantics.
+4. A `Meeseek` is not a long-lived identity whose survival should be optimized.
+5. Model vendors are replaceable implementation details.
+6. Human attention is modeled as a scarce capability/resource, not an infinite interrupt channel.
+7. Knowledge is a provenance-aware temporal model, not a vector store containing chat summaries.
+8. Economic optimization includes readiness, reconstruction, reservations, and unresolved exposure—not only token invoices.
+9. Strong consistency is reserved for places where disagreement can break trust, commitments, exclusivity, fencing, or spend ceilings.
+10. Partition autonomy requires intentionally reduced power rather than optimistic authority assumptions.
+11. Open-source extensions must never be able to grant themselves permission simply by exposing a capability.
+12. A security claim is valid only if the claimed boundary is technically enforced; metadata alone does not constrain a hostile executor.
+13. Retry policy must distinguish failed execution from uncertain external effect.
+14. The simplest correct implementation is preferred over distributed sophistication until real workload evidence demands more.
 
 ---
 
@@ -2087,18 +2340,21 @@ Previously identified candidates worth evaluating include distributed/graph-memo
 
 The landscape review should map requirements against stable interfaces such as:
 
-- CollectiveMemory;
-- DurableWork / CollectiveState;
-- EvidenceStore;
-- Executor;
-- CapabilityProvider;
-- PolicyEngine;
-- InfrastructureProvider;
-- IdentityProvider;
-- Scheduler;
-- EventSource;
-- InteractionProvider;
-- CostProvider.
+- `CollectiveMemory`;
+- `DurableWork` / `CollectiveState`;
+- `EvidenceStore`;
+- `Executor`;
+- `CapabilityProvider`;
+- `PolicyEngine`;
+- `InfrastructureProvider`;
+- `IdentityProvider`;
+- `Scheduler`;
+- `EventSource`;
+- `InteractionProvider`;
+- `CostProvider`;
+- `OperationReconciler`.
+
+The review should pay special attention to whether candidate systems genuinely support, or can safely host, the semantics introduced by the written-spec review: fencing, durable verification, technically enforced capabilities, unknown external outcomes, and unresolved spend exposure.
 
 Only after this mapping should implementation technologies and subsystem boundaries be selected.
 
@@ -2106,20 +2362,24 @@ Only after this mapping should implementation technologies and subsystem boundar
 
 ## 36. Review Gate
 
-This document records the approved conceptual design. It intentionally stops before implementation planning.
+This document records the approved conceptual design plus the corrections from the first full written-spec review. It intentionally stops before implementation planning.
 
-Before an implementation plan is produced, the written specification must be reviewed for:
+The written specification remains awaiting Owner approval after review findings were resolved. Before approval, it should be checked for:
 
 - fidelity to the approved conceptual design;
 - missing contradictions or hidden privilege-escalation paths;
+- non-enforced authority claims;
+- unsafe retry semantics around uncertain external effects;
+- lease/fencing ambiguity;
+- reservation/exposure ambiguity;
+- Task/Attempt/verification lifecycle ambiguity;
 - excessive scope in MVC;
-- interfaces whose semantics remain ambiguous;
-- opportunities to adopt or adapt existing open-source components rather than rebuilding them.
+- interfaces whose semantics remain ambiguous.
 
 After written-spec approval, the next formal steps are:
 
 ```text
-Written spec review
+Written spec approval
 → OSS landscape mapping: ADOPT / ADAPT / BUILD
 → implementation architecture decisions
 → detailed implementation plan
