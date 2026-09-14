@@ -1,6 +1,6 @@
 # Meeseek Collective — Design Specification
 
-**Status:** Revised after written-spec review; awaiting approval  
+**Status:** Approved written design; ready for OSS landscape mapping  
 **Date:** 2026-09-14  
 **Project:** Meeseek Collective  
 **Repository:** `SofiaFlux/meeseek-collective`  
@@ -1873,6 +1873,7 @@ The Commit Boundary must live in, or rely on, the Trusted Enforcement Boundary. 
 Before dispatching a consequential External Operation, the Collective durably records an operation identity and intent. A record should include enough information to reconcile the world later, such as:
 
 - stable `operation_id` and idempotency key where supported;
+- stable logical-effect identity (for example `logical_effect_key`) that is independent of a particular Attempt;
 - Task ID and Attempt ID;
 - current fencing generation;
 - capability/action type;
@@ -1893,6 +1894,16 @@ PREPARED
 OUTCOME_UNKNOWN → RECONCILING
 RECONCILING → CONFIRMED_EFFECT | CONFIRMED_NO_EFFECT | OUTCOME_UNKNOWN
 ```
+
+**Logical effect identity survives Attempt replacement.** Before a replacement/retry Attempt prepares a consequential operation, it must find and reuse or reconcile any existing External Operation for the same logical effect rather than minting a fresh unrelated effect merely because the Attempt ID changed.
+
+This applies to every operation state, including `CONFIRMED_EFFECT`:
+
+- if the effect is already confirmed, the new Attempt consumes that confirmed result and continues remaining local/Task work without dispatching the effect again;
+- if the result is `OUTCOME_UNKNOWN`, the new Attempt reconciles it under §29.4 before any duplicate-sensitive dispatch;
+- if `CONFIRMED_NO_EFFECT` is established, a new dispatch may be prepared if authority, policy, budget, and other Commit Boundary checks still permit it.
+
+A new `operation_id` may be appropriate for a genuinely new logical effect, explicit compensation, or policy-approved replacement operation, but Attempt replacement alone is not sufficient reason to create one.
 
 Compensating work, when possible, is a new explicit operation linked to the original rather than history being rewritten.
 
@@ -2215,6 +2226,7 @@ The MVC is not accepted merely because the happy path works. It must demonstrate
 5. **Bypass attempt:** an agentic harness with shell/network attempts to reproduce a protected external effect outside its granted capability. In normal MVC mode, sandbox/credential/network/service enforcement blocks the path. If the Owner deliberately grants a bypass for a test, the runtime records a guarantee downgrade rather than claiming normal guarantees.
 6. **Constraint precedence:** a goal is achievable only by violating authority or another higher-level constraint. The result is block/escalation/proposal, not illegal execution.
 7. **Hard-budget honesty:** a provider whose cost cannot be technically capped must not be represented as satisfying a hard spend limit merely because an estimated cost exists.
+8. **Confirmed effect survives Attempt replacement:** Attempt A successfully performs a purchase and the External Operation reaches `CONFIRMED_EFFECT`, then A crashes while producing a local report. Attempt B resumes the Task, finds the existing operation through the Task/logical-effect identity, reuses the confirmed result, and completes the report without performing a second purchase or inventing an unrelated operation for the same effect.
 
 These scenarios are semantic requirements; they do not prescribe a specific database, sandbox, queue, cloud, or programming language.
 
@@ -2278,6 +2290,7 @@ The following concise principles summarize recurring decisions:
 - **Direct access is permitted only when the effective authority boundary remains enforceable.**
 - **Lease expiry revokes authority for new effects; it does not erase evidence or undo dispatched effects.**
 - **Unknown external effect is a first-class state, not permission to retry.**
+- **Attempt replacement must reuse or reconcile the same logical external effect rather than duplicate it.**
 - **Confidence cannot be inherited without provenance.**
 - **Meeseeks inherit knowledge, not context windows.**
 - **Spend cognition where uncertainty survives.**
@@ -2312,17 +2325,18 @@ The design intentionally produces several consequences that should remain visibl
 1. A `Task` is not merely a prompt. It is a durable governed unit with purpose, acceptance criteria, lineage, resource envelope, authority needs, time semantics, Attempts, and accepted outcome.
 2. An `Attempt` is not a Task result; it is one execution effort with a lease generation and evidence.
 3. An `External Operation` may survive the Attempt that initiated it and must have durable identity, reservation, and reconciliation semantics.
-4. A `Meeseek` is not a long-lived identity whose survival should be optimized.
-5. Model vendors are replaceable implementation details.
-6. Human attention is modeled as a scarce capability/resource, not an infinite interrupt channel.
-7. Knowledge is a provenance-aware temporal model, not a vector store containing chat summaries.
-8. Economic optimization includes readiness, reconstruction, reservations, and unresolved exposure—not only token invoices.
-9. Strong consistency is reserved for places where disagreement can break trust, commitments, exclusivity, fencing, or spend ceilings.
-10. Partition autonomy requires intentionally reduced power rather than optimistic authority assumptions.
-11. Open-source extensions must never be able to grant themselves permission simply by exposing a capability.
-12. A security claim is valid only if the claimed boundary is technically enforced; metadata alone does not constrain a hostile executor.
-13. Retry policy must distinguish failed execution from uncertain external effect.
-14. The simplest correct implementation is preferred over distributed sophistication until real workload evidence demands more.
+4. Logical external-effect identity is Task-semantic rather than Attempt-semantic; retrying local work must not duplicate an already performed consequential effect.
+5. A `Meeseek` is not a long-lived identity whose survival should be optimized.
+6. Model vendors are replaceable implementation details.
+7. Human attention is modeled as a scarce capability/resource, not an infinite interrupt channel.
+8. Knowledge is a provenance-aware temporal model, not a vector store containing chat summaries.
+9. Economic optimization includes readiness, reconstruction, reservations, and unresolved exposure—not only token invoices.
+10. Strong consistency is reserved for places where disagreement can break trust, commitments, exclusivity, fencing, or spend ceilings.
+11. Partition autonomy requires intentionally reduced power rather than optimistic authority assumptions.
+12. Open-source extensions must never be able to grant themselves permission simply by exposing a capability.
+13. A security claim is valid only if the claimed boundary is technically enforced; metadata alone does not constrain a hostile executor.
+14. Retry policy must distinguish failed execution from uncertain or already-confirmed external effect.
+15. The simplest correct implementation is preferred over distributed sophistication until real workload evidence demands more.
 
 ---
 
@@ -2354,7 +2368,7 @@ The landscape review should map requirements against stable interfaces such as:
 - `CostProvider`;
 - `OperationReconciler`.
 
-The review should pay special attention to whether candidate systems genuinely support, or can safely host, the semantics introduced by the written-spec review: fencing, durable verification, technically enforced capabilities, unknown external outcomes, and unresolved spend exposure.
+The review should pay special attention to whether candidate systems genuinely support, or can safely host, the semantics introduced by the written-spec review: fencing, durable verification, technically enforced capabilities, logical-effect identity across retries, unknown external outcomes, and unresolved spend exposure.
 
 Only after this mapping should implementation technologies and subsystem boundaries be selected.
 
@@ -2362,24 +2376,14 @@ Only after this mapping should implementation technologies and subsystem boundar
 
 ## 36. Review Gate
 
-This document records the approved conceptual design plus the corrections from the first full written-spec review. It intentionally stops before implementation planning.
+This document records the approved conceptual design plus the corrections from the full written-spec reviews. The Owner has approved the written specification. It intentionally stops before implementation planning.
 
-The written specification remains awaiting Owner approval after review findings were resolved. Before approval, it should be checked for:
+The written-design review gate is therefore closed. Further conceptual mechanisms should not be added without a newly identified requirement or contradiction; ordinary implementation detail belongs in the OSS mapping, architecture decisions, and implementation plan.
 
-- fidelity to the approved conceptual design;
-- missing contradictions or hidden privilege-escalation paths;
-- non-enforced authority claims;
-- unsafe retry semantics around uncertain external effects;
-- lease/fencing ambiguity;
-- reservation/exposure ambiguity;
-- Task/Attempt/verification lifecycle ambiguity;
-- excessive scope in MVC;
-- interfaces whose semantics remain ambiguous.
-
-After written-spec approval, the next formal steps are:
+The next formal steps are:
 
 ```text
-Written spec approval
+Approved written spec
 → OSS landscape mapping: ADOPT / ADAPT / BUILD
 → implementation architecture decisions
 → detailed implementation plan
