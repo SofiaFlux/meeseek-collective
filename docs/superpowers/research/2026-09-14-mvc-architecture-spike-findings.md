@@ -1,7 +1,8 @@
 # Meeseek Collective — MVC Architecture Spike Findings
 
-**Status:** Source/contract and local persistence spikes complete; input to implementation architecture decisions  
+**Status:** Source/contract and local persistence spikes complete; review-hardening added  
 **Date:** 2026-09-14  
+**Review hardening:** 2026-09-15  
 **Inputs:**
 - `docs/superpowers/specs/2026-09-14-meeseek-collective-design.md`
 - `docs/superpowers/research/2026-09-14-oss-landscape-mapping.md`
@@ -26,13 +27,36 @@ The spikes covered:
 
 No spike is allowed to redefine the approved Meeseek semantics merely to make a candidate library fit.
 
+### 1.1 Reproducibility artifacts
+
+The SQLite persistence experiment is checked into the repository at:
+
+`docs/superpowers/research/spikes/2026-09-14-sqlite-persistence-spike.py`
+
+It uses only Python stdlib `sqlite3`, prints the Python and SQLite runtime versions, and exercises both the original persistence claims and the hardening cases found during architecture review.
+
+A reproduction run on 2026-09-15 produced nine PASS results under Python 3.13.5 / SQLite 3.46.1.
+
+### 1.2 Source pins
+
+To make the source-inspection claims reproducible, the principal repositories reviewed are pinned to the following commits:
+
+| Project | Repository | Pinned commit | Note |
+|---|---|---|---|
+| AgentLedger | `yaogdu/AgentLedger` | `dd966e3b3d9eb54032c51701d30efcfbaa2379b0` | main at review; Python/Inspector 1.6.1 release boundary |
+| Graphiti | `getzep/graphiti` | `c035afb7990b6077331a81e98b04efcfd9bf8184` | main at review |
+| Open Policy Agent | `open-policy-agent/opa` | `3bb5178a49640c0dc89a389d0b5f2d0706f0d0a1` | main captured during review hardening |
+| MCP Go SDK | `modelcontextprotocol/go-sdk` | `0c0eb236257200d913d04e658fd2f2e5cefa7832` | main captured during review hardening |
+
+These pins document what was inspected. They are **not** dependency-version decisions for the implementation plan.
+
 ---
 
 # 2. Spike A — AgentLedger Semantic Compatibility
 
 ## 2.1 What was inspected
 
-Primary repository: `yaogdu/AgentLedger` (Apache-2.0).
+Primary repository: `yaogdu/AgentLedger` (Apache-2.0), pinned above.
 
 Reviewed materials included:
 
@@ -88,7 +112,7 @@ with, among other things:
 
 The AgentLedger Go runtime inspected during this spike also uses its own Store abstraction and local JSONStore path in its reference/baseline implementation. That does not match the desired transactional MVC canonical state model.
 
-The machine-readable AgentLedger contract currently describes Python as the full v1.x reference and Go/TypeScript/Rust baselines as runtime-preview. That is not a reason to reject the project, but it is a reason not to make Meeseek correctness depend on embedding its current Go runtime.
+The inspected release boundary also shows that AgentLedger's language packages have distinct publication cadence even though the project targets source-level semantic parity. That is not a reason to reject the project, but it is a reason not to make Meeseek correctness depend on embedding its current Go runtime as the source of truth.
 
 ## 2.4 AgentLedger Docker adapter and the TEB
 
@@ -132,7 +156,7 @@ If source or tests are copied rather than merely reimplemented from concepts, pr
 
 ## 3.1 Fit
 
-Primary repository: `getzep/graphiti` (Apache-2.0 source).
+Primary repository: `getzep/graphiti` (Apache-2.0 source), pinned above.
 
 Graphiti is strongly aligned with several projection/query requirements:
 
@@ -204,7 +228,7 @@ After MVC semantics are proven:
 
 ## 4.1 Fit
 
-Primary project: Open Policy Agent.
+Primary project: Open Policy Agent, pinned above.
 
 OPA can be embedded directly in Go through its Go API. It can evaluate structured inputs and return structured result documents, which is sufficient to represent Meeseek's stable decision model:
 
@@ -261,18 +285,39 @@ policy says ALLOW
 → stale decision still commits effect
 ```
 
-## 4.4 Decision from the spike
+## 4.4 Side-effect-free evaluation requirement
+
+Architecture review identified an important trust-boundary issue: embedded OPA is code executing **inside the trusted Box**, and Rego has built-ins such as `http.send` that can perform outbound HTTP. OPA's own documentation warns that `http.send` must not be used to effect changes in external systems.
+
+Therefore MVC cannot equate “embedded OPA” with “pure deterministic evaluator” by assumption.
+
+The OPA adapter must use a **restricted evaluation profile**:
+
+- explicit allowlisted capabilities/built-ins rather than the unrestricted default set;
+- no `http.send` or other direct network/external-I/O built-ins;
+- no custom built-ins with side effects;
+- policy data supplied from controlled Meeseek input/data, not ambient external fetches;
+- ambient/nondeterministic runtime sources excluded where a controlled input can be used instead;
+- strict built-in error handling;
+- bounded evaluation deadline/time budget;
+- schema/cardinality validation of the resulting `PolicyDecision`;
+- timeout, compilation error, evaluation error, undefined/ambiguous result, or invalid output fails closed for consequential action.
+
+OPA capabilities are therefore part of the TEB configuration and must be versioned/tested alongside the policy set.
+
+## 4.5 Decision from the spike
 
 For MVC:
 
-- embed OPA in the Box process using its Go API;
+- embed OPA in the Box process using the low-level Go policy-evaluation path;
 - keep Rego/policy data versioned as Meeseek-managed artifacts/state;
 - wrap OPA behind a small `PolicyEngine` contract;
+- compile/evaluate only under the restricted side-effect-free capability profile above;
 - keep the wire/domain `PolicyDecision` independent of OPA so Cedar or another engine can replace it later.
 
 ### Classification after spike
 
-`ADAPT` — strong fit.
+`ADAPT` — strong fit **with a restricted evaluation profile**.
 
 ---
 
@@ -364,41 +409,55 @@ The written-design review introduced invariants that must survive process failur
 
 If those cannot live naturally in one local transactional store, SQLite would be a bad MVC choice regardless of operational simplicity.
 
-## 6.2 Local transaction experiment
+## 6.2 Reproducible local transaction experiment
 
-A temporary SQLite schema was used to model:
+The checked-in reproduction script models:
 
-- `tasks` with current fencing generation and budget state;
-- `attempts` with fence generation;
-- `effects` with `UNIQUE(task_id, logical_effect_key)`;
+- `tasks` with current fencing generation, current Attempt and budget state;
+- `attempts` with fencing generation plus lease state/expiry;
+- durable task-semantic `effect_slots` whose identity is independent of effect parameters;
+- `external_operations` with PREPARED/DISPATCHED/confirmed states;
 - reservation/exposure values;
-- Task verification state.
+- explicit completion records distinct from staged/orphan output;
+- Task verification state;
+- a minimal active policy identity for dispatch revalidation.
 
-The experiment used WAL mode and synchronous FULL semantics for the local test store.
+The experiment uses WAL mode and synchronous FULL semantics for the local test store.
 
-The following properties were exercised successfully:
+The following properties are executable in `docs/superpowers/research/spikes/2026-09-14-sqlite-persistence-spike.py`:
 
 | Property | Result |
 |---|---|
 | PREPARED External Operation and exposure reservation committed atomically | PASS |
-| stale Attempt authoritative Task write rejected by fence predicate | PASS |
-| second Attempt cannot create duplicate row for same Task logical effect | PASS |
-| confirmed effect is discoverable/reusable by replacement Attempt | PASS |
-| Task can move durably to `AWAITING_VERIFICATION` under current fence | PASS |
-| close/reopen preserves `AWAITING_VERIFICATION`, cost and fence state | PASS |
+| expired lease rejects authoritative write even while the fence still matches | PASS |
+| the same trusted effect slot resolves to the same durable identity | PASS |
+| changed effect parameters are detected as an intent conflict instead of minting a new effect | PASS |
+| confirmed effect is discoverable/reusable by a replacement Attempt | PASS |
+| authority/policy change before dispatch prevents PREPARED → DISPATCHED | PASS |
+| staged/orphan output is not mistaken for completed Attempt | PASS |
+| completion record + AWAITING_VERIFICATION survive close/reopen | PASS |
 | unresolved exposure reduces remaining budget and blocks overcommitting retry | PASS |
 
-This was a semantic persistence experiment, not the Go implementation and not a full crash/power-failure harness.
+This is a semantic persistence experiment, not the Go implementation and not a full power-loss/crash-injection harness.
 
-## 6.3 SQLite properties relevant to the architecture
+## 6.3 Review hardening learned from the experiment
 
-SQLite provides ACID/serializable transaction semantics and serializes writers. WAL allows simultaneous readers and a writer on one host.
+The strengthened experiment also makes four architecture rules explicit:
+
+1. **Fence equality alone is insufficient.** Authoritative Attempt writes must prove that the Attempt is still current and its lease is active/unexpired in an allowed Task state.
+2. **Effect identity is slot identity.** Parameter/adapter-version hashes are compatibility fingerprints, not the dedup identity itself.
+3. **PREPARED is not yet irrevocably dispatchable.** PREPARED → DISPATCHED requires a fresh atomic claim/revalidation step; revocation before that step can cancel/block dispatch.
+4. **A file is not Attempt completion.** Staged blobs can survive a crash as orphans; only an explicit completion record atomically linked with the Attempt/Task transition makes recovery resume verification.
+
+## 6.4 SQLite properties relevant to the architecture
+
+SQLite provides ACID transaction semantics and serializes writers. WAL allows simultaneous readers and a writer on one host.
 
 For Meeseek MVC, the important consequence is that Class A/B local state can be protected by **ordinary database transactions and uniqueness/conditional-update constraints** rather than an additional consensus system.
 
 WAL is explicitly a same-host mechanism and is not suitable as a shared database over a network filesystem. That aligns with the design: SQLite is the single-Cube MVC store, not the future multi-Cube store.
 
-## 6.4 Durability choice
+## 6.5 Durability choice
 
 For the canonical MVC state database, use:
 
@@ -411,7 +470,7 @@ The throughput cost is acceptable for MVC because a PREPARED-before-dispatch rec
 
 Do not place the SQLite database on a network filesystem.
 
-## 6.5 Hybrid state + event log
+## 6.6 Hybrid state + event log
 
 Do **not** make MVC a pure event-sourced system.
 
@@ -423,7 +482,7 @@ Use:
 
 This keeps operational invariants simple while preserving replay/audit history.
 
-## 6.6 Decision from the spike
+## 6.7 Decision from the spike
 
 SQLite is technically suitable as the **single canonical MVC state store**, provided schema and transaction boundaries encode Meeseek invariants explicitly.
 
@@ -439,7 +498,7 @@ A later PostgreSQL adapter may replace the physical store for multi-Cube strong 
 
 ## 7.1 Fit
 
-The official MCP Go SDK supports MCP clients and servers, tools, resources, prompts, transports, cancellation/progress, and security/authorization mechanisms.
+The official MCP Go SDK, pinned above, supports MCP clients and servers, tools, resources, prompts, transports, cancellation/progress, and security/authorization mechanisms.
 
 MCP is a strong interoperability layer for Meeseek because many agentic harnesses can consume MCP tools natively.
 
@@ -464,7 +523,8 @@ For an MCP-capable agentic harness, the preferred architecture is an **attempt-s
 The harness sees only tools relevant to its leased Task/Attempt. Calls flow through Box-owned capability adapters that can enforce:
 
 - Attempt identity;
-- fencing generation;
+- current fencing generation;
+- active/unexpired lease;
 - policy;
 - Commit Boundary;
 - budget/exposure;
@@ -486,7 +546,7 @@ Deterministic local executors do not need to speak MCP internally.
 
 ## 7.4 Go compatibility
 
-The official `modelcontextprotocol/go-sdk` currently declares Go 1.25 as its module language baseline. It is therefore compatible with the proposed current Go baseline for Meeseek.
+The inspected `modelcontextprotocol/go-sdk` module declares Go 1.25 as its module language baseline. It is therefore compatible with the proposed current Go baseline for Meeseek.
 
 ## 7.5 Decision from the spike
 
@@ -560,7 +620,7 @@ The second point is acceptable because Meeseek explicitly treats model/memory im
 
 ## 8.2 Version baseline
 
-As of this design stage, Go 1.27 is the current major stable line. OPA currently declares Go 1.26 and the official MCP Go SDK declares Go 1.25, so Go 1.27 satisfies both baselines.
+As of this design stage, Go 1.27 is the current major stable line. The inspected OPA module declares Go 1.26 and the inspected official MCP Go SDK declares Go 1.25, so Go 1.27 satisfies both baselines.
 
 The implementation should follow a supported Go release rather than freeze permanently to 1.27, but the initial repository baseline can be Go 1.27.
 
@@ -581,7 +641,7 @@ Go Box / semantic core
 │
 ├── SQLite canonical authoritative state
 ├── Meeseek Task/Attempt/External Operation state machines
-├── embedded OPA policy evaluator
+├── embedded OPA policy evaluator (restricted side-effect-free profile)
 ├── deterministic Scheduler
 ├── Commit Boundary + Resource Ledger
 ├── TEB / enforcement-profile abstraction
@@ -615,11 +675,16 @@ The following cannot be honestly closed by architecture/source inspection alone 
 
 1. sandbox/TEB bypass resistance with the supported agentic executor;
 2. executable crash injection between operation preparation, dispatch, acknowledgement and outcome persistence;
-3. actual provider/model egress restriction behavior;
-4. exact Go SQLite driver's power/crash/concurrency behavior under the selected pragmas;
-5. cancellation behavior of each remote executor/provider;
-6. MCP harness compatibility for the first chosen agentic harness;
-7. real cost attribution and hard-cap behavior for the first paid executor/provider.
+3. expired/revoked lease with a still-matching fence cannot perform any authoritative mutation or consequential capability call;
+4. effect-slot parameter/adapter-version drift cannot mint a second protected effect without governed intent revision;
+5. revocation/cancellation between PREPARED and DISPATCHED prevents dispatch, while DISPATCHED is treated as potentially escaped effect;
+6. staged/orphan output without a CompletionRecord cannot be interpreted as successful Attempt completion, while committed CompletionRecord resumes verification after restart;
+7. OPA policy compilation/evaluation rejects forbidden side-effecting built-ins such as `http.send`, is deadline-bounded, and fails closed on error/timeout/invalid output;
+8. actual provider/model egress restriction behavior;
+9. exact Go SQLite driver's power/crash/concurrency behavior under the selected pragmas;
+10. cancellation behavior of each remote executor/provider;
+11. MCP harness compatibility for the first chosen agentic harness;
+12. real cost attribution and hard-cap behavior for the first paid executor/provider.
 
 These become tests/gates in the MVC implementation plan rather than reasons to add more conceptual mechanisms.
 
@@ -628,6 +693,8 @@ These become tests/gates in the MVC implementation plan rather than reasons to a
 ## 11. Exit Gate
 
 These findings are sufficient to make the implementation architecture decisions without selecting a distributed control plane or turning external frameworks into semantic owners.
+
+The five architecture-review findings have been converted into explicit semantic requirements and implementation acceptance tests rather than left for the planner to infer.
 
 Next artifact:
 
