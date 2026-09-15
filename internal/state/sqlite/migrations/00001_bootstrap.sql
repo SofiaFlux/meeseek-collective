@@ -31,7 +31,24 @@ CREATE TABLE collective_metadata (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE policy_sets (
+    policy_set_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL CHECK (version > 0),
+    module_name TEXT NOT NULL,
+    module BLOB NOT NULL,
+    policy_hash TEXT NOT NULL,
+    capabilities_hash TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX policy_sets_one_active
+    ON policy_sets(active)
+    WHERE active = 1;
+
 -- +goose Down
+DROP INDEX policy_sets_one_active;
+DROP TABLE policy_sets;
 DROP TABLE collective_metadata;
 DROP INDEX constitutions_one_active;
 DROP TABLE constitutions;
