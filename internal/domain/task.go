@@ -35,14 +35,20 @@ type PurposeRef struct {
 }
 
 type Task struct {
-	ID                  ID
-	ParentTaskID        ID
-	Purpose             PurposeRef
-	State               TaskState
-	CurrentAttemptID    ID
-	CurrentFence        int64
-	RequiredEnforcement EnforcementLevel
-	ResourceEnvelopeID  ID
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                   ID
+	ParentTaskID         ID
+	Purpose              PurposeRef
+	State                TaskState
+	CurrentAttemptID     ID
+	CurrentFence         int64
+	AcceptanceCriteria   []string
+	RequiredCapabilities []string
+	RequiredEnforcement  EnforcementLevel
+	AuthorityCeiling     []string
+	ResourceEnvelopeID   ID
+	Priority             int
+	EarliestStart        time.Time
+	Deadline             time.Time
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }

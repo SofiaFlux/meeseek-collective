@@ -119,6 +119,16 @@ func (s *Service) ValidatePurpose(ctx context.Context, purpose domain.PurposeRef
 	return validatePurpose(ctx, s.store.DB(), purpose)
 }
 
+func (s *Service) ValidatePurposeTx(ctx context.Context, tx *sql.Tx, purpose domain.PurposeRef) error {
+	if err := s.configured(); err != nil {
+		return err
+	}
+	if tx == nil {
+		return errors.New("purpose validation requires transaction")
+	}
+	return validatePurpose(ctx, tx, purpose)
+}
+
 type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
