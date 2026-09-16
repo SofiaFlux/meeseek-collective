@@ -24,8 +24,11 @@ type AttemptEnvelope struct {
 type EvidenceKind string
 
 const (
-	EvidenceStdout EvidenceKind = "STDOUT"
-	EvidenceStderr EvidenceKind = "STDERR"
+	EvidenceStdout       EvidenceKind = "STDOUT"
+	EvidenceStderr       EvidenceKind = "STDERR"
+	EvidenceCommand      EvidenceKind = "COMMAND"
+	EvidenceFileChange   EvidenceKind = "FILE_CHANGE"
+	EvidenceAgentMessage EvidenceKind = "AGENT_MESSAGE"
 )
 
 type Evidence struct {
@@ -34,7 +37,12 @@ type Evidence struct {
 }
 
 type Usage struct {
-	WallTime time.Duration
+	WallTime              time.Duration
+	InputTokens           int64
+	CachedInputTokens     int64
+	CacheWriteInputTokens int64
+	OutputTokens          int64
+	ReasoningOutputTokens int64
 }
 
 type ExecutionResult struct {
