@@ -53,9 +53,9 @@ func TestUnresolvedExposureStillConsumesBudget(t *testing.T) {
 func TestEstimatedOnlyCannotSatisfyRequiredHardCap(t *testing.T) {
 	svc, ctx, envelopeID := newLedger(t, 100)
 	_, err := svc.Reserve(ctx, envelopeID, 10, Enforceability{
-		CostControl: CostEstimatedOnly,
+		CostControl:    CostEstimatedOnly,
 		RequireHardCap: true,
-		Source: "model-estimate",
+		Source:         "model-estimate",
 	})
 	if !errors.Is(err, ErrHardCapUnavailable) {
 		t.Fatalf("got %v, want ErrHardCapUnavailable", err)
@@ -65,9 +65,9 @@ func TestEstimatedOnlyCannotSatisfyRequiredHardCap(t *testing.T) {
 func TestPotentiallyUnboundedCannotSatisfyRequiredHardCap(t *testing.T) {
 	svc, ctx, envelopeID := newLedger(t, 100)
 	_, err := svc.Reserve(ctx, envelopeID, 10, Enforceability{
-		CostControl: CostPotentiallyOpen,
+		CostControl:    CostPotentiallyOpen,
 		RequireHardCap: true,
-		Source: "remote-executor",
+		Source:         "remote-executor",
 	})
 	if !errors.Is(err, ErrHardCapUnavailable) {
 		t.Fatalf("got %v, want ErrHardCapUnavailable", err)

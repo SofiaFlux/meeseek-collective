@@ -44,6 +44,25 @@ func (s *Service) Reserve(ctx context.Context, envelopeID domain.ID, amount int6
 	if err := s.configured(); err != nil {
 		return domain.Reservation{}, err
 	}
+	var reservation domain.Reservation
+	err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		reservation, err = s.ReserveInTx(ctx, tx, envelopeID, amount, enforceability)
+		return err
+	})
+	return reservation, err
+}
+
+// ReserveInTx applies the same ledger invariants as Reserve while participating
+// in a caller-owned trusted transaction. It exists so commit-boundary services
+// can bind budget exposure atomically to their own durable state.
+func (s *Service) ReserveInTx(ctx context.Context, tx *sql.Tx, envelopeID domain.ID, amount int64, enforceability Enforceability) (domain.Reservation, error) {
+	if err := s.configured(); err != nil {
+		return domain.Reservation{}, err
+	}
+	if tx == nil {
+		return domain.Reservation{}, errors.New("resource reservation requires transaction")
+	}
 	if err := validateReservationRequest(envelopeID, amount, enforceability); err != nil {
 		return domain.Reservation{}, err
 	}
@@ -53,26 +72,22 @@ func (s *Service) Reserve(ctx context.Context, envelopeID domain.ID, amount int6
 		ID: domain.NewID("reservation"), EnvelopeID: envelopeID, State: domain.ReservationHeld,
 		Amount: amount, CreatedAt: now, UpdatedAt: now,
 	}
-	err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		available, err := availableIn(ctx, tx, envelopeID)
-		if err != nil {
-			return err
-		}
-		if amount > available {
-			return fmt.Errorf("%w: requested=%d available=%d", domain.ErrBudgetExceeded, amount, available)
-		}
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO resource_reservations(
-				reservation_id, envelope_id, state, reserved_amount, settled_amount,
-				cost_control, cost_source, require_hard_cap, created_at, updated_at
-			) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-			reservation.ID, reservation.EnvelopeID, reservation.State, reservation.Amount,
-			enforceability.CostControl, strings.TrimSpace(enforceability.Source), boolInt(enforceability.RequireHardCap),
-			formatTime(now), formatTime(now),
-		)
-		return err
-	})
+	available, err := availableIn(ctx, tx, envelopeID)
 	if err != nil {
+		return domain.Reservation{}, err
+	}
+	if amount > available {
+		return domain.Reservation{}, fmt.Errorf("%w: requested=%d available=%d", domain.ErrBudgetExceeded, amount, available)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO resource_reservations(
+			reservation_id, envelope_id, state, reserved_amount, settled_amount,
+			cost_control, cost_source, require_hard_cap, created_at, updated_at
+		) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+		reservation.ID, reservation.EnvelopeID, reservation.State, reservation.Amount,
+		enforceability.CostControl, strings.TrimSpace(enforceability.Source), boolInt(enforceability.RequireHardCap),
+		formatTime(now), formatTime(now),
+	); err != nil {
 		return domain.Reservation{}, err
 	}
 	return reservation, nil
@@ -82,87 +97,117 @@ func (s *Service) Settle(ctx context.Context, reservationID domain.ID, actualAmo
 	if err := s.configured(); err != nil {
 		return err
 	}
+	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		return s.SettleInTx(ctx, tx, reservationID, actualAmount)
+	})
+}
+
+func (s *Service) SettleInTx(ctx context.Context, tx *sql.Tx, reservationID domain.ID, actualAmount int64) error {
+	if err := s.configured(); err != nil {
+		return err
+	}
+	if tx == nil {
+		return errors.New("resource settlement requires transaction")
+	}
 	if reservationID == "" || actualAmount < 0 {
 		return errors.New("reservation id and non-negative actual amount are required")
 	}
 	now := s.clock.Now().UTC()
-	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		stateValue, settledAmount, err := loadReservationState(ctx, tx, reservationID)
-		if err != nil {
-			return err
+	stateValue, settledAmount, err := loadReservationState(ctx, tx, reservationID)
+	if err != nil {
+		return err
+	}
+	switch stateValue {
+	case domain.ReservationSettled:
+		if settledAmount.Valid && settledAmount.Int64 == actualAmount {
+			return nil
 		}
-		switch stateValue {
-		case domain.ReservationSettled:
-			if settledAmount.Valid && settledAmount.Int64 == actualAmount {
-				return nil
-			}
-			return errors.New("reservation already settled with a different actual amount")
-		case domain.ReservationHeld, domain.ReservationUnresolved:
-			_, err := tx.ExecContext(ctx,
-				`UPDATE resource_reservations SET state = ?, settled_amount = ?, updated_at = ? WHERE reservation_id = ?`,
-				domain.ReservationSettled, actualAmount, formatTime(now), reservationID,
-			)
-			return err
-		default:
-			return fmt.Errorf("cannot settle reservation in state %s", stateValue)
-		}
-	})
+		return errors.New("reservation already settled with a different actual amount")
+	case domain.ReservationHeld, domain.ReservationUnresolved:
+		_, err := tx.ExecContext(ctx,
+			`UPDATE resource_reservations SET state = ?, settled_amount = ?, updated_at = ? WHERE reservation_id = ?`,
+			domain.ReservationSettled, actualAmount, formatTime(now), reservationID,
+		)
+		return err
+	default:
+		return fmt.Errorf("cannot settle reservation in state %s", stateValue)
+	}
 }
 
 func (s *Service) MarkUnresolved(ctx context.Context, reservationID domain.ID) error {
 	if err := s.configured(); err != nil {
 		return err
 	}
+	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		return s.MarkUnresolvedInTx(ctx, tx, reservationID)
+	})
+}
+
+func (s *Service) MarkUnresolvedInTx(ctx context.Context, tx *sql.Tx, reservationID domain.ID) error {
+	if err := s.configured(); err != nil {
+		return err
+	}
+	if tx == nil {
+		return errors.New("mark unresolved requires transaction")
+	}
 	if reservationID == "" {
 		return errors.New("reservation id is required")
 	}
 	now := s.clock.Now().UTC()
-	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		stateValue, _, err := loadReservationState(ctx, tx, reservationID)
-		if err != nil {
-			return err
-		}
-		switch stateValue {
-		case domain.ReservationUnresolved:
-			return nil
-		case domain.ReservationHeld:
-			_, err := tx.ExecContext(ctx,
-				`UPDATE resource_reservations SET state = ?, updated_at = ? WHERE reservation_id = ?`,
-				domain.ReservationUnresolved, formatTime(now), reservationID,
-			)
-			return err
-		default:
-			return fmt.Errorf("cannot mark reservation unresolved from state %s", stateValue)
-		}
-	})
+	stateValue, _, err := loadReservationState(ctx, tx, reservationID)
+	if err != nil {
+		return err
+	}
+	switch stateValue {
+	case domain.ReservationUnresolved:
+		return nil
+	case domain.ReservationHeld:
+		_, err := tx.ExecContext(ctx,
+			`UPDATE resource_reservations SET state = ?, updated_at = ? WHERE reservation_id = ?`,
+			domain.ReservationUnresolved, formatTime(now), reservationID,
+		)
+		return err
+	default:
+		return fmt.Errorf("cannot mark reservation unresolved from state %s", stateValue)
+	}
 }
 
 func (s *Service) Release(ctx context.Context, reservationID domain.ID) error {
 	if err := s.configured(); err != nil {
 		return err
 	}
+	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		return s.ReleaseInTx(ctx, tx, reservationID)
+	})
+}
+
+func (s *Service) ReleaseInTx(ctx context.Context, tx *sql.Tx, reservationID domain.ID) error {
+	if err := s.configured(); err != nil {
+		return err
+	}
+	if tx == nil {
+		return errors.New("resource release requires transaction")
+	}
 	if reservationID == "" {
 		return errors.New("reservation id is required")
 	}
 	now := s.clock.Now().UTC()
-	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		stateValue, _, err := loadReservationState(ctx, tx, reservationID)
-		if err != nil {
-			return err
-		}
-		switch stateValue {
-		case domain.ReservationReleased:
-			return nil
-		case domain.ReservationHeld, domain.ReservationUnresolved:
-			_, err := tx.ExecContext(ctx,
-				`UPDATE resource_reservations SET state = ?, updated_at = ? WHERE reservation_id = ?`,
-				domain.ReservationReleased, formatTime(now), reservationID,
-			)
-			return err
-		default:
-			return fmt.Errorf("cannot release reservation in state %s", stateValue)
-		}
-	})
+	stateValue, _, err := loadReservationState(ctx, tx, reservationID)
+	if err != nil {
+		return err
+	}
+	switch stateValue {
+	case domain.ReservationReleased:
+		return nil
+	case domain.ReservationHeld, domain.ReservationUnresolved:
+		_, err := tx.ExecContext(ctx,
+			`UPDATE resource_reservations SET state = ?, updated_at = ? WHERE reservation_id = ?`,
+			domain.ReservationReleased, formatTime(now), reservationID,
+		)
+		return err
+	default:
+		return fmt.Errorf("cannot release reservation in state %s", stateValue)
+	}
 }
 
 func (s *Service) Available(ctx context.Context, envelopeID domain.ID) (int64, error) {

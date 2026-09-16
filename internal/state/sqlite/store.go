@@ -4,12 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"strings"
 
+	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	_ "modernc.org/sqlite"
 )
+
+const policyProfileInactiveMarker = "MEESEEK_POLICY_PROFILE_INACTIVE"
 
 type Store struct {
 	db *sql.DB
@@ -84,11 +88,21 @@ func (s *Store) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	}()
 
 	if err := fn(tx); err != nil {
-		return err
+		return mapCanonicalInvariantError(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return mapCanonicalInvariantError(err)
 	}
 	committed = true
 	return nil
+}
+
+func mapCanonicalInvariantError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), policyProfileInactiveMarker) {
+		return fmt.Errorf("%w: active policy profile no longer matches decision: %v", domain.ErrPolicyDenied, err)
+	}
+	return err
 }
