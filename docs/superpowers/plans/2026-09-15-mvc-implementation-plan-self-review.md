@@ -317,3 +317,9 @@ runtime.NewBox / Run / Close
 ```
 
 Implementation must use these names unless a reviewer-approved plan amendment changes them before the dependent task starts.
+
+## 10. Task 16 OpenTelemetry dependency compatibility correction
+
+The main plan's Task 16 command pins `go.opentelemetry.io/otel@v1.44.0`. That version cannot coexist with the already normative OPA `v1.20.2` pin: OPA `v1.20.2` declares `go.opentelemetry.io/otel v1.46.0` and `go.opentelemetry.io/otel/trace v1.46.0` as module requirements, and Go rejects an explicit simultaneous request for OPA `v1.20.2` plus OTel `v1.44.0`.
+
+Task 16 therefore uses OTel `v1.46.0` while preserving OPA `v1.20.2`. This compatibility correction supersedes only the `v1.44.0` version literal in Task 16; it does not change the observability semantics: export remains optional/no-op by default, telemetry references canonical ids, and SQLite/EvidenceStore audit remains authoritative.
