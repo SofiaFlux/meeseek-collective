@@ -1,0 +1,431 @@
+package control
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/SofiaFlux/meeseek-collective/internal/domain"
+	"github.com/SofiaFlux/meeseek-collective/internal/execution"
+)
+
+type StatusDTO struct {
+	CollectiveID     domain.ID `json:"collective_id"`
+	State            string    `json:"state"`
+	ActiveTasks      int       `json:"active_tasks,omitempty"`
+	ActiveAttempts   int       `json:"active_attempts,omitempty"`
+	PendingApprovals int       `json:"pending_approvals,omitempty"`
+}
+
+type CreateTaskRequest struct {
+	Purpose              domain.PurposeRef       `json:"purpose"`
+	AcceptanceCriteria   []string                `json:"acceptance_criteria"`
+	RequiredCapabilities []string                `json:"required_capabilities,omitempty"`
+	RequiredEnforcement  domain.EnforcementLevel `json:"required_enforcement"`
+	AuthorityCeiling     []string                `json:"authority_ceiling,omitempty"`
+	ResourceEnvelopeID   domain.ID               `json:"resource_envelope_id"`
+	Priority             int                     `json:"priority"`
+	EarliestStart        time.Time               `json:"earliest_start,omitempty"`
+	Deadline             time.Time               `json:"deadline,omitempty"`
+}
+
+type TaskDTO struct {
+	ID                   domain.ID               `json:"id"`
+	ParentTaskID         domain.ID               `json:"parent_task_id,omitempty"`
+	Purpose              domain.PurposeRef       `json:"purpose"`
+	State                domain.TaskState        `json:"state"`
+	CurrentAttemptID     domain.ID               `json:"current_attempt_id,omitempty"`
+	CurrentFence         int64                   `json:"current_fence"`
+	AcceptanceCriteria   []string                `json:"acceptance_criteria,omitempty"`
+	RequiredCapabilities []string                `json:"required_capabilities,omitempty"`
+	RequiredEnforcement  domain.EnforcementLevel `json:"required_enforcement"`
+	AuthorityCeiling     []string                `json:"authority_ceiling,omitempty"`
+	ResourceEnvelopeID   domain.ID               `json:"resource_envelope_id,omitempty"`
+	Priority             int                     `json:"priority"`
+	EarliestStart        time.Time               `json:"earliest_start,omitempty"`
+	Deadline             time.Time               `json:"deadline,omitempty"`
+	CreatedAt            time.Time               `json:"created_at,omitempty"`
+	UpdatedAt            time.Time               `json:"updated_at,omitempty"`
+}
+
+type AttemptDTO struct {
+	ID              domain.ID           `json:"id"`
+	TaskID          domain.ID           `json:"task_id"`
+	State           domain.AttemptState `json:"state"`
+	FenceGeneration int64               `json:"fence_generation"`
+	LeaseState      domain.LeaseState   `json:"lease_state"`
+	LeaseExpiresAt  time.Time           `json:"lease_expires_at,omitempty"`
+	ExecutorKind    string              `json:"executor_kind,omitempty"`
+	StartedAt       time.Time           `json:"started_at,omitempty"`
+	CompletedAt     time.Time           `json:"completed_at,omitempty"`
+}
+
+type OperationDTO struct {
+	ID                domain.ID             `json:"id"`
+	TaskID            domain.ID             `json:"task_id"`
+	AttemptID         domain.ID             `json:"attempt_id"`
+	EffectSlotID      domain.ID             `json:"effect_slot_id,omitempty"`
+	State             domain.OperationState `json:"state"`
+	IntentFingerprint string                `json:"intent_fingerprint,omitempty"`
+	IntentRevision    int64                 `json:"intent_revision,omitempty"`
+	Provider          string                `json:"provider,omitempty"`
+	ProviderReference string                `json:"provider_reference,omitempty"`
+	ReservationID     domain.ID             `json:"reservation_id,omitempty"`
+	CreatedAt         time.Time             `json:"created_at,omitempty"`
+	DispatchedAt      time.Time             `json:"dispatched_at,omitempty"`
+	SettledAt         time.Time             `json:"settled_at,omitempty"`
+}
+
+type ApprovalChallengeDTO struct {
+	Challenge     string `json:"challenge"`
+	RequestDigest string `json:"request_digest"`
+}
+
+type ApprovalRequest struct {
+	Challenge string `json:"challenge"`
+	Signature string `json:"signature"`
+}
+
+type ApprovalDTO struct {
+	ApprovalID domain.ID `json:"approval_id"`
+	ApprovedBy domain.ID `json:"approved_by"`
+	Status     string    `json:"status"`
+}
+
+type StatusProvider interface {
+	Status(context.Context) (StatusDTO, error)
+}
+
+type TaskService interface {
+	CreateTask(context.Context, execution.TaskRequest) (domain.Task, error)
+	Task(context.Context, domain.ID) (domain.Task, error)
+}
+
+type ApprovalService interface {
+	Approve(context.Context, domain.ID, domain.ID) error
+}
+
+type AttemptReader interface {
+	Attempt(context.Context, domain.ID) (domain.Attempt, error)
+}
+
+type OperationReader interface {
+	Operation(context.Context, domain.ID) (domain.ExternalOperation, error)
+}
+
+type ShutdownService interface {
+	RequestShutdown(context.Context) error
+}
+
+type Dependencies struct {
+	Status     StatusProvider
+	Tasks      TaskService
+	Approvals  ApprovalService
+	Attempts   AttemptReader
+	Operations OperationReader
+	Shutdown   ShutdownService
+}
+
+type ServerConfig struct {
+	AuthToken        string
+	OwnerPrincipalID domain.ID
+	OwnerPublicKey   ed25519.PublicKey
+	ChallengeTTL     time.Duration
+}
+
+type challengeState struct {
+	value   string
+	digest  string
+	expires time.Time
+}
+
+type Server struct {
+	config     ServerConfig
+	deps       Dependencies
+	handler    http.Handler
+	httpServer *http.Server
+
+	mu         sync.Mutex
+	challenges map[domain.ID]challengeState
+}
+
+func NewServer(config ServerConfig, deps Dependencies) (*Server, error) {
+	config.AuthToken = strings.TrimSpace(config.AuthToken)
+	config.OwnerPrincipalID = domain.ID(strings.TrimSpace(string(config.OwnerPrincipalID)))
+	if config.AuthToken == "" {
+		return nil, errors.New("control auth token is required")
+	}
+	if config.OwnerPrincipalID == "" || len(config.OwnerPublicKey) != ed25519.PublicKeySize {
+		return nil, errors.New("Owner principal id and Ed25519 public key are required")
+	}
+	if config.ChallengeTTL <= 0 {
+		return nil, errors.New("positive approval challenge TTL is required")
+	}
+	if deps.Status == nil || deps.Tasks == nil || deps.Approvals == nil || deps.Attempts == nil || deps.Operations == nil || deps.Shutdown == nil {
+		return nil, errors.New("all control dependencies are required")
+	}
+
+	s := &Server{config: config, deps: deps, challenges: make(map[domain.ID]challengeState)}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.HandleFunc("POST /tasks", s.handleCreateTask)
+	mux.HandleFunc("GET /tasks/{id}", s.handleTask)
+	mux.HandleFunc("GET /approvals/{id}/challenge", s.handleApprovalChallenge)
+	mux.HandleFunc("POST /approvals/{id}", s.handleApproval)
+	mux.HandleFunc("GET /inspect/attempts/{id}", s.handleAttempt)
+	mux.HandleFunc("GET /inspect/operations/{id}", s.handleOperation)
+	mux.HandleFunc("POST /shutdown", s.handleShutdown)
+	s.handler = s.authenticate(mux)
+	s.httpServer = &http.Server{Handler: s.handler}
+	return s, nil
+}
+
+func (s *Server) Handler() http.Handler {
+	return s.handler
+}
+
+func (s *Server) Serve(listener net.Listener) error {
+	if listener == nil {
+		return errors.New("control listener is required")
+	}
+	err := s.httpServer.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func (s *Server) Close(ctx context.Context) error {
+	return s.httpServer.Shutdown(ctx)
+}
+
+func (s *Server) authenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const prefix = "Bearer "
+		header := r.Header.Get("Authorization")
+		if !strings.HasPrefix(header, prefix) || !constantTimeEqual(strings.TrimSpace(strings.TrimPrefix(header, prefix)), s.config.AuthToken) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func constantTimeEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func ApprovalSigningMessage(challenge, requestDigest string) []byte {
+	return []byte("meeseek-owner-approval-v1\nchallenge:" + challenge + "\nrequest-digest:" + requestDigest + "\n")
+}
+
+func approvalRequestDigest(id domain.ID) string {
+	digest := sha256.Sum256([]byte("meeseek-approval-v1\napproval-id:" + string(id) + "\naction:APPROVE\n"))
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := s.deps.Status.Status(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
+	var request CreateTaskRequest
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	task, err := s.deps.Tasks.CreateTask(r.Context(), execution.TaskRequest{
+		Purpose: request.Purpose, AcceptanceCriteria: request.AcceptanceCriteria,
+		RequiredCapabilities: request.RequiredCapabilities, RequiredEnforcement: request.RequiredEnforcement,
+		AuthorityCeiling: request.AuthorityCeiling, ResourceEnvelopeID: request.ResourceEnvelopeID,
+		Priority: request.Priority, EarliestStart: request.EarliestStart, Deadline: request.Deadline,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, taskDTO(task))
+}
+
+func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	task, err := s.deps.Tasks.Task(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, taskDTO(task))
+}
+
+func (s *Server) handleApprovalChallenge(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		writeError(w, http.StatusInternalServerError, "generate approval challenge")
+		return
+	}
+	state := challengeState{
+		value:   base64.RawURLEncoding.EncodeToString(raw[:]),
+		digest:  approvalRequestDigest(id),
+		expires: time.Now().UTC().Add(s.config.ChallengeTTL),
+	}
+	s.mu.Lock()
+	s.challenges[id] = state
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, ApprovalChallengeDTO{Challenge: state.value, RequestDigest: state.digest})
+}
+
+func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var request ApprovalRequest
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(request.Signature))
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		writeError(w, http.StatusForbidden, "invalid Owner signature")
+		return
+	}
+
+	s.mu.Lock()
+	state, exists := s.challenges[id]
+	if !exists || time.Now().UTC().After(state.expires) || !constantTimeEqual(request.Challenge, state.value) || state.digest != approvalRequestDigest(id) {
+		s.mu.Unlock()
+		writeError(w, http.StatusForbidden, "invalid or expired approval challenge")
+		return
+	}
+	if !ed25519.Verify(s.config.OwnerPublicKey, ApprovalSigningMessage(state.value, state.digest), signature) {
+		s.mu.Unlock()
+		writeError(w, http.StatusForbidden, "invalid Owner signature")
+		return
+	}
+	delete(s.challenges, id)
+	s.mu.Unlock()
+
+	if err := s.deps.Approvals.Approve(r.Context(), id, s.config.OwnerPrincipalID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ApprovalDTO{ApprovalID: id, ApprovedBy: s.config.OwnerPrincipalID, Status: "APPROVED"})
+}
+
+func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	attempt, err := s.deps.Attempts.Attempt(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, attemptDTO(attempt))
+}
+
+func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	operation, err := s.deps.Operations.Operation(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, operationDTO(operation))
+}
+
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if err := s.deps.Shutdown.RequestShutdown(r.Context()); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "SHUTDOWN_REQUESTED"})
+}
+
+func pathID(w http.ResponseWriter, r *http.Request) (domain.ID, bool) {
+	id := domain.ID(strings.TrimSpace(r.PathValue("id")))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return "", false
+	}
+	return id, true
+}
+
+func decodeBody(r *http.Request, target any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("decode request: %w", err)
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func taskDTO(task domain.Task) TaskDTO {
+	return TaskDTO{
+		ID: task.ID, ParentTaskID: task.ParentTaskID, Purpose: task.Purpose, State: task.State,
+		CurrentAttemptID: task.CurrentAttemptID, CurrentFence: task.CurrentFence,
+		AcceptanceCriteria:   append([]string(nil), task.AcceptanceCriteria...),
+		RequiredCapabilities: append([]string(nil), task.RequiredCapabilities...), RequiredEnforcement: task.RequiredEnforcement,
+		AuthorityCeiling: append([]string(nil), task.AuthorityCeiling...), ResourceEnvelopeID: task.ResourceEnvelopeID,
+		Priority: task.Priority, EarliestStart: task.EarliestStart, Deadline: task.Deadline,
+		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
+	}
+}
+
+func attemptDTO(attempt domain.Attempt) AttemptDTO {
+	return AttemptDTO{
+		ID: attempt.ID, TaskID: attempt.TaskID, State: attempt.State, FenceGeneration: attempt.FenceGeneration,
+		LeaseState: attempt.LeaseState, LeaseExpiresAt: attempt.LeaseExpiresAt, ExecutorKind: attempt.ExecutorKind,
+		StartedAt: attempt.StartedAt, CompletedAt: attempt.CompletedAt,
+	}
+}
+
+func operationDTO(operation domain.ExternalOperation) OperationDTO {
+	return OperationDTO{
+		ID: operation.ID, TaskID: operation.TaskID, AttemptID: operation.AttemptID, EffectSlotID: operation.EffectSlotID,
+		State: operation.State, IntentFingerprint: operation.IntentFingerprint, IntentRevision: operation.IntentRevision,
+		Provider: operation.Provider, ProviderReference: operation.ProviderReference, ReservationID: operation.ReservationID,
+		CreatedAt: operation.CreatedAt, DispatchedAt: operation.DispatchedAt, SettledAt: operation.SettledAt,
+	}
+}

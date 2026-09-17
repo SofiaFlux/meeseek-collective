@@ -5,6 +5,7 @@ go 1.27.0
 toolchain go1.27.1
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/open-policy-agent/opa v1.20.2
 	github.com/pressly/goose/v3 v3.27.2
