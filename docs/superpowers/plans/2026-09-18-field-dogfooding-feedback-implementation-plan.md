@@ -516,6 +516,7 @@ func (s *Observer) Record(context.Context, ObservationInput) (domain.FieldObserv
 func (s *Observer) Observation(context.Context, domain.ID) (domain.FieldObservation, error)
 func (s *Observer) ForTask(context.Context, domain.ID) ([]domain.FieldObservation, error)
 func (s *Observer) Detect(context.Context, DetectorInput) ([]domain.FieldObservation, error)
+func (s *Observer) Scan(context.Context) ([]domain.FieldObservation, error)
 ```
 
 - [ ] **Step 1: Write RED validation/provenance tests**
@@ -545,7 +546,10 @@ Implement high-signal detectors only:
 - repeated policy/authority denial event;
 - unresolved operation/reconciliation;
 - explicit human intervention event;
-- verification challenge after earlier acceptance where canonical evidence exists.
+- verification challenge after earlier acceptance where canonical evidence exists;
+- cost/latency outlier only when at least five comparable local verified outcomes exist; missing cost/latency is ignored rather than treated as zero.
+
+`Scan` reads existing canonical execution events, acceptance/challenge state, external-operation state, and resource ledger data. It may rescan historical rows; detector keys make observation creation idempotent. Do not add a second event bus or background mutation channel.
 
 Do not implement model-based detectors in this task.
 
@@ -1018,6 +1022,7 @@ Control routes:
 - `GET /feedback/{id}`
 - `POST /feedback/{id}/emit`
 - `POST /feedback/observations` (local-only operator observation; never an export endpoint)
+- `POST /feedback/scan` (idempotent scan of canonical runtime state/events)
 - `GET /approvals`
 - `GET /approvals/{id}`
 
@@ -1026,6 +1031,7 @@ CLI:
 - `meeseek feedback inspect <id>`
 - `meeseek feedback emit <id>`
 - `meeseek feedback observe --category <category> --summary <local-sensitive-summary> [--task <id>]`
+- `meeseek feedback scan`
 - `meeseek approvals list`
 - existing `approve`
 - new `reject`
@@ -1049,7 +1055,7 @@ Prove human output labels:
 - `SANITIZED EXPORT ARTIFACT`
 and emit says it scheduled governed work rather than “sent issue”.
 
-`feedback observe` output must label the created record `LOCAL — DO NOT EXPORT`; the summary is sent only over the authenticated local control socket and is stored only in local observation state.
+`feedback observe` output must label the created record `LOCAL — DO NOT EXPORT`; the summary is sent only over the authenticated local control socket and is stored only in local observation state. `feedback scan` reports only created observation IDs/categories, never local summaries.
 
 - [ ] **Step 3: Run RED**
 
@@ -1288,6 +1294,8 @@ git commit -m "feat: apply learned preference after scheduler eligibility"
 - Modify: `internal/runtime/box.go`
 - Modify: `cmd/meeseek-box/main.go`
 - Modify: `cmd/meeseek-box/main_test.go`
+- Modify: `internal/observability/otel.go`
+- Modify: `internal/observability/otel_test.go`
 - Modify: `README.md`
 
 **Interfaces:**
@@ -1318,11 +1326,27 @@ Construct the feedback provider first, then `fieldfeedback.EmitExecutor`, and re
 
 Production `AUTO_IF_ALLOWED` means the feedback Task is created automatically. It is dispatched only when the normal worker/orchestration driver leases and runs it; this feature must not invent a second hidden scheduler.
 
-- [ ] **Step 4: Wire detector/event hooks conservatively**
+- [ ] **Step 4: Wire canonical scanning, not a second event bus**
 
-Do not create a new event bus. At this stage invoke deterministic observation detection at explicit lifecycle points where canonical state already exists (verification completion, failed/replacement attempt, operation reconciliation, explicit operator intervention). Keep hooks idempotent.
+Wire `FieldObserver.Scan` into the control service used by `meeseek feedback scan`. The scanner reads canonical state/events and remains idempotent; it does not subscribe to an in-memory event bus and does not make primary Task acceptance depend on feedback logic.
 
-- [ ] **Step 5: Add safe runtime config documentation**
+The normal Collective/orchestration layer may invoke this scan after work batches or from future scheduled maintenance. This feature does not invent an independent hidden scheduler.
+
+- [ ] **Step 5: Add safe observability spans**
+
+Extend `observability.Bridge` with:
+
+```go
+func (b *Bridge) StartFeedback(ctx context.Context, feedbackID domain.ID, phase string) (context.Context, trace.Span)
+func (b *Bridge) StartSanitization(ctx context.Context, candidateID domain.ID) (context.Context, trace.Span)
+func (b *Bridge) StartExperienceRule(ctx context.Context, ruleID domain.ID, phase string) (context.Context, trace.Span)
+```
+
+Attributes may contain IDs, category/phase, state, and sanitizer/rule version. They must not contain local summaries, paths, candidate free text, tokens, GitHub credentials, or raw evidence.
+
+Audit events remain the canonical lifecycle record; OTel is operational telemetry only.
+
+- [ ] **Step 6: Add safe runtime config documentation**
 
 README must state:
 - dogfooding disabled + LOCAL_ONLY by default;
@@ -1332,16 +1356,16 @@ README must state:
 - local experience requires explicit AdaptationGrant;
 - no source-code self-modification.
 
-- [ ] **Step 6: Run component regression**
+- [ ] **Step 7: Run component regression**
 
 ```bash
 go test ./internal/runtime ./cmd/meeseek-box ./internal/control -count=1
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add internal/runtime cmd/meeseek-box README.md
+git add internal/runtime cmd/meeseek-box internal/observability README.md
 git commit -m "feat: compose field dogfooding runtime"
 ```
 
@@ -1364,7 +1388,8 @@ Exact flow:
 
 ```text
 realistic Task
--> failed/retried Attempt creates local observation
+-> canonical events/state record failed/retried Attempt
+-> feedback scan creates local observation
 -> FeedbackCandidate
 -> deterministic sanitizer PASS
 -> immutable SanitizedFeedback
@@ -1471,6 +1496,35 @@ Run the Superpowers requesting-code-review workflow over the entire diff from `m
 Do **not** merge this branch. The next external gate is the requested Astra review of the complete Collective implementation.
 
 ---
+
+## Spec Coverage Matrix
+
+| Spec section | Implementation task(s) |
+| --- | --- |
+| 1 Context / existing architecture | Tasks 1–3, 7–9, 13 |
+| 2 Goals | Tasks 1–14 |
+| 3 Non-goals | Global Constraints, Task 14 reviewer gate |
+| 4 Architectural principles | Tasks 2–3, 6–8, 11–12, 14 |
+| 5 High-level data flow | Tasks 4–8, 13–14 |
+| 6 Domain model | Tasks 1–2, 5–6, 11 |
+| 7 Observation capture | Tasks 4, 10, 13 |
+| 8 Sanitization/declassification | Task 6 |
+| 9 Feedback export | Tasks 7–10, 13–14 |
+| 10 Durable approval integration | Tasks 2–3, 10, 13–14 |
+| 11 Dedup/correlation | Tasks 5, 8–9, 14 |
+| 12 Local experience / earned adaptation | Tasks 11–12, 14 |
+| 13 Work discovery semantics | Tasks 4, 14 |
+| 14 Security/privacy invariants | Tasks 2–3, 6–9, 12–14 |
+| 15 Persistence | Task 1 |
+| 16 Services/Box composition | Tasks 4–13 |
+| 17 Control/CLI | Tasks 2, 10–11 |
+| 18 Configuration | Tasks 7, 9, 13 |
+| 19 Observability/audit/economics | Tasks 4, 8, 11, 13–14 |
+| 20 Failure/recovery | Tasks 2–3, 6, 8–9, 11, 14 |
+| 21 Testing | Every task; full acceptance in Task 14 |
+| 22 Delivery scope before Astra | Tasks 1–14 |
+| 23 Future Maintainer Collective | Explicitly deferred by Global Constraints |
+| 24 Acceptance criteria | Task 14 closure ledger |
 
 ## Plan Self-Review Checklist
 
