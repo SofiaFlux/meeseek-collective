@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,22 +8,11 @@ import (
 
 	"github.com/SofiaFlux/meeseek-collective/internal/bootstrap"
 	"github.com/SofiaFlux/meeseek-collective/internal/clock"
-	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/identity"
+	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
 	state "github.com/SofiaFlux/meeseek-collective/internal/state/sqlite"
 	"github.com/spf13/cobra"
 )
-
-type localConfig struct {
-	Version                       int       `json:"version"`
-	CollectiveID                  domain.ID `json:"collective_id"`
-	OwnerPrincipalID              domain.ID `json:"owner_principal_id"`
-	CubePrincipalID               domain.ID `json:"cube_principal_id"`
-	ConstitutionalRootPrincipalID domain.ID `json:"constitutional_root_principal_id"`
-	ConstitutionHash              string    `json:"constitution_hash"`
-	DatabasePath                  string    `json:"database_path"`
-	EvidencePath                  string    `json:"evidence_path"`
-}
 
 func NewInitCommand() *cobra.Command {
 	var home string
@@ -33,13 +21,9 @@ func NewInitCommand() *cobra.Command {
 		Short: "Initialize a local Meeseek Collective",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			resolvedHome := home
-			if resolvedHome == "" {
-				userHome, err := os.UserHomeDir()
-				if err != nil {
-					return err
-				}
-				resolvedHome = filepath.Join(userHome, ".meeseek")
+			resolvedHome, err := localconfig.ResolveHome(home)
+			if err != nil {
+				return err
 			}
 			return initCollective(command, resolvedHome)
 		},
@@ -49,7 +33,7 @@ func NewInitCommand() *cobra.Command {
 }
 
 func initCollective(command *cobra.Command, home string) error {
-	home, err := filepath.Abs(home)
+	home, err := localconfig.ResolveHome(home)
 	if err != nil {
 		return err
 	}
@@ -100,18 +84,23 @@ func initCollective(command *cobra.Command, home string) error {
 	if err != nil {
 		return err
 	}
-
-	config := localConfig{
-		Version:                       1,
+	controlToken, err := localconfig.NewControlToken()
+	if err != nil {
+		return err
+	}
+	config := localconfig.Config{
+		Version:                       localconfig.CurrentVersion,
 		CollectiveID:                  result.CollectiveID,
 		OwnerPrincipalID:              result.OwnerPrincipalID,
 		CubePrincipalID:               result.CubePrincipalID,
 		ConstitutionalRootPrincipalID: result.ConstitutionalRootPrincipalID,
 		ConstitutionHash:              result.ConstitutionHash,
+		ActivePolicySetID:             result.PolicySetID,
 		DatabasePath:                  dbPath,
 		EvidencePath:                  evidenceDir,
+		ControlToken:                  controlToken,
 	}
-	if err := writeJSONAtomic(configPath, config); err != nil {
+	if err := localconfig.Write(home, config); err != nil {
 		return err
 	}
 
@@ -121,39 +110,6 @@ func initCollective(command *cobra.Command, home string) error {
 	fmt.Fprintf(out, "cube_principal_id=%s\n", result.CubePrincipalID)
 	fmt.Fprintf(out, "constitutional_root_principal_id=%s\n", result.ConstitutionalRootPrincipalID)
 	fmt.Fprintf(out, "constitution_hash=%s\n", result.ConstitutionHash)
-	return nil
-}
-
-func writeJSONAtomic(path string, value any) error {
-	file, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := file.Name()
-	cleanup := true
-	defer func() {
-		_ = file.Close()
-		if cleanup {
-			_ = os.Remove(tempPath)
-		}
-	}()
-	if err := file.Chmod(0o600); err != nil {
-		return err
-	}
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(value); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return err
-	}
-	cleanup = false
+	fmt.Fprintf(out, "policy_set_id=%s\n", result.PolicySetID)
 	return nil
 }

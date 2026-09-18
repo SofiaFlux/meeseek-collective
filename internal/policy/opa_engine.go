@@ -35,6 +35,12 @@ type OPAEngine struct {
 	timeout                 time.Duration
 }
 
+type OPAMetadata struct {
+	PolicySetID            domain.ID
+	PolicySetHash          string
+	PolicyCapabilitiesHash string
+}
+
 type rawDecision struct {
 	Outcome           domain.PolicyOutcome `json:"outcome"`
 	Limits            map[string]any       `json:"limits,omitempty"`
@@ -93,6 +99,20 @@ func NewOPAEngine(cfg OPAConfig) *OPAEngine {
 	}
 	engine.prepared = prepared
 	return engine
+}
+
+func (e *OPAEngine) Metadata() (OPAMetadata, error) {
+	if e == nil {
+		return OPAMetadata{}, errors.New("OPA engine is not configured")
+	}
+	if e.prepareErr != nil {
+		return OPAMetadata{}, e.prepareErr
+	}
+	return OPAMetadata{
+		PolicySetID:            e.policySetID,
+		PolicySetHash:          e.policySetHash,
+		PolicyCapabilitiesHash: e.policyCapabilitiesHash,
+	}, nil
 }
 
 func (e *OPAEngine) Evaluate(ctx context.Context, in PolicyInput) (domain.PolicyDecision, error) {

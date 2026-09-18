@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,6 +29,18 @@ func TestInitCommandCreatesHomeOnce(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected %s: %v", path, err)
 		}
+	}
+
+	configBody, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(configBody, &config); err != nil {
+		t.Fatal(err)
+	}
+	if token, _ := config["control_token"].(string); token == "" {
+		t.Fatal("config does not contain a generated control_token")
 	}
 
 	second := NewRootCommand()

@@ -12,6 +12,7 @@ import (
 	"github.com/SofiaFlux/meeseek-collective/internal/clock"
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/identity"
+	"github.com/SofiaFlux/meeseek-collective/internal/policy"
 	state "github.com/SofiaFlux/meeseek-collective/internal/state/sqlite"
 )
 
@@ -41,6 +42,7 @@ type InitResult struct {
 	CubePrincipalID               domain.ID
 	ConstitutionalRootPrincipalID domain.ID
 	ConstitutionHash              string
+	PolicySetID                   domain.ID
 }
 
 type Service struct {
@@ -69,6 +71,11 @@ func (s *Service) Init(ctx context.Context, request InitRequest) (InitResult, er
 		return InitResult{}, errors.New("owner, cube, and constitutional root must have distinct non-empty principals")
 	}
 
+	policyProfile, err := policy.DefaultProfile()
+	if err != nil {
+		return InitResult{}, err
+	}
+
 	digest := sha256.Sum256(request.Constitution)
 	signature, err := request.ConstitutionalRoot.Sign(digest[:])
 	if err != nil {
@@ -80,6 +87,7 @@ func (s *Service) Init(ctx context.Context, request InitRequest) (InitResult, er
 		CubePrincipalID:               cubeID,
 		ConstitutionalRootPrincipalID: rootID,
 		ConstitutionHash:              hex.EncodeToString(digest[:]),
+		PolicySetID:                   policyProfile.PolicySetID,
 	}
 	now := s.clock.Now().UTC().Format(time.RFC3339Nano)
 
@@ -112,6 +120,14 @@ func (s *Service) Init(ctx context.Context, request InitRequest) (InitResult, er
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO constitutions(version, content, content_hash, signature, signer_principal_id, active, created_at) VALUES (1, ?, ?, ?, ?, 1, ?)`,
 			request.Constitution, result.ConstitutionHash, signature, rootID, now,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO policy_sets(policy_set_id, version, module_name, module, policy_hash, capabilities_hash, active, created_at)
+			 VALUES (?, 1, ?, ?, ?, ?, 1, ?)`,
+			policyProfile.PolicySetID, policyProfile.ModuleName, []byte(policyProfile.Module),
+			policyProfile.PolicyHash, policyProfile.CapabilitiesHash, now,
 		); err != nil {
 			return err
 		}

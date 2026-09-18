@@ -32,6 +32,13 @@ func (s *lifecycleControlServer) Close(context.Context) error {
 	return nil
 }
 
+func TestRunRefusesUninitializedHome(t *testing.T) {
+	t.Setenv("MEESEEK_HOME", t.TempDir())
+	if err := run(t.Context()); err == nil {
+		t.Fatal("run succeeded without an initialized Collective")
+	}
+}
+
 func TestServeControlClosesServerWhenContextIsCancelled(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

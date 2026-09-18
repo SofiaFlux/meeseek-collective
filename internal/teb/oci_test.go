@@ -330,7 +330,10 @@ func startDockerBridgeReachableFixture(t *testing.T, docker string) (net.Listene
 
 func verifyBaselineContainerCanReach(t *testing.T, docker, image, target string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Hosted runners can need several seconds to cold-start the first container.
+	// This timeout bounds infrastructure startup; reachability is still proven by
+	// the probe's own exit status once the container is running.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, docker, "run", "--rm", "--network=bridge", image, "--dial-only", target).CombinedOutput()
 	if err != nil {

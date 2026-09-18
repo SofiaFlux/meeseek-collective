@@ -4,12 +4,18 @@ import (
 	"os"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/control"
+	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
 	"github.com/spf13/cobra"
 )
 
 func NewRootCommand() *cobra.Command {
 	endpoint := os.Getenv("MEESEEK_CONTROL_ENDPOINT")
 	token := os.Getenv("MEESEEK_CONTROL_TOKEN")
+	if token == "" {
+		if cfg, err := localconfig.Load(""); err == nil {
+			token = cfg.ControlToken
+		}
+	}
 	return newRootCommandWithClient(control.NewLocalClient(endpoint, token))
 }
 

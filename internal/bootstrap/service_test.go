@@ -37,7 +37,7 @@ func TestInitPersistsDistinctPrincipalsAndSignedConstitution(t *testing.T) {
 		t.Fatal("collective id is empty")
 	}
 
-	var principalCount, metadataCount, constitutionCount int
+	var principalCount, metadataCount, constitutionCount, policySetCount int
 	if err := store.DB().QueryRow(`SELECT count(*) FROM principals`).Scan(&principalCount); err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +47,11 @@ func TestInitPersistsDistinctPrincipalsAndSignedConstitution(t *testing.T) {
 	if err := store.DB().QueryRow(`SELECT count(*) FROM constitutions WHERE active = 1`).Scan(&constitutionCount); err != nil {
 		t.Fatal(err)
 	}
-	if principalCount != 3 || metadataCount != 1 || constitutionCount != 1 {
-		t.Fatalf("counts principals=%d metadata=%d constitutions=%d", principalCount, metadataCount, constitutionCount)
+	if err := store.DB().QueryRow(`SELECT count(*) FROM policy_sets WHERE active = 1`).Scan(&policySetCount); err != nil {
+		t.Fatal(err)
+	}
+	if principalCount != 3 || metadataCount != 1 || constitutionCount != 1 || policySetCount != 1 {
+		t.Fatalf("counts principals=%d metadata=%d constitutions=%d active_policy_sets=%d", principalCount, metadataCount, constitutionCount, policySetCount)
 	}
 
 	var hashText string

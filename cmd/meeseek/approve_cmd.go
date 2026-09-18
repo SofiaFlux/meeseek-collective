@@ -2,14 +2,15 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/control"
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/identity"
+	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +23,11 @@ func newApproveCommand(api control.API, jsonOutput *bool) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ownerKey = strings.TrimSpace(ownerKey)
 			if ownerKey == "" {
-				return errors.New("--owner-key is required")
+				home, err := localconfig.ResolveHome("")
+				if err != nil {
+					return err
+				}
+				ownerKey = filepath.Join(home, "keys", "owner.key")
 			}
 			if _, err := os.Stat(ownerKey); err != nil {
 				return fmt.Errorf("Owner key must already exist: %w", err)
@@ -42,6 +47,6 @@ func newApproveCommand(api control.API, jsonOutput *bool) *cobra.Command {
 			return err
 		},
 	}
-	command.Flags().StringVar(&ownerKey, "owner-key", "", "path to an existing Owner Ed25519 private key")
+	command.Flags().StringVar(&ownerKey, "owner-key", "", "path to an existing Owner Ed25519 private key (default: MEESEEK_HOME/keys/owner.key)")
 	return command
 }

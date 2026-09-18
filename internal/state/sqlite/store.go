@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -23,6 +24,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	dsn, err := localFileDSN(path)
 	if err != nil {
 		return nil, err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+		return nil, fmt.Errorf("create sqlite parent directory: %w", err)
 	}
 
 	db, err := sql.Open("sqlite", dsn)

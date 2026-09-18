@@ -95,6 +95,10 @@ func safeCapabilities() *ast.Capabilities {
 	}
 }
 
+func SafeCapabilitiesHash() (string, error) {
+	return capabilityProfileHash(safeCapabilities())
+}
+
 func capabilityProfileHash(caps *ast.Capabilities) (string, error) {
 	builtinNames := make([]string, 0, len(caps.Builtins))
 	for _, builtin := range caps.Builtins {
