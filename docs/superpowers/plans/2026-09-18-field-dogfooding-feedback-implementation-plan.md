@@ -39,7 +39,7 @@ New focused packages:
 - `internal/fieldfeedback/` — observations, candidates, sanitizer, immutable feedback, governed emit-task creation/query.
 - `internal/feedbackgithub/` — GitHub issue External Operation provider and reconciliation. It receives only `SanitizedFeedback` IDs.
 - `internal/experience/` — adaptation grants, proposals, shadow/active rules, verified-outcome promotion and rollback.
-- `internal/state/sqlite/migrations/00010_field_feedback.sql` — durable schema.
+- `internal/state/sqlite/migrations/00010_field_feedback.sql` — durable schema, including observation-evidence links, emission work links, approval bindings, grant requests, and verified experience outcomes.
 - `tests/acceptance/field_feedback_test.go` — complete feedback vertical slice and negative security semantics.
 - `tests/acceptance/local_experience_test.go` — bounded adaptation vertical slice.
 
@@ -91,10 +91,12 @@ func TestFieldFeedbackMigrationCreatesImmutableExportArtifacts(t *testing.T) {
     ctx := context.Background()
 
     for _, table := range []string{
-        "field_observations", "feedback_candidates", "feedback_candidate_observations",
-        "sanitization_results", "sanitized_feedback", "approval_requests",
-        "adaptation_grants", "experience_proposals", "experience_rules",
-        "experience_rule_evidence",
+        "field_observations", "field_observation_evidence",
+        "feedback_candidates", "feedback_candidate_observations",
+        "sanitization_results", "sanitized_feedback", "feedback_emissions",
+        "approval_requests", "adaptation_grant_requests", "adaptation_grants",
+        "experience_proposals", "experience_rules", "experience_rule_evidence",
+        "experience_outcomes",
     } {
         var name string
         if err := store.DB().QueryRowContext(ctx,
@@ -214,18 +216,23 @@ Create approval/experience types with exact state strings from the spec.
 - [ ] **Step 4: Add migration**
 
 `00010_field_feedback.sql` must:
-- create all ten tables;
+- create all fourteen tables listed in the migration test;
 - use CHECK constraints for all state enums;
 - foreign-key candidate-observation links;
-- make `sanitized_feedback`, `sanitization_results`, `adaptation_grants` immutable with no-update/no-delete triggers;
+- make `sanitized_feedback`, `sanitization_results`, and active `adaptation_grants` immutable with no-update/no-delete triggers;
 - make `sanitized_feedback.content_hash` UNIQUE;
 - make `sanitized_feedback.fingerprint` indexed;
 - make approval subject+digest queryable;
+- add nullable `approval_id TEXT REFERENCES approval_requests(approval_id)` to `external_operations`;
+- persist observation↔evidence links in `field_observation_evidence`;
+- persist sanitized_feedback↔emit_task linkage in `feedback_emissions`;
+- persist each accepted verified outcome in `experience_outcomes`;
+- persist pending Owner-authorized grant definitions in `adaptation_grant_requests`;
 - index active experience rules by `adaptation_kind, scope_key, state`.
 
 Do not store raw evidence blobs in these tables.
 
-- [ ] **Step 5: Run GREEN**
+- [ ] **Step 7: Run GREEN**
 
 ```bash
 go test ./internal/state/sqlite ./internal/domain -count=1
@@ -233,7 +240,7 @@ go test ./internal/state/sqlite ./internal/domain -count=1
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add internal/state/sqlite/migrations/00010_field_feedback.sql internal/domain
@@ -267,6 +274,7 @@ type CreateRequest struct {
     ExpiresAt         time.Time
 }
 func (s *Service) Create(context.Context, CreateRequest) (domain.ApprovalRequestRecord, error)
+func (s *Service) CreateInTx(context.Context, *sql.Tx, CreateRequest) (domain.ApprovalRequestRecord, error)
 func (s *Service) Get(context.Context, domain.ID) (domain.ApprovalRequestRecord, error)
 func (s *Service) Pending(context.Context) ([]domain.ApprovalRequestRecord, error)
 func (s *Service) Approve(context.Context, domain.ID, domain.ID, string) error
@@ -381,7 +389,7 @@ git commit -m "feat: add durable exact-bound approvals"
 **Interfaces:**
 - `operations.New(..., approvals *approvals.Service, ...Provider)`
 - Add `ApprovalID domain.ID` to `domain.ExternalOperation`.
-- Add `approval_id TEXT` nullable FK column in migration Task 1 if not already included.
+- Task 1 migration already adds `approval_id TEXT REFERENCES approval_requests(approval_id)` to `external_operations`.
 - Request digest is SHA-256 of canonical consequential dispatch identity:
 ```text
 provider
@@ -779,6 +787,8 @@ git commit -m "feat: schedule governed feedback emission"
 **Files:**
 - Create: `internal/fieldfeedback/provider.go`
 - Create: `internal/fieldfeedback/provider_test.go`
+- Create: `internal/fieldfeedback/executor.go`
+- Create: `internal/fieldfeedback/executor_test.go`
 - Create: `internal/fieldfeedback/fake_sink_test.go`
 
 **Interfaces:**
@@ -803,6 +813,27 @@ type IssuePayload struct {
 
 Provider implements existing `operations.Provider`.
 
+The deterministic governed-work executor implements:
+
+```go
+type EmitTaskLookup interface {
+    FeedbackForEmitTask(context.Context, domain.ID) (domain.SanitizedFeedback, string, error)
+}
+
+type EmitExecutor struct {
+    feedback EmitTaskLookup
+    operations *operations.Service
+    providerName string
+}
+
+func (e *EmitExecutor) Start(
+    ctx context.Context,
+    envelope executors.AttemptEnvelope,
+) (executors.ExecutionResult, error)
+```
+
+It resolves `envelope.TaskID -> SanitizedFeedback`, constructs `EmitIntent`, then calls `Operations.Prepare` and `Operations.Dispatch` using `envelope.AttemptID`. It never calls `Sink.Create` directly.
+
 - [ ] **Step 1: Write RED provider-boundary tests**
 
 Prove:
@@ -824,7 +855,17 @@ go test ./internal/fieldfeedback -run Provider -count=1
 
 Use `CostProfile` with explicitly bounded provider exposure. Fake sink returns deterministic references.
 
-- [ ] **Step 4: Test unknown-outcome reconciliation through Operations**
+- [ ] **Step 4: Implement the deterministic governed-work executor**
+
+Tests must prove:
+- executor refuses a Task with no `feedback_emissions` linkage;
+- executor uses the current fenced Attempt ID from its envelope;
+- executor invokes `operations.Service`, never the sink;
+- PREPARED/approval-pending returns a non-success result without provider dispatch;
+- CONFIRMED_EFFECT produces deterministic evidence containing only feedback ID/provider reference, never local candidate text;
+- OUTCOME_UNKNOWN is returned as an execution error so a replacement Attempt can reconcile later.
+
+- [ ] **Step 5: Test unknown-outcome reconciliation through Operations**
 
 Use fake sink that creates the issue but loses acknowledgement. Assert:
 - first Dispatch → OUTCOME_UNKNOWN;
@@ -838,11 +879,11 @@ Use fake sink that creates the issue but loses acknowledgement. Assert:
 go test ./internal/fieldfeedback ./internal/operations -count=1
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add internal/fieldfeedback
-git commit -m "feat: protect feedback sinks behind external operations"
+git commit -m "feat: protect feedback sinks behind governed execution"
 ```
 
 ---
@@ -1013,7 +1054,12 @@ type GrantInput struct {
     MaxAcceptanceRegressionBps int
     MaxCostRegressionBps int
     ExpiresAt time.Time
-    OwnerPrincipalID domain.ID
+}
+
+type GrantRequest struct {
+    ID domain.ID
+    Digest string
+    ApprovalID domain.ID
 }
 
 type ProposalInput struct {
@@ -1036,7 +1082,13 @@ type VerifiedOutcome struct {
     LatencyMs *int64
 }
 
-func (s *Service) CreateGrant(context.Context, GrantInput) (domain.AdaptationGrant, error)
+func (s *Service) RequestGrant(
+    context.Context,
+    GrantInput,
+    domain.ID, // requesting actor
+    []domain.ID, // required Owner approvers
+) (GrantRequest, error)
+func (s *Service) ActivateGrant(context.Context, domain.ID) (domain.AdaptationGrant, error)
 func (s *Service) Propose(context.Context, ProposalInput) (domain.ExperienceProposal, error)
 func (s *Service) ObserveVerifiedOutcome(context.Context, VerifiedOutcome) error
 func (s *Service) Evaluate(context.Context, domain.ID) (domain.ExperienceRule, error)
@@ -1047,10 +1099,13 @@ func (s *Service) Preference(context.Context, PreferenceQuery) (Preference, bool
 
 Prove:
 - no implicit/default grant;
+- `RequestGrant` creates an exact-digest durable approval request but no active grant;
+- `ActivateGrant` fails before exact Owner approval;
+- approval for a different grant digest cannot activate;
 - expired grant cannot promote;
 - preferred executor must be explicitly allowed;
 - grant cannot name policy/authority/runtime modification kinds;
-- Owner ID required;
+- required Owner approver set is non-empty;
 - proposal evidence must exist.
 
 - [ ] **Step 2: Write RED promotion tests**
@@ -1069,11 +1124,15 @@ Deterministic promotion:
 go test ./internal/experience -count=1
 ```
 
-- [ ] **Step 4: Implement exact evaluation**
+- [ ] **Step 4: Implement Owner-authorized grant activation**
+
+Canonicalize `GrantInput`, hash it, persist `adaptation_grant_requests`, and create a generic approval request with subject kind `ADAPTATION_GRANT`. `ActivateGrant` requires the exact approval to be APPROVED, consumes it, then inserts the immutable active grant. Passing an Owner principal ID is never sufficient by itself.
+
+- [ ] **Step 5: Implement exact evaluation**
 
 Keep evaluator deterministic and integer/basis-point based where possible. Persist counters and evidence IDs used for each transition.
 
-- [ ] **Step 5: Audit every promotion/rollback**
+- [ ] **Step 6: Audit every promotion/rollback**
 
 Append concise audit events with rule/grant/evidence IDs, never raw workload text.
 
@@ -1083,7 +1142,7 @@ Append concise audit events with rule/grant/evidence IDs, never raw workload tex
 go test ./internal/experience -count=1
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add internal/experience
@@ -1175,6 +1234,8 @@ Sanitizer    fieldfeedback.Sanitizer
 Experience   *experience.Service
 ```
 
+The Box executor registry also includes the deterministic `feedback-emitter` executor when a feedback provider is configured. It receives no workspace and no workload credentials.
+
 `runtime.Config` gains typed non-secret field-feedback config and optional provider dependencies.
 
 - [ ] **Step 1: Write RED composition test**
@@ -1185,11 +1246,17 @@ Open a Box on fresh SQLite and assert all new services are non-nil even when out
 
 Remove `unavailableApprovalService`. Wire real `box.Approvals` into control server.
 
-- [ ] **Step 3: Wire detector/event hooks conservatively**
+- [ ] **Step 3: Register the governed feedback executor**
+
+Construct the feedback provider first, then `fieldfeedback.EmitExecutor`, and register it as executor kind `feedback-emitter`. A queued feedback Task is therefore executable through the same scheduler/lease/executor abstraction as ordinary work.
+
+Production `AUTO_IF_ALLOWED` means the feedback Task is created automatically. It is dispatched only when the normal worker/orchestration driver leases and runs it; this feature must not invent a second hidden scheduler.
+
+- [ ] **Step 4: Wire detector/event hooks conservatively**
 
 Do not create a new event bus. At this stage invoke deterministic observation detection at explicit lifecycle points where canonical state already exists (verification completion, failed/replacement attempt, operation reconciliation, explicit operator intervention). Keep hooks idempotent.
 
-- [ ] **Step 4: Add safe runtime config documentation**
+- [ ] **Step 5: Add safe runtime config documentation**
 
 README must state:
 - dogfooding disabled + LOCAL_ONLY by default;
@@ -1199,7 +1266,7 @@ README must state:
 - local experience requires explicit AdaptationGrant;
 - no source-code self-modification.
 
-- [ ] **Step 5: Run component regression**
+- [ ] **Step 6: Run component regression**
 
 ```bash
 go test ./internal/runtime ./cmd/meeseek-box ./internal/control -count=1
@@ -1236,7 +1303,9 @@ realistic Task
 -> deterministic sanitizer PASS
 -> immutable SanitizedFeedback
 -> governed COLLECTIVE_MAINTENANCE Task
+-> scheduler selects Task and feedback-emitter executor
 -> scheduler leases fenced Attempt
+-> feedback-emitter calls Operations.Prepare/Dispatch
 -> policy REQUIRE_APPROVAL
 -> PREPARED ExternalOperation + durable approval
 -> signed Owner approval
@@ -1343,6 +1412,9 @@ Before execution, verify:
 - [ ] Every spec section 1–24 maps to at least one task above.
 - [ ] Every spec acceptance criterion maps to Task 14.
 - [ ] Approval is generic and durable, not feedback-specific.
+- [ ] AdaptationGrant activation is Owner-authorized through exact durable approval; passing an Owner ID never creates authority.
+- [ ] Governed feedback work has a deterministic executor that invokes Operations rather than the sink directly.
+- [ ] Observation evidence, feedback emission linkage, and verified experience outcomes have durable normalized persistence.
 - [ ] `REQUIRE_APPROVAL` can PREPARE but cannot DISPATCH before exact approval.
 - [ ] Current policy/authority is rechecked after approval.
 - [ ] `ALLOW_WITH_LIMIT` does not silently become ALLOW.
