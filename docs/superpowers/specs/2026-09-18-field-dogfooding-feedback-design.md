@@ -396,7 +396,29 @@ A reproduction derived from real workload material must be reconstructed from th
 
 ## 9. Feedback export
 
-### 9.1 Generic sink contract
+### 9.1 Governed feedback work
+
+Export is itself ordinary governed work. A feedback candidate does not dispatch a provider directly from a detector, sanitizer, CLI command, or background callback.
+
+When a sanitized artifact becomes eligible for export, the Feedback service creates or requests one durable `feedback_emit` Task with:
+
+- `PurposeKind = COLLECTIVE_MAINTENANCE`;
+- a stable field-feedback purpose ID configured for the Collective;
+- acceptance criteria requiring a confirmed issue effect or a proven no-effect/duplicate result;
+- the feedback provider capability;
+- the configured enforcement requirement;
+- an explicit authority ceiling;
+- a bounded resource envelope.
+
+The scheduler leases a normal Attempt for this Task. That Attempt prepares and dispatches the feedback External Operation through `operations.Service`.
+
+This preserves the invariant that consequential effects originate from a current fenced Attempt. It also means crash recovery, retries, budgeting, verification, and audit work exactly as they do for other Tasks.
+
+`meeseek feedback emit <feedback-id>   # schedules/wakes governed COLLECTIVE_MAINTENANCE work` requests or wakes this governed Task; it is never a direct provider call.
+
+Automatic mode performs the same Task creation path. "Automatic" changes who requests the work, not the enforcement path.
+
+### 9.2 Generic sink contract
 
 Core depends on a `FeedbackSink`/provider abstraction, not GitHub semantics.
 
@@ -404,7 +426,7 @@ Initial implementation: GitHub Issues provider.
 
 Future providers may include local JSONL, private GitHub, GitLab, Azure DevOps, Jira, or a dedicated evaluation service.
 
-### 9.2 Protected External Operation
+### 9.3 Protected External Operation
 
 Feedback emission is a consequential external effect.
 
@@ -429,7 +451,7 @@ Normal External Operation semantics apply:
 - audit;
 - deduplication.
 
-### 9.3 GitHub provider
+### 9.4 GitHub provider
 
 The GitHub issue provider SHALL:
 
@@ -443,7 +465,7 @@ The GitHub issue provider SHALL:
 
 The provider capability is separate from ordinary GitHub/code capabilities, e.g. `feedback.github.issue.create`.
 
-### 9.4 Feedback modes
+### 9.5 Feedback modes
 
 Configuration supports:
 
@@ -771,6 +793,7 @@ realistic Task
 -> local FieldObservation
 -> FeedbackCandidate
 -> sanitization PASS
+-> governed feedback Task / fenced Attempt
 -> policy REQUIRE_APPROVAL
 -> Owner approval
 -> ExternalOperation
