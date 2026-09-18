@@ -288,7 +288,7 @@ An `ApprovalRequest` binds:
 - created/expires/decided timestamps;
 - approver principal and signature provenance.
 
-Owner approval is valid only for the exact immutable request digest. Changed feedback content or changed consequential intent requires a new approval.
+Owner approval is valid only for the exact immutable request digest. The signed challenge binds the approval ID, subject kind/ID, exact request digest, and decision action (`APPROVE` or `REJECT`). Changed feedback content or changed consequential intent requires a new approval.
 
 The control challenge SHALL sign a digest derived from the durable approval request, not merely an unbound human-readable action.
 
@@ -394,6 +394,8 @@ Reproduction data must be generated from generic/synthetic names and content.
 
 A reproduction derived from real workload material must be reconstructed from the abstracted problem, not copied then superficially redacted.
 
+Synthetic reproduction export is disabled by default in the initial implementation. Enabling it requires an explicit local configuration/policy decision and it still passes the normal post-scan.
+
 ## 9. Feedback export
 
 ### 9.1 Governed feedback work
@@ -404,11 +406,13 @@ When a sanitized artifact becomes eligible for export, the Feedback service crea
 
 - `PurposeKind = COLLECTIVE_MAINTENANCE`;
 - a stable field-feedback purpose ID configured for the Collective;
-- acceptance criteria requiring a confirmed issue effect or a proven no-effect/duplicate result;
+- acceptance criteria requiring a confirmed issue effect; reconciliation to an already-existing equivalent issue counts as that same confirmed logical effect;
 - the feedback provider capability;
 - the configured enforcement requirement;
 - an explicit authority ceiling;
-- a bounded resource envelope.
+- a bounded resource envelope sourced from an explicitly configured Collective-maintenance budget.
+
+If no maintenance resource envelope is configured or available, the artifact remains export-ready but no Task is created. Lack of budget cannot be bypassed by automatic mode.
 
 The scheduler leases a normal Attempt for this Task. That Attempt prepares and dispatches the feedback External Operation through `operations.Service`.
 
@@ -456,7 +460,8 @@ Normal External Operation semantics apply:
 The GitHub issue provider SHALL:
 
 - use an explicitly configured destination repository;
-- require an explicitly mediated/scoped credential; no ambient credential inheritance;
+- require an explicitly mediated/scoped credential owned by the Box/provider boundary; no ambient executor credential inheritance;
+- never place the credential in operation intent, feedback payload, audit payload, logs, or executor-visible context;
 - render title/body only from `SanitizedFeedback`;
 - include a stable non-sensitive dedupe marker such as `meeseek-feedback:<fingerprint>`;
 - store returned issue number/URL as provider reference;
@@ -483,7 +488,7 @@ Semantics:
 
 1. PREPARE evaluates current policy and authority.
 2. For `ALLOW`, existing behavior continues.
-3. For `ALLOW_WITH_LIMIT`, limits must be deterministically enforceable before continuing.
+3. `ALLOW_WITH_LIMIT` remains fail-closed unless every returned limit is understood and deterministically enforceable by the current provider/runtime. This feature does not invent a generic best-effort limit mechanism.
 4. For `REQUIRE_APPROVAL`, the operation may be durably PREPARED with its exact intent, reservation, policy provenance, and linked PENDING approval request.
 5. DISPATCH is impossible while required approval is absent, rejected, expired, consumed by a different subject, or bound to a different digest.
 6. After approval, DISPATCH rechecks current lease, authority, policy, enforcement path, reservation, intent fingerprint, and approval binding.
@@ -672,6 +677,7 @@ meeseek feedback inspect <candidate-or-feedback-id>
 meeseek feedback emit <feedback-id>
 meeseek approvals list
 meeseek approve <approval-id>
+meeseek reject <approval-id>
 meeseek experience list
 meeseek experience inspect <rule-id>
 ```
@@ -691,6 +697,8 @@ Local config gains a field-feedback section with safe defaults:
 - local deny-pattern sources;
 - detector thresholds;
 - optional AdaptationGrant references.
+
+No AdaptationGrant exists by default. Therefore enabling field feedback never implicitly enables automatic local adaptation.
 
 Secrets/tokens are not stored as ordinary feedback config values.
 
