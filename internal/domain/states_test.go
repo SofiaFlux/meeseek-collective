@@ -19,8 +19,8 @@ func TestAddendumTaskStatesAreDefined(t *testing.T) {
 
 
 func TestFieldFeedbackStatesAreDefined(t *testing.T) {
-	if FeedbackCandidate != "CANDIDATE" || FeedbackReported != "REPORTED" || FeedbackRejectedUnsafe != "REJECTED_UNSAFE" {
-		t.Fatalf("unexpected feedback states: %q %q %q", FeedbackCandidate, FeedbackReported, FeedbackRejectedUnsafe)
+	if FeedbackStateCandidate != "CANDIDATE" || FeedbackStateReported != "REPORTED" || FeedbackStateRejectedUnsafe != "REJECTED_UNSAFE" {
+		t.Fatalf("unexpected feedback states: %q %q %q", FeedbackStateCandidate, FeedbackStateReported, FeedbackStateRejectedUnsafe)
 	}
 	if SanitizationPass != "PASS" || SanitizationUncertain != "UNCERTAIN" {
 		t.Fatalf("unexpected sanitization states: %q %q", SanitizationPass, SanitizationUncertain)

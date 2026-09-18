@@ -115,16 +115,16 @@ const (
 type FeedbackCandidateState string
 
 const (
-	FeedbackCandidate       FeedbackCandidateState = "CANDIDATE"
-	FeedbackSanitizing      FeedbackCandidateState = "SANITIZATION_PENDING"
-	FeedbackSanitized       FeedbackCandidateState = "SANITIZED"
-	FeedbackApprovalPending FeedbackCandidateState = "APPROVAL_PENDING"
-	FeedbackExportReady     FeedbackCandidateState = "EXPORT_READY"
-	FeedbackReported        FeedbackCandidateState = "REPORTED"
-	FeedbackLocalOnly       FeedbackCandidateState = "LOCAL_ONLY"
-	FeedbackRejectedUnsafe  FeedbackCandidateState = "REJECTED_UNSAFE"
-	FeedbackRejectedPolicy  FeedbackCandidateState = "REJECTED_POLICY"
-	FeedbackDuplicate       FeedbackCandidateState = "DUPLICATE"
+	FeedbackStateCandidate       FeedbackCandidateState = "CANDIDATE"
+	FeedbackStateSanitizing      FeedbackCandidateState = "SANITIZATION_PENDING"
+	FeedbackStateSanitized       FeedbackCandidateState = "SANITIZED"
+	FeedbackStateApprovalPending FeedbackCandidateState = "APPROVAL_PENDING"
+	FeedbackStateExportReady     FeedbackCandidateState = "EXPORT_READY"
+	FeedbackStateReported        FeedbackCandidateState = "REPORTED"
+	FeedbackStateLocalOnly       FeedbackCandidateState = "LOCAL_ONLY"
+	FeedbackStateRejectedUnsafe  FeedbackCandidateState = "REJECTED_UNSAFE"
+	FeedbackStateRejectedPolicy  FeedbackCandidateState = "REJECTED_POLICY"
+	FeedbackStateDuplicate       FeedbackCandidateState = "DUPLICATE"
 )
 
 type SanitizationOutcome string
