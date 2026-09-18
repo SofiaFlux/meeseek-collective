@@ -63,6 +63,8 @@ Existing packages modified only at their domain boundaries:
 - Create: `internal/domain/approval.go`
 - Create: `internal/domain/experience.go`
 - Modify: `internal/domain/states.go`
+- Modify: `internal/domain/task.go`
+- Modify: `internal/execution/service.go`
 - Test: `internal/state/sqlite/store_test.go`
 - Test: `internal/domain/states_test.go`
 
@@ -76,6 +78,7 @@ Existing packages modified only at their domain boundaries:
   - `domain.FeedbackCandidate`
   - `domain.SanitizationResult`
   - `domain.SanitizedFeedback`
+  - `domain.GenericTaskClass`
   - `domain.ApprovalRequestRecord`
   - `domain.AdaptationGrant`
   - `domain.ExperienceProposal`
@@ -211,6 +214,24 @@ type SanitizedFeedback struct {
 }
 ```
 
+Define a privacy-safe exported task-class enum:
+
+```go
+type GenericTaskClass string
+const (
+    GenericTaskDebugging      GenericTaskClass = "DEBUGGING"
+    GenericTaskReview         GenericTaskClass = "REVIEW"
+    GenericTaskRefactor       GenericTaskClass = "REFACTOR"
+    GenericTaskDocumentation  GenericTaskClass = "DOCUMENTATION"
+    GenericTaskMigration      GenericTaskClass = "MIGRATION"
+    GenericTaskTesting        GenericTaskClass = "TESTING"
+    GenericTaskMaintenance    GenericTaskClass = "MAINTENANCE"
+    GenericTaskOther          GenericTaskClass = "OTHER"
+)
+```
+
+Also add optional local `TaskClass string` to `domain.Task` and `execution.TaskRequest`. The local value is not export-safe and may be organization-specific. Existing task creation with an empty TaskClass remains valid.
+
 Create approval/experience types with exact state strings from the spec.
 
 - [ ] **Step 4: Add migration**
@@ -224,6 +245,7 @@ Create approval/experience types with exact state strings from the spec.
 - make `sanitized_feedback.fingerprint` indexed;
 - make approval subject+digest queryable;
 - add nullable `approval_id TEXT REFERENCES approval_requests(approval_id)` to `external_operations`;
+- add `task_class TEXT NOT NULL DEFAULT ''` to `tasks`, update execution read/write paths, and preserve backward-compatible empty class;
 - persist observation↔evidence links in `field_observation_evidence`;
 - persist sanitized_feedback↔emit_task linkage in `feedback_emissions`;
 - persist each accepted verified outcome in `experience_outcomes`;
@@ -232,7 +254,7 @@ Create approval/experience types with exact state strings from the spec.
 
 Do not store raw evidence blobs in these tables.
 
-- [ ] **Step 7: Run GREEN**
+- [ ] **Step 5: Run GREEN**
 
 ```bash
 go test ./internal/state/sqlite ./internal/domain -count=1
@@ -240,7 +262,7 @@ go test ./internal/state/sqlite ./internal/domain -count=1
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add internal/state/sqlite/migrations/00010_field_feedback.sql internal/domain
@@ -388,6 +410,7 @@ git commit -m "feat: add durable exact-bound approvals"
 
 **Interfaces:**
 - `operations.New(..., approvals *approvals.Service, ...Provider)`
+- extend `operations.PrepareRequest` with tightening-only `RequiredApprovals []domain.ID`. Callers may require more approval than policy asks for; they can never use this field to weaken DENY or remove policy-required approvers.
 - Add `ApprovalID domain.ID` to `domain.ExternalOperation`.
 - Task 1 migration already adds `approval_id TEXT REFERENCES approval_requests(approval_id)` to `external_operations`.
 - Request digest is SHA-256 of canonical consequential dispatch identity:
@@ -404,6 +427,7 @@ canonical_intent_hash
 
 Add:
 - `TestRequireApprovalPreparesButCannotDispatch`
+- `TestCallerRequiredApprovalTightensPolicyAllow`
 - `TestApprovedExactIntentCanDispatch`
 - `TestPolicyDenyAfterApprovalStillBlocksDispatch`
 - `TestApprovalForDifferentDigestCannotDispatch`
@@ -433,15 +457,17 @@ func validateDispatchOutcome(decision domain.PolicyDecision) error
 ```
 
 Rules:
-- `ALLOW`: continue.
-- `DENY`: `ErrPolicyDenied`.
+- `DENY`: always deny, regardless of caller-required approvals.
+- `ALLOW`: continue only if the caller-required approval set is empty; otherwise PREPARE with approval gate.
+- `REQUIRE_APPROVAL`: union policy-required approvers with caller-required approvers.
+- The caller-required set is tightening-only and may never subtract required approvers.
 - `ALLOW_WITH_LIMIT`: fail closed with `ErrPolicyDenied` until a named limit enforcer exists.
 - `REQUIRE_APPROVAL`: allowed only during PREPARE; create/reuse durable approval request.
 - DISPATCH must have exact approved request and current policy must still be either `ALLOW` or `REQUIRE_APPROVAL` with the same required approver set. A current DENY always wins.
 
 - [ ] **Step 4: Bind approval to operation intent before PREPARED commits**
 
-Create the approval request in the same transaction that creates the PREPARED operation, or provide `CreateInTx` so no PREPARED operation can point to a nonexistent approval.
+Create the approval request in the same transaction that creates the PREPARED operation using `CreateInTx`, so no PREPARED operation can point to a nonexistent approval. Persist the union of policy-required and caller-required approvers in the approval request.
 
 - [ ] **Step 5: Consume approval at dispatch commitment**
 
@@ -548,7 +574,7 @@ git commit -m "feat: record evidence-backed field observations"
 ```go
 type CandidateInput struct {
     ObservationIDs []domain.ID
-    GenericTaskClass string
+    GenericTaskClass domain.GenericTaskClass
     Category string
     ExpectedBehavior string
     ObservedBehavior string
@@ -577,8 +603,9 @@ func (s *Feedback) Candidates(context.Context, domain.FeedbackCandidateState) ([
 
 Prove candidate input is controlled:
 - observations required;
+- GenericTaskClass must be one of the closed privacy-safe enum values; a local TaskClass such as `client-x/payment-migration` is rejected rather than exported;
 - arbitrary logs/source code fields do not exist in the API;
-- correlation key is deterministic for category + generic task class + executor kind + enforcement + normalized transition shape;
+- correlation key is deterministic for category + privacy-safe generic task class + executor kind + enforcement + normalized transition shape;
 - timestamps do not change correlation key.
 
 - [ ] **Step 2: Run RED**
@@ -589,7 +616,7 @@ go test ./internal/fieldfeedback -run Candidate -count=1
 
 - [ ] **Step 3: Implement canonical correlation**
 
-Canonicalize only safe categorical fields and SHA-256 the canonical JSON. Do not hash raw summary content into a value that later gets exported as if safe.
+Canonicalize only safe categorical fields and SHA-256 the canonical JSON. State-transition entries must be known domain state/event tokens, not arbitrary workload-authored text. Do not hash raw summary content into a value that later gets exported as if safe.
 
 - [ ] **Step 4: Enforce state transitions**
 
@@ -728,6 +755,7 @@ type FieldFeedbackConfig struct {
 }
 
 func (s *Feedback) RequestEmit(context.Context, domain.ID) (domain.Task, error)
+func (s *Feedback) OnSanitized(context.Context, domain.ID) error
 ```
 
 No token/credential fields are added to config.
@@ -753,7 +781,10 @@ Prove:
   - matching authority ceiling;
   - configured enforcement;
   - configured maintenance resource envelope;
-- repeat request returns same active logical work item.
+- repeat request returns same active logical work item;
+- AUTO_IF_ALLOWED and REQUIRE_APPROVAL call the same RequestEmit path after PASS;
+- REQUIRE_APPROVAL records Owner as a tightening required approver for the eventual operation;
+- disabled/LOCAL_ONLY never auto-schedules export.
 
 - [ ] **Step 3: Run RED**
 
@@ -763,7 +794,14 @@ go test ./internal/localconfig ./internal/fieldfeedback -run 'Config|Emit' -coun
 
 - [ ] **Step 4: Implement config and RequestEmit**
 
-Create Task using existing `execution.Service.CreateTask`; do not call provider.
+Create Task using existing `execution.Service.CreateTask`; do not call provider. Set local `TaskClass = "collective.feedback.emit"` and privacy-safe GenericTaskClass = MAINTENANCE in the feedback metadata.
+
+`OnSanitized` applies mode:
+- disabled/LOCAL_ONLY: retain local/export-ready artifact without Task;
+- REQUIRE_APPROVAL: RequestEmit with Owner tightening gate;
+- AUTO_IF_ALLOWED: RequestEmit without adding approval beyond policy.
+
+Runtime/Feedback service receives the configured Owner principal ID; mode handling never trusts an executor to decide whether Owner approval is required.
 
 Persist feedback_id ↔ emit_task_id link so retries/wake do not mint unrelated Tasks.
 
@@ -817,7 +855,7 @@ The deterministic governed-work executor implements:
 
 ```go
 type EmitTaskLookup interface {
-    FeedbackForEmitTask(context.Context, domain.ID) (domain.SanitizedFeedback, string, error)
+    FeedbackForEmitTask(context.Context, domain.ID) (feedback domain.SanitizedFeedback, destination string, requiredApprovers []domain.ID, err error)
 }
 
 type EmitExecutor struct {
@@ -832,7 +870,7 @@ func (e *EmitExecutor) Start(
 ) (executors.ExecutionResult, error)
 ```
 
-It resolves `envelope.TaskID -> SanitizedFeedback`, constructs `EmitIntent`, then calls `Operations.Prepare` and `Operations.Dispatch` using `envelope.AttemptID`. It never calls `Sink.Create` directly.
+It resolves `envelope.TaskID -> SanitizedFeedback + destination + requiredApprovers`, constructs `EmitIntent`, then calls `Operations.Prepare` with the tightening approval set and `Operations.Dispatch` using `envelope.AttemptID`. It never calls `Sink.Create` directly.
 
 - [ ] **Step 1: Write RED provider-boundary tests**
 
@@ -873,7 +911,7 @@ Use fake sink that creates the issue but loses acknowledgement. Assert:
 - DispatchCount/CreateCount == 1;
 - final state CONFIRMED_EFFECT.
 
-- [ ] **Step 5: Run GREEN**
+- [ ] **Step 6: Run GREEN**
 
 ```bash
 go test ./internal/fieldfeedback ./internal/operations -count=1
@@ -979,6 +1017,7 @@ Control routes:
 - `GET /feedback`
 - `GET /feedback/{id}`
 - `POST /feedback/{id}/emit`
+- `POST /feedback/observations` (local-only operator observation; never an export endpoint)
 - `GET /approvals`
 - `GET /approvals/{id}`
 
@@ -986,6 +1025,7 @@ CLI:
 - `meeseek feedback list`
 - `meeseek feedback inspect <id>`
 - `meeseek feedback emit <id>`
+- `meeseek feedback observe --category <category> --summary <local-sensitive-summary> [--task <id>]`
 - `meeseek approvals list`
 - existing `approve`
 - new `reject`
@@ -1008,6 +1048,8 @@ Prove human output labels:
 - `LOCAL — DO NOT EXPORT`
 - `SANITIZED EXPORT ARTIFACT`
 and emit says it scheduled governed work rather than “sent issue”.
+
+`feedback observe` output must label the created record `LOCAL — DO NOT EXPORT`; the summary is sent only over the authenticated local control socket and is stored only in local observation state.
 
 - [ ] **Step 3: Run RED**
 
@@ -1041,6 +1083,10 @@ git commit -m "feat: expose field feedback control surface"
 - Create: `internal/experience/service_test.go`
 - Create: `internal/experience/evaluator.go`
 - Create: `internal/experience/evaluator_test.go`
+- Create: `cmd/meeseek/experience_cmd.go`
+- Modify: `internal/control/server.go`
+- Modify: `internal/control/client.go`
+- Modify: `internal/control/server_test.go`
 
 **Interfaces:**
 ```go
@@ -1082,11 +1128,18 @@ type VerifiedOutcome struct {
     LatencyMs *int64
 }
 
+func New(
+    store *state.Store,
+    clk clock.Clock,
+    approvals *approvals.Service,
+    audit *audit.Service,
+    ownerPrincipalID domain.ID,
+) *Service
+
 func (s *Service) RequestGrant(
     context.Context,
     GrantInput,
     domain.ID, // requesting actor
-    []domain.ID, // required Owner approvers
 ) (GrantRequest, error)
 func (s *Service) ActivateGrant(context.Context, domain.ID) (domain.AdaptationGrant, error)
 func (s *Service) Propose(context.Context, ProposalInput) (domain.ExperienceProposal, error)
@@ -1105,7 +1158,7 @@ Prove:
 - expired grant cannot promote;
 - preferred executor must be explicitly allowed;
 - grant cannot name policy/authority/runtime modification kinds;
-- required Owner approver set is non-empty;
+- configured Owner principal ID is non-empty and is the required approver; callers cannot substitute another approver;
 - proposal evidence must exist.
 
 - [ ] **Step 2: Write RED promotion tests**
@@ -1126,7 +1179,7 @@ go test ./internal/experience -count=1
 
 - [ ] **Step 4: Implement Owner-authorized grant activation**
 
-Canonicalize `GrantInput`, hash it, persist `adaptation_grant_requests`, and create a generic approval request with subject kind `ADAPTATION_GRANT`. `ActivateGrant` requires the exact approval to be APPROVED, consumes it, then inserts the immutable active grant. Passing an Owner principal ID is never sufficient by itself.
+Canonicalize `GrantInput`, hash it, persist `adaptation_grant_requests`, and create a generic approval request with subject kind `ADAPTATION_GRANT` whose required approver is the Owner principal configured in `experience.Service`. `ActivateGrant` requires the exact approval to be APPROVED, consumes it, then inserts the immutable active grant. Passing an Owner principal ID is never sufficient by itself.
 
 - [ ] **Step 5: Implement exact evaluation**
 
@@ -1136,16 +1189,29 @@ Keep evaluator deterministic and integer/basis-point based where possible. Persi
 
 Append concise audit events with rule/grant/evidence IDs, never raw workload text.
 
-- [ ] **Step 6: Run GREEN**
+- [ ] **Step 7: Add Owner-facing grant control path**
+
+Add local control/CLI:
+- `POST /experience/grants/requests`
+- `POST /experience/grants/{id}/activate`
+- `GET /experience`
+- `GET /experience/{id}`
+- `meeseek experience grant request ...`
+- Owner uses the existing generic `meeseek approve <approval-id>`
+- `meeseek experience grant activate <grant-request-id>`
+
+Grant request may be created without authority; it becomes effective only after exact Owner approval and activation.
+
+- [ ] **Step 8: Run GREEN**
 
 ```bash
 go test ./internal/experience -count=1
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add internal/experience
+git add internal/experience internal/control cmd/meeseek
 git commit -m "feat: add evidence-driven local experience rules"
 ```
 
@@ -1164,7 +1230,7 @@ Add:
 type ExecutorPreference interface {
     PreferredExecutor(
         context.Context,
-        domain.Task,
+        domain.Task, // includes local TaskClass
         []string,
     ) (string, bool, error)
 }
@@ -1178,7 +1244,7 @@ Tests must prove:
 1. preferred executor cannot make missing capability eligible;
 2. preferred executor cannot satisfy insufficient enforcement;
 3. preferred executor not in available executor set is ignored/rejected;
-4. with two already eligible executor kinds, ACTIVE rule changes only executor choice;
+4. with two already eligible executor kinds and a matching local TaskClass/scope, ACTIVE rule changes only executor choice;
 5. rule rollback restores baseline choice.
 
 - [ ] **Step 2: Run RED**
@@ -1236,7 +1302,7 @@ Experience   *experience.Service
 
 The Box executor registry also includes the deterministic `feedback-emitter` executor when a feedback provider is configured. It receives no workspace and no workload credentials.
 
-`runtime.Config` gains typed non-secret field-feedback config and optional provider dependencies.
+`runtime.Config` gains `OwnerPrincipalID`, typed non-secret field-feedback config, and optional provider dependencies. `OwnerPrincipalID` is used only for exact approval/grant requirements; it never substitutes for a signature.
 
 - [ ] **Step 1: Write RED composition test**
 
@@ -1272,7 +1338,7 @@ README must state:
 go test ./internal/runtime ./cmd/meeseek-box ./internal/control -count=1
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add internal/runtime cmd/meeseek-box README.md
@@ -1332,6 +1398,7 @@ Exact subtests:
 - `expired_approval_cannot_dispatch`
 - `policy_deny_after_approval_wins`
 - `feedback_provider_bypass_blocked_in_enforced_profile`
+- `require_approval_mode_tightens_policy_allow`
 - `auto_mode_grants_no_authority`
 - `missing_maintenance_budget_creates_no_task`
 - `credential_never_enters_executor_context`
@@ -1416,6 +1483,7 @@ Before execution, verify:
 - [ ] Governed feedback work has a deterministic executor that invokes Operations rather than the sink directly.
 - [ ] Observation evidence, feedback emission linkage, and verified experience outcomes have durable normalized persistence.
 - [ ] `REQUIRE_APPROVAL` can PREPARE but cannot DISPATCH before exact approval.
+- [ ] Environment REQUIRE_APPROVAL tightens policy ALLOW rather than relying on policy authors to remember feedback mode.
 - [ ] Current policy/authority is rechecked after approval.
 - [ ] `ALLOW_WITH_LIMIT` does not silently become ALLOW.
 - [ ] Raw observation data has no provider API path.
@@ -1426,5 +1494,7 @@ Before execution, verify:
 - [ ] Local adaptation has no default grant.
 - [ ] Only verified outcomes promote rules.
 - [ ] Learned preference executes after eligibility filtering.
+- [ ] Local TaskClass is distinct from privacy-safe GenericTaskClass; organization-specific task labels cannot escape as exported classification.
+- [ ] Operator-originated observations are supported through authenticated local control and remain explicitly local.
 - [ ] No source-code self-modification or Maintainer Collective implementation leaked into scope.
-- [ ] No TODO/TBD/FIXME/placeholders remain.
+- [ ] No unresolved placeholders or incomplete instructions remain.
