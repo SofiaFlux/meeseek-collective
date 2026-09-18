@@ -110,3 +110,47 @@ const (
 	FailureObjectiveImpossible FailureClass = "OBJECTIVE_IMPOSSIBLE"
 	FailureExecution           FailureClass = "EXECUTION"
 )
+
+
+type FeedbackCandidateState string
+
+const (
+	FeedbackCandidate       FeedbackCandidateState = "CANDIDATE"
+	FeedbackSanitizing      FeedbackCandidateState = "SANITIZATION_PENDING"
+	FeedbackSanitized       FeedbackCandidateState = "SANITIZED"
+	FeedbackApprovalPending FeedbackCandidateState = "APPROVAL_PENDING"
+	FeedbackExportReady     FeedbackCandidateState = "EXPORT_READY"
+	FeedbackReported        FeedbackCandidateState = "REPORTED"
+	FeedbackLocalOnly       FeedbackCandidateState = "LOCAL_ONLY"
+	FeedbackRejectedUnsafe  FeedbackCandidateState = "REJECTED_UNSAFE"
+	FeedbackRejectedPolicy  FeedbackCandidateState = "REJECTED_POLICY"
+	FeedbackDuplicate       FeedbackCandidateState = "DUPLICATE"
+)
+
+type SanitizationOutcome string
+
+const (
+	SanitizationPass      SanitizationOutcome = "PASS"
+	SanitizationReject    SanitizationOutcome = "REJECT"
+	SanitizationUncertain SanitizationOutcome = "UNCERTAIN"
+)
+
+type ApprovalState string
+
+const (
+	ApprovalPending  ApprovalState = "PENDING"
+	ApprovalApproved ApprovalState = "APPROVED"
+	ApprovalRejected ApprovalState = "REJECTED"
+	ApprovalExpired  ApprovalState = "EXPIRED"
+	ApprovalConsumed ApprovalState = "CONSUMED"
+)
+
+type ExperienceRuleState string
+
+const (
+	ExperienceCandidate  ExperienceRuleState = "CANDIDATE"
+	ExperienceShadow     ExperienceRuleState = "SHADOW"
+	ExperienceActive     ExperienceRuleState = "ACTIVE"
+	ExperienceRolledBack ExperienceRuleState = "ROLLED_BACK"
+	ExperienceRetired    ExperienceRuleState = "RETIRED"
+)

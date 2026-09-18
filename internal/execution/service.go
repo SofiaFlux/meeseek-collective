@@ -18,6 +18,7 @@ import (
 
 type TaskRequest struct {
 	Purpose              domain.PurposeRef
+	TaskClass            string
 	AcceptanceCriteria   []string
 	RequiredCapabilities []string
 	RequiredEnforcement  domain.EnforcementLevel
@@ -72,6 +73,10 @@ func (s *Service) CreateChildTask(ctx context.Context, parentTaskID domain.ID, r
 		return domain.Task{}, errors.New("child task cannot change inherited purpose")
 	}
 
+	request.TaskClass = strings.TrimSpace(request.TaskClass)
+	if request.TaskClass == "" {
+		request.TaskClass = parent.TaskClass
+	}
 	request.RequiredCapabilities = normalizeStrings(request.RequiredCapabilities)
 	parentCapabilities := stringSet(parent.AuthorityCeiling)
 	for _, capability := range request.RequiredCapabilities {
@@ -408,6 +413,7 @@ func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request Ta
 		ID:                   domain.NewID("task"),
 		ParentTaskID:         parentID,
 		Purpose:              request.Purpose,
+		TaskClass:            request.TaskClass,
 		State:                domain.TaskEligible,
 		AcceptanceCriteria:   append([]string(nil), request.AcceptanceCriteria...),
 		RequiredCapabilities: append([]string(nil), request.RequiredCapabilities...),
@@ -439,12 +445,12 @@ func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request Ta
 		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO tasks(
-				task_id, parent_task_id, purpose_kind, purpose_id, state, current_fence,
+				task_id, parent_task_id, purpose_kind, purpose_id, task_class, state, current_fence,
 				acceptance_criteria_json, required_capabilities_json, required_enforcement,
 				authority_ceiling_json, resource_envelope_id, priority, earliest_start, deadline,
 				created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			task.ID, nullableID(parentID), task.Purpose.Kind, task.Purpose.ID, task.State,
+			) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			task.ID, nullableID(parentID), task.Purpose.Kind, task.Purpose.ID, task.TaskClass, task.State,
 			string(criteriaJSON), string(capabilitiesJSON), task.RequiredEnforcement,
 			string(authorityJSON), task.ResourceEnvelopeID, task.Priority,
 			nullableTime(task.EarliestStart), nullableTime(task.Deadline), formatTime(now), formatTime(now),
@@ -468,13 +474,13 @@ func loadTask(ctx context.Context, q interface {
 	var criteriaJSON, capabilitiesJSON, authorityJSON string
 	var createdAt, updatedAt string
 	if err := q.QueryRowContext(ctx, `
-		SELECT task_id, parent_task_id, purpose_kind, purpose_id, state, current_attempt_id, current_fence,
+		SELECT task_id, parent_task_id, purpose_kind, purpose_id, task_class, state, current_attempt_id, current_fence,
 		       acceptance_criteria_json, required_capabilities_json, required_enforcement,
 		       authority_ceiling_json, resource_envelope_id, priority, earliest_start, deadline,
 		       created_at, updated_at
 		FROM tasks WHERE task_id = ?`, taskID,
 	).Scan(
-		&task.ID, &parentID, &purposeKind, &task.Purpose.ID, &stateValue, &currentAttempt, &task.CurrentFence,
+		&task.ID, &parentID, &purposeKind, &task.Purpose.ID, &task.TaskClass, &stateValue, &currentAttempt, &task.CurrentFence,
 		&criteriaJSON, &capabilitiesJSON, &enforcement, &authorityJSON, &task.ResourceEnvelopeID,
 		&task.Priority, &earliest, &deadline, &createdAt, &updatedAt,
 	); err != nil {
@@ -518,6 +524,7 @@ func loadTask(ctx context.Context, q interface {
 }
 
 func normalizeRootRequest(request TaskRequest) (TaskRequest, error) {
+	request.TaskClass = strings.TrimSpace(request.TaskClass)
 	request.AcceptanceCriteria = normalizeCriteria(request.AcceptanceCriteria)
 	if len(request.AcceptanceCriteria) == 0 {
 		return TaskRequest{}, errors.New("task requires acceptance criteria")

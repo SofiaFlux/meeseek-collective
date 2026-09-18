@@ -16,3 +16,19 @@ func TestAddendumTaskStatesAreDefined(t *testing.T) {
 		t.Fatalf("unexpected addendum states: %q %q", TaskChallenged, TaskExpired)
 	}
 }
+
+
+func TestFieldFeedbackStatesAreDefined(t *testing.T) {
+	if FeedbackCandidate != "CANDIDATE" || FeedbackReported != "REPORTED" || FeedbackRejectedUnsafe != "REJECTED_UNSAFE" {
+		t.Fatalf("unexpected feedback states: %q %q %q", FeedbackCandidate, FeedbackReported, FeedbackRejectedUnsafe)
+	}
+	if SanitizationPass != "PASS" || SanitizationUncertain != "UNCERTAIN" {
+		t.Fatalf("unexpected sanitization states: %q %q", SanitizationPass, SanitizationUncertain)
+	}
+	if ApprovalPending != "PENDING" || ApprovalConsumed != "CONSUMED" {
+		t.Fatalf("unexpected approval states: %q %q", ApprovalPending, ApprovalConsumed)
+	}
+	if ExperienceShadow != "SHADOW" || ExperienceRolledBack != "ROLLED_BACK" {
+		t.Fatalf("unexpected experience states: %q %q", ExperienceShadow, ExperienceRolledBack)
+	}
+}
