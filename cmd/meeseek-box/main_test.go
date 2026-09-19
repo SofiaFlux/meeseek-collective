@@ -75,3 +75,26 @@ func TestServeControlClosesServerWhenContextIsCancelled(t *testing.T) {
 		t.Fatal("control server was not closed")
 	}
 }
+
+
+func TestUnavailableApprovalServiceFailsClosed(t *testing.T) {
+	svc := unavailableApprovalService{}
+	ctx := context.Background()
+
+	pending, err := svc.Pending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending approvals = %v, want none", pending)
+	}
+	if _, err := svc.Get(ctx, "approval-1"); err == nil {
+		t.Fatal("unwired approval Get succeeded")
+	}
+	if err := svc.Approve(ctx, "approval-1", "owner-1", "digest-1"); err == nil {
+		t.Fatal("unwired approval Approve succeeded")
+	}
+	if err := svc.Reject(ctx, "approval-1", "owner-1", "digest-1"); err == nil {
+		t.Fatal("unwired approval Reject succeeded")
+	}
+}
