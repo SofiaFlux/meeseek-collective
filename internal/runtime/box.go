@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/evidence"
 	"github.com/SofiaFlux/meeseek-collective/internal/execution"
+	"github.com/SofiaFlux/meeseek-collective/internal/experience"
 	"github.com/SofiaFlux/meeseek-collective/internal/fieldfeedback"
 	"github.com/SofiaFlux/meeseek-collective/internal/executors"
 	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
@@ -59,7 +61,10 @@ type Box struct {
 	Verification  *verification.Service
 	Resources     *resources.Service
 	Approvals     *approvals.Service
+	FieldObserver *fieldfeedback.Observer
 	Feedback      *fieldfeedback.Feedback
+	Sanitizer     fieldfeedback.Sanitizer
+	Experience    *experience.Service
 	Operations    *operations.Service
 	Capabilities  *capabilities.Registry
 	Scheduler     *scheduler.Service
@@ -85,11 +90,15 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	cfg.StatePath = strings.TrimSpace(cfg.StatePath)
 	cfg.EvidencePath = strings.TrimSpace(cfg.EvidencePath)
 	cfg.CollectiveID = domain.ID(strings.TrimSpace(string(cfg.CollectiveID)))
+	cfg.OwnerPrincipalID = domain.ID(strings.TrimSpace(string(cfg.OwnerPrincipalID)))
 	if cfg.StatePath == "" || cfg.EvidencePath == "" {
 		return nil, errors.New("state and evidence paths are required")
 	}
 	if cfg.CollectiveID == "" {
 		return nil, errors.New("collective id is required")
+	}
+	if cfg.OwnerPrincipalID == "" {
+		return nil, errors.New("Owner principal id is required")
 	}
 	if cfg.PolicyEngine == nil {
 		return nil, errors.New("policy engine is required")
@@ -150,17 +159,52 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	}
 	operationsSvc := operations.New(store, cfg.Clock, executionSvc, cfg.PolicyEngine, resourceSvc, approvalSvc, cfg.CollectiveID, operationProviders...)
 	capabilityRegistry := capabilities.NewRegistry(store, cfg.Clock, executionSvc, cfg.CapabilityProviders...)
-	schedulerSvc := scheduler.New(store, cfg.Clock, purposes, executionSvc, resourceSvc, cfg.LeaseDuration, cfg.ExecutorPreference)
-	wakeSvc := wake.New(store, cfg.Clock, schedulerSvc)
+	var schedulerSvc *scheduler.Service
+	var wakeSvc *wake.Service
 	memorySvc := memory.New(store, cfg.Clock)
 	auditSvc := audit.New(store, cfg.Clock)
+	fieldObserver := fieldfeedback.NewObserver(store, cfg.Clock, cfg.CollectiveID)
+	denyPatterns := make([]*regexp.Regexp, 0, len(cfg.FieldFeedback.DenyPatterns))
+	for _, raw := range cfg.FieldFeedback.DenyPatterns {
+		pattern, err := regexp.Compile(raw)
+		if err != nil {
+			return nil, fmt.Errorf("compile field feedback deny pattern: %w", err)
+		}
+		denyPatterns = append(denyPatterns, pattern)
+	}
+	sanitizer, err := fieldfeedback.NewDeterministicSanitizer(
+		store, cfg.Clock, feedbackSvc,
+		fieldfeedback.DeterministicSanitizerConfig{
+			Version: "deterministic-v1", DenyPatterns: denyPatterns, AllowExecutorMetadata: true,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("construct field feedback sanitizer: %w", err)
+	}
+	experienceSvc := experience.New(store, cfg.Clock, approvalSvc, auditSvc, cfg.OwnerPrincipalID)
+	preference := cfg.ExecutorPreference
+	if preference == nil {
+		preference = experienceSvc
+	}
+	schedulerSvc = scheduler.New(store, cfg.Clock, purposes, executionSvc, resourceSvc, cfg.LeaseDuration, preference)
+	wakeSvc = wake.New(store, cfg.Clock, schedulerSvc)
 
-	executorSet := make(map[string]executors.Executor, len(cfg.Executors))
+	executorSet := make(map[string]executors.Executor, len(cfg.Executors)+1)
 	for name, executor := range cfg.Executors {
 		name = strings.TrimSpace(name)
 		if name != "" && executor != nil {
 			executorSet[name] = executor
 		}
+	}
+	if cfg.FieldFeedback.Enabled && cfg.FieldFeedback.Mode != localconfig.FeedbackModeLocalOnly {
+		emitter, err := fieldfeedback.NewEmitExecutor(feedbackSvc, operationsSvc, cfg.FieldFeedback.Provider)
+		if err != nil {
+			return nil, fmt.Errorf("construct feedback emitter: %w", err)
+		}
+		if _, exists := executorSet["feedback-emitter"]; exists {
+			return nil, errors.New("feedback-emitter executor kind is reserved")
+		}
+		executorSet["feedback-emitter"] = emitter
 	}
 
 	box := &Box{
@@ -172,7 +216,10 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 		Verification: verificationSvc,
 		Resources: resourceSvc,
 		Approvals: approvalSvc,
+		FieldObserver: fieldObserver,
 		Feedback: feedbackSvc,
+		Sanitizer: sanitizer,
+		Experience: experienceSvc,
 		Operations: operationsSvc,
 		Capabilities: capabilityRegistry,
 		Scheduler: schedulerSvc,

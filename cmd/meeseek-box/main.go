@@ -65,24 +65,6 @@ func (p boxStatusProvider) Status(ctx context.Context) (control.StatusDTO, error
 	}, nil
 }
 
-type unavailableApprovalService struct{}
-
-func (unavailableApprovalService) Get(context.Context, domain.ID) (domain.ApprovalRequestRecord, error) {
-	return domain.ApprovalRequestRecord{}, errors.New("durable approval workflow is not wired into the Box yet; approval unavailable")
-}
-
-func (unavailableApprovalService) Pending(context.Context) ([]domain.ApprovalRequestRecord, error) {
-	return nil, nil
-}
-
-func (unavailableApprovalService) Approve(context.Context, domain.ID, domain.ID, string) error {
-	return errors.New("durable approval workflow is not wired into the Box yet; approval refused")
-}
-
-func (unavailableApprovalService) Reject(context.Context, domain.ID, domain.ID, string) error {
-	return errors.New("durable approval workflow is not wired into the Box yet; rejection refused")
-}
-
 func serveControl(ctx context.Context, listener net.Listener, server controlLifecycle) error {
 	if ctx == nil {
 		return errors.New("control context is required")
@@ -161,7 +143,10 @@ func run(ctx context.Context) error {
 	}, control.Dependencies{
 		Status:     boxStatusProvider{box: box},
 		Tasks:      box.Execution,
-		Approvals:  unavailableApprovalService{},
+		Approvals:  box.Approvals,
+		Feedback:   box.Feedback,
+		FieldObserver: box.FieldObserver,
+		Experience: box.Experience,
 		Attempts:   box.Execution,
 		Operations: box.Operations,
 		Shutdown:   box,

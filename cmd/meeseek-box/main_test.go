@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
 )
 
 type lifecycleControlServer struct {
@@ -77,24 +79,19 @@ func TestServeControlClosesServerWhenContextIsCancelled(t *testing.T) {
 }
 
 
-func TestUnavailableApprovalServiceFailsClosed(t *testing.T) {
-	svc := unavailableApprovalService{}
-	ctx := context.Background()
 
-	pending, err := svc.Pending(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("pending approvals = %v, want none", pending)
-	}
-	if _, err := svc.Get(ctx, "approval-1"); err == nil {
-		t.Fatal("unwired approval Get succeeded")
-	}
-	if err := svc.Approve(ctx, "approval-1", "owner-1", "digest-1"); err == nil {
-		t.Fatal("unwired approval Approve succeeded")
-	}
-	if err := svc.Reject(ctx, "approval-1", "owner-1", "digest-1"); err == nil {
-		t.Fatal("unwired approval Reject succeeded")
-	}
+func TestBuildFeedbackSinkDoesNotRequireCredentialWhenDisabled(t *testing.T) {
+	t.Setenv("MEESEEK_FEEDBACK_GITHUB_TOKEN_FILE","")
+	cfg:=localconfig.Config{FieldFeedback:localconfig.FieldFeedbackConfig{Enabled:false,Mode:localconfig.FeedbackModeLocalOnly}}
+	sink,err:=buildFeedbackSink(cfg)
+	if err!=nil{t.Fatal(err)}
+	if sink!=nil{t.Fatal("disabled feedback unexpectedly created sink")}
+}
+
+func TestBuildFeedbackSinkFailsClosedWhenGitHubExportEnabledWithoutCredentialFile(t *testing.T) {
+	t.Setenv("MEESEEK_FEEDBACK_GITHUB_TOKEN_FILE","")
+	cfg:=localconfig.Config{FieldFeedback:localconfig.FieldFeedbackConfig{
+		Enabled:true,Mode:localconfig.FeedbackModeAutoIfAllowed,Provider:"github",Destination:"owner/repo",
+	}}
+	if _,err:=buildFeedbackSink(cfg);err==nil{t.Fatal("GitHub export started without credential file")}
 }

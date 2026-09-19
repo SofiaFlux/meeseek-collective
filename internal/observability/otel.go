@@ -44,6 +44,18 @@ func (b *Bridge) StartOperation(ctx context.Context, taskID, operationID domain.
 	return b.start(ctx, operationSpanSpec(taskID, operationID))
 }
 
+func (b *Bridge) StartFeedback(ctx context.Context, feedbackID domain.ID, phase string) (context.Context, trace.Span) {
+	return b.start(ctx, feedbackSpanSpec(feedbackID, phase))
+}
+
+func (b *Bridge) StartSanitization(ctx context.Context, candidateID domain.ID) (context.Context, trace.Span) {
+	return b.start(ctx, sanitizationSpanSpec(candidateID))
+}
+
+func (b *Bridge) StartExperienceRule(ctx context.Context, ruleID domain.ID, phase string) (context.Context, trace.Span) {
+	return b.start(ctx, experienceRuleSpanSpec(ruleID, phase))
+}
+
 func (b *Bridge) start(ctx context.Context, spec spanSpec) (context.Context, trace.Span) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -89,6 +101,36 @@ func operationSpanSpec(taskID, operationID domain.ID) spanSpec {
 		attributes: []attribute.KeyValue{
 			attribute.String("meeseek.task.id", strings.TrimSpace(string(taskID))),
 			attribute.String("meeseek.operation.id", strings.TrimSpace(string(operationID))),
+		},
+	}
+}
+
+
+func feedbackSpanSpec(feedbackID domain.ID, phase string) spanSpec {
+	return spanSpec{
+		name: "meeseek.feedback",
+		attributes: []attribute.KeyValue{
+			attribute.String("meeseek.feedback.id", strings.TrimSpace(string(feedbackID))),
+			attribute.String("meeseek.feedback.phase", strings.TrimSpace(phase)),
+		},
+	}
+}
+
+func sanitizationSpanSpec(candidateID domain.ID) spanSpec {
+	return spanSpec{
+		name: "meeseek.sanitization",
+		attributes: []attribute.KeyValue{
+			attribute.String("meeseek.feedback.candidate_id", strings.TrimSpace(string(candidateID))),
+		},
+	}
+}
+
+func experienceRuleSpanSpec(ruleID domain.ID, phase string) spanSpec {
+	return spanSpec{
+		name: "meeseek.experience_rule",
+		attributes: []attribute.KeyValue{
+			attribute.String("meeseek.experience.rule_id", strings.TrimSpace(string(ruleID))),
+			attribute.String("meeseek.experience.phase", strings.TrimSpace(phase)),
 		},
 	}
 }

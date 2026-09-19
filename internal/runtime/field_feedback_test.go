@@ -1,0 +1,65 @@
+package runtime
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+
+	"github.com/SofiaFlux/meeseek-collective/internal/domain"
+	"github.com/SofiaFlux/meeseek-collective/internal/fieldfeedback"
+	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
+	"github.com/SofiaFlux/meeseek-collective/internal/operations"
+	"github.com/SofiaFlux/meeseek-collective/internal/policy"
+)
+
+type compositionPolicy struct{}
+
+func (compositionPolicy) Evaluate(_ context.Context, in policy.PolicyInput) (domain.PolicyDecision,error) {
+	return domain.PolicyDecision{
+		ID:domain.NewID("policy-decision"),Outcome:domain.PolicyAllow,
+		PolicySetID:"policy-test",PolicySetHash:"hash",PolicyCapabilitiesHash:"caps",
+		InputDigest:"input",EvaluatedAt:in.Now,
+	},nil
+}
+
+type compositionSink struct{}
+func (compositionSink) Create(context.Context,fieldfeedback.IssuePayload)(string,int64,error){return "issue-1",0,nil}
+func (compositionSink) FindByMarker(context.Context,string)(string,bool,error){return "",false,nil}
+
+var _ operations.Provider = (*fieldfeedback.Provider)(nil)
+
+func TestBoxComposesFieldFeedbackServicesWhenOutboundDisabled(t *testing.T) {
+	root:=t.TempDir()
+	box,err:=Open(context.Background(),Config{
+		StatePath:filepath.Join(root,"state.db"),EvidencePath:filepath.Join(root,"evidence"),
+		CollectiveID:"collective-1",OwnerPrincipalID:"owner-1",PolicyEngine:compositionPolicy{},
+		FieldFeedback:localconfig.FieldFeedbackConfig{Enabled:false,Mode:localconfig.FeedbackModeLocalOnly},
+	})
+	if err!=nil{t.Fatal(err)}
+	defer box.Close()
+	if box.Approvals==nil||box.FieldObserver==nil||box.Feedback==nil||box.Sanitizer==nil||box.Experience==nil{
+		t.Fatalf("new services not fully composed: approvals=%v observer=%v feedback=%v sanitizer=%v experience=%v",
+			box.Approvals!=nil,box.FieldObserver!=nil,box.Feedback!=nil,box.Sanitizer!=nil,box.Experience!=nil)
+	}
+	if _,exists:=box.Executors["feedback-emitter"];exists{
+		t.Fatal("feedback-emitter registered while outbound feedback disabled")
+	}
+}
+
+func TestBoxRegistersFeedbackEmitterOnlyWithConfiguredOutboundSink(t *testing.T) {
+	root:=t.TempDir()
+	box,err:=Open(context.Background(),Config{
+		StatePath:filepath.Join(root,"state.db"),EvidencePath:filepath.Join(root,"evidence"),
+		CollectiveID:"collective-1",OwnerPrincipalID:"owner-1",PolicyEngine:compositionPolicy{},
+		FieldFeedback:localconfig.FieldFeedbackConfig{
+			Enabled:true,Mode:localconfig.FeedbackModeAutoIfAllowed,Provider:"github",
+			Destination:"owner/repo",MaintenanceEnvelopeID:"maintenance",RequiredEnforcement:domain.EnforcementEnforced,
+		},
+		FeedbackSink:compositionSink{},
+	})
+	if err!=nil{t.Fatal(err)}
+	defer box.Close()
+	if _,exists:=box.Executors["feedback-emitter"];!exists{
+		t.Fatal("feedback-emitter missing with explicitly configured outbound sink")
+	}
+}

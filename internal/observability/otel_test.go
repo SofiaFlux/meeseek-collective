@@ -38,6 +38,18 @@ func TestSpanSpecsReferenceCanonicalIDs(t *testing.T) {
 			wantName:  "meeseek.operation",
 			wantAttrs: map[string]string{"meeseek.task.id": "task-1", "meeseek.operation.id": "operation-1"},
 		},
+		{
+			name: "feedback", spec: feedbackSpanSpec("feedback-1", "emit"), wantName: "meeseek.feedback",
+			wantAttrs: map[string]string{"meeseek.feedback.id":"feedback-1","meeseek.feedback.phase":"emit"},
+		},
+		{
+			name: "sanitization", spec: sanitizationSpanSpec("candidate-1"), wantName: "meeseek.sanitization",
+			wantAttrs: map[string]string{"meeseek.feedback.candidate_id":"candidate-1"},
+		},
+		{
+			name: "experience", spec: experienceRuleSpanSpec("rule-1", "promote"), wantName: "meeseek.experience_rule",
+			wantAttrs: map[string]string{"meeseek.experience.rule_id":"rule-1","meeseek.experience.phase":"promote"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -86,6 +98,21 @@ func TestDefaultBridgeIsNoopButUsable(t *testing.T) {
 		},
 		func(ctx context.Context) context.Context {
 			ctx, span := bridge.StartOperation(ctx, "task-1", "operation-1")
+			defer span.End()
+			return ctx
+		},
+		func(ctx context.Context) context.Context {
+			ctx, span := bridge.StartFeedback(ctx, "feedback-1", "emit")
+			defer span.End()
+			return ctx
+		},
+		func(ctx context.Context) context.Context {
+			ctx, span := bridge.StartSanitization(ctx, "candidate-1")
+			defer span.End()
+			return ctx
+		},
+		func(ctx context.Context) context.Context {
+			ctx, span := bridge.StartExperienceRule(ctx, "rule-1", "promote")
 			defer span.End()
 			return ctx
 		},
