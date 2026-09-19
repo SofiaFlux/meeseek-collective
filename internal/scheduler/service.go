@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/clock"
@@ -32,6 +33,10 @@ type TaskCandidate struct {
 	DependencyUnlocks int
 }
 
+type ExecutorPreference interface {
+	PreferredExecutor(context.Context, domain.Task, []string) (string, bool, error)
+}
+
 type Service struct {
 	store         *state.Store
 	clock         clock.Clock
@@ -39,12 +44,17 @@ type Service struct {
 	execution     *execution.Service
 	resources     *resources.Service
 	leaseDuration time.Duration
+	preference    ExecutorPreference
 }
 
-func New(store *state.Store, clk clock.Clock, purposes *purpose.Service, executionSvc *execution.Service, resourceSvc *resources.Service, leaseDuration time.Duration) *Service {
+func New(store *state.Store, clk clock.Clock, purposes *purpose.Service, executionSvc *execution.Service, resourceSvc *resources.Service, leaseDuration time.Duration, preferences ...ExecutorPreference) *Service {
+	var preference ExecutorPreference
+	if len(preferences) > 0 {
+		preference = preferences[0]
+	}
 	return &Service{
 		store: store, clock: clk, purpose: purposes, execution: executionSvc,
-		resources: resourceSvc, leaseDuration: leaseDuration,
+		resources: resourceSvc, leaseDuration: leaseDuration, preference: preference,
 	}
 }
 
@@ -93,6 +103,46 @@ func (s *Service) Next(ctx context.Context, capacity CapacitySnapshot) (*TaskCan
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidateBefore(candidates[i], candidates[j]) })
 	return &candidates[0], nil
+}
+
+
+func (s *Service) ChooseExecutor(ctx context.Context, task domain.Task, eligibleExecutorKinds []string) (string, error) {
+	if err := s.configured(); err != nil {
+		return "", err
+	}
+	set := make(map[string]struct{}, len(eligibleExecutorKinds))
+	eligible := make([]string, 0, len(eligibleExecutorKinds))
+	for _, kind := range eligibleExecutorKinds {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			continue
+		}
+		if _, exists := set[kind]; exists {
+			continue
+		}
+		set[kind] = struct{}{}
+		eligible = append(eligible, kind)
+	}
+	if len(eligible) == 0 {
+		return "", errors.New("no eligible executor kinds")
+	}
+	sort.Strings(eligible)
+	baseline := eligible[0]
+	if s.preference == nil {
+		return baseline, nil
+	}
+	preferred, found, err := s.preference.PreferredExecutor(ctx, task, append([]string(nil), eligible...))
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return baseline, nil
+	}
+	preferred = strings.TrimSpace(preferred)
+	if _, ok := set[preferred]; !ok {
+		return "", fmt.Errorf("learned preference returned ineligible executor %q", preferred)
+	}
+	return preferred, nil
 }
 
 func (s *Service) Lease(ctx context.Context, taskID domain.ID, executorKind string) (domain.Attempt, error) {

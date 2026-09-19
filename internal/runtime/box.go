@@ -45,6 +45,7 @@ type Config struct {
 	OperationProviders  []operations.Provider
 	CapabilityProviders []capabilities.Provider
 	Executors           map[string]executors.Executor
+	ExecutorPreference  scheduler.ExecutorPreference
 	TEBProfile          teb.Profile
 	LeaseDuration       time.Duration
 }
@@ -149,7 +150,7 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	}
 	operationsSvc := operations.New(store, cfg.Clock, executionSvc, cfg.PolicyEngine, resourceSvc, approvalSvc, cfg.CollectiveID, operationProviders...)
 	capabilityRegistry := capabilities.NewRegistry(store, cfg.Clock, executionSvc, cfg.CapabilityProviders...)
-	schedulerSvc := scheduler.New(store, cfg.Clock, purposes, executionSvc, resourceSvc, cfg.LeaseDuration)
+	schedulerSvc := scheduler.New(store, cfg.Clock, purposes, executionSvc, resourceSvc, cfg.LeaseDuration, cfg.ExecutorPreference)
 	wakeSvc := wake.New(store, cfg.Clock, schedulerSvc)
 	memorySvc := memory.New(store, cfg.Clock)
 	auditSvc := audit.New(store, cfg.Clock)
