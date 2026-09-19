@@ -1,6 +1,7 @@
 package localconfig
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -64,5 +65,65 @@ func TestResolveHomeUsesEnvironmentOverride(t *testing.T) {
 	}
 	if got != abs {
 		t.Fatalf("resolved home=%q, want %q", got, abs)
+	}
+}
+
+
+func TestFieldFeedbackDefaultsToDisabledLocalOnly(t *testing.T) {
+	cfg := FieldFeedbackConfig{}.withDefaults()
+	if cfg.Enabled {
+		t.Fatal("field feedback defaulted to enabled")
+	}
+	if cfg.Mode != FeedbackModeLocalOnly {
+		t.Fatalf("default feedback mode = %q, want LOCAL_ONLY", cfg.Mode)
+	}
+	if cfg.Provider != "" || cfg.Destination != "" || cfg.MaintenanceEnvelopeID != "" {
+		t.Fatalf("default feedback config carries export settings: %+v", cfg)
+	}
+	if cfg.RequiredEnforcement != domain.EnforcementEnforced {
+		t.Fatalf("default feedback enforcement = %q, want ENFORCED", cfg.RequiredEnforcement)
+	}
+}
+
+func TestFieldFeedbackExportModesRequireProviderDestinationAndBudget(t *testing.T) {
+	for _, mode := range []FeedbackMode{FeedbackModeAutoIfAllowed, FeedbackModeRequireApproval} {
+		cfg := FieldFeedbackConfig{Enabled: true, Mode: mode}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("mode %s accepted without provider/destination/envelope", mode)
+		}
+		cfg.Provider = "github"
+		cfg.Destination = "owner/repo"
+		cfg.MaintenanceEnvelopeID = "maintenance"
+		cfg.RequiredEnforcement = domain.EnforcementEnforced
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid mode %s rejected: %v", mode, err)
+		}
+	}
+}
+
+func TestFieldFeedbackRejectsCredentialLikeConfigFieldsViaStrictDecode(t *testing.T) {
+	home := t.TempDir()
+	token, err := NewControlToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := fmt.Sprintf(`{
+	  "version":1,
+	  "collective_id":"collective",
+	  "owner_principal_id":"owner",
+	  "cube_principal_id":"cube",
+	  "constitutional_root_principal_id":"root",
+	  "constitution_hash":"hash",
+	  "active_policy_set_id":"policy",
+	  "database_path":%q,
+	  "evidence_path":%q,
+	  "control_token":%q,
+	  "field_feedback":{"enabled":true,"mode":"AUTO_IF_ALLOWED","provider":"github","destination":"owner/repo","maintenance_envelope_id":"env","token":"secret"}
+	}`, filepath.Join(home, "state.db"), filepath.Join(home, "evidence"), token)
+	if err := os.WriteFile(filepath.Join(home, "config.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(home); err == nil {
+		t.Fatal("credential-like field in field_feedback was accepted")
 	}
 }
