@@ -45,8 +45,9 @@ type NormalizedMetrics struct {
 }
 
 type Feedback struct {
-	store *state.Store
-	clock clock.Clock
+	store    *state.Store
+	clock    clock.Clock
+	emission *emissionRuntime
 }
 
 func NewFeedback(store *state.Store, clk clock.Clock) *Feedback {

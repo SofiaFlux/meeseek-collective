@@ -137,6 +137,8 @@ func run(ctx context.Context) error {
 		StatePath:    cfg.DatabasePath,
 		EvidencePath: cfg.EvidencePath,
 		CollectiveID: cfg.CollectiveID,
+		OwnerPrincipalID: cfg.OwnerPrincipalID,
+		FieldFeedback: cfg.FieldFeedback,
 		PolicyEngine: material.policyEngine,
 	})
 	if err != nil {

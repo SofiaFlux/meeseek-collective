@@ -15,7 +15,9 @@ import (
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/evidence"
 	"github.com/SofiaFlux/meeseek-collective/internal/execution"
+	"github.com/SofiaFlux/meeseek-collective/internal/fieldfeedback"
 	"github.com/SofiaFlux/meeseek-collective/internal/executors"
+	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
 	"github.com/SofiaFlux/meeseek-collective/internal/memory"
 	"github.com/SofiaFlux/meeseek-collective/internal/observability"
 	"github.com/SofiaFlux/meeseek-collective/internal/operations"
@@ -36,6 +38,8 @@ type Config struct {
 	EvidencePath        string
 	Clock               clock.Clock
 	CollectiveID        domain.ID
+	OwnerPrincipalID    domain.ID
+	FieldFeedback       localconfig.FieldFeedbackConfig
 	PolicyEngine        policy.PolicyEngine
 	OperationProviders  []operations.Provider
 	CapabilityProviders []capabilities.Provider
@@ -53,6 +57,7 @@ type Box struct {
 	Verification  *verification.Service
 	Resources     *resources.Service
 	Approvals     *approvals.Service
+	Feedback      *fieldfeedback.Feedback
 	Operations    *operations.Service
 	Capabilities  *capabilities.Registry
 	Scheduler     *scheduler.Service
@@ -120,6 +125,10 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	verificationSvc := verification.New(store, cfg.Clock, executionSvc)
 	resourceSvc := resources.New(store, cfg.Clock)
 	approvalSvc := approvals.New(store, cfg.Clock)
+	feedbackSvc := fieldfeedback.NewFeedback(store, cfg.Clock)
+	if err := feedbackSvc.ConfigureEmission(executionSvc, cfg.FieldFeedback, cfg.OwnerPrincipalID); err != nil {
+		return nil, fmt.Errorf("configure field feedback: %w", err)
+	}
 	operationsSvc := operations.New(store, cfg.Clock, executionSvc, cfg.PolicyEngine, resourceSvc, approvalSvc, cfg.CollectiveID, cfg.OperationProviders...)
 	capabilityRegistry := capabilities.NewRegistry(store, cfg.Clock, executionSvc, cfg.CapabilityProviders...)
 	schedulerSvc := scheduler.New(store, cfg.Clock, purposes, executionSvc, resourceSvc, cfg.LeaseDuration)
@@ -144,6 +153,7 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 		Verification: verificationSvc,
 		Resources: resourceSvc,
 		Approvals: approvalSvc,
+		Feedback: feedbackSvc,
 		Operations: operationsSvc,
 		Capabilities: capabilityRegistry,
 		Scheduler: schedulerSvc,

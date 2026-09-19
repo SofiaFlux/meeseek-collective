@@ -130,11 +130,18 @@ ALTER TABLE external_operations
 ALTER TABLE tasks
     ADD COLUMN task_class TEXT NOT NULL DEFAULT '';
 
+CREATE UNIQUE INDEX feedback_emit_task_per_artifact
+    ON tasks(purpose_kind, purpose_id, task_class)
+    WHERE purpose_kind = 'COLLECTIVE_MAINTENANCE'
+      AND task_class = 'collective.feedback.emit';
+
 CREATE TABLE feedback_emissions (
     feedback_id TEXT PRIMARY KEY REFERENCES sanitized_feedback(feedback_id),
     task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
     provider TEXT NOT NULL,
     destination TEXT NOT NULL,
+    generic_task_class TEXT NOT NULL DEFAULT 'MAINTENANCE'
+        CHECK (generic_task_class = 'MAINTENANCE'),
     required_approvers_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
 );
@@ -287,6 +294,7 @@ DROP INDEX adaptation_grants_kind_scope;
 DROP TABLE adaptation_grants;
 DROP TABLE adaptation_grant_requests;
 DROP TABLE feedback_emissions;
+DROP INDEX feedback_emit_task_per_artifact;
 ALTER TABLE tasks DROP COLUMN task_class;
 ALTER TABLE external_operations DROP COLUMN caller_required_approvers_json;
 ALTER TABLE external_operations DROP COLUMN approval_id;
