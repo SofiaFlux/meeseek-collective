@@ -144,6 +144,8 @@ type Dependencies struct {
 	Approvals  ApprovalService
 	Attempts   AttemptReader
 	Operations OperationReader
+	Feedback   FeedbackService
+	FieldObserver FieldObserver
 	Shutdown   ShutdownService
 }
 
@@ -199,6 +201,11 @@ func NewServer(config ServerConfig, deps Dependencies) (*Server, error) {
 	mux.HandleFunc("POST /approvals/{id}/reject", s.handleApprovalReject)
 	mux.HandleFunc("GET /inspect/attempts/{id}", s.handleAttempt)
 	mux.HandleFunc("GET /inspect/operations/{id}", s.handleOperation)
+	mux.HandleFunc("GET /feedback", s.handleFeedbackList)
+	mux.HandleFunc("GET /feedback/{id}", s.handleFeedbackInspect)
+	mux.HandleFunc("POST /feedback/{id}/emit", s.handleFeedbackEmit)
+	mux.HandleFunc("POST /feedback/observations", s.handleFeedbackObserve)
+	mux.HandleFunc("POST /feedback/scan", s.handleFeedbackScan)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
 	s.handler = s.authenticate(mux)
 	s.httpServer = &http.Server{Handler: s.handler}

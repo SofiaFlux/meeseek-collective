@@ -21,6 +21,9 @@ type fakeControlAPI struct {
 	created      control.CreateTaskRequest
 	approveCalls int
 	rejectCalls  int
+	feedbackEmitCalls int
+	feedbackObserveCalls int
+	feedbackScanCalls int
 	shutdowns    int
 }
 
@@ -35,6 +38,26 @@ func (f *fakeControlAPI) Task(context.Context, domain.ID) (control.TaskDTO, erro
 func (f *fakeControlAPI) Approvals(context.Context) ([]control.ApprovalDTO, error) { return nil, nil }
 func (f *fakeControlAPI) Approval(context.Context, domain.ID) (control.ApprovalDTO, error) {
 	return control.ApprovalDTO{ApprovalID: "approval-1", Status: "PENDING"}, nil
+}
+func (f *fakeControlAPI) Feedback(context.Context) ([]control.FeedbackCandidateDTO, error) {
+	return []control.FeedbackCandidateDTO{{ID:"feedback-1",State:domain.FeedbackStateSanitized,Category:"TEST"}}, nil
+}
+func (f *fakeControlAPI) FeedbackInspect(context.Context, domain.ID) (control.FeedbackInspectDTO, error) {
+	local := control.FeedbackCandidateDTO{ID:"feedback-1",State:domain.FeedbackStateSanitized,Category:"TEST",ObservedBehavior:"local-only"}
+	exported := control.SanitizedFeedbackDTO{ID:"sanitized-1",CandidateID:"feedback-1",ContentJSON:"{\"category\":\"TEST\"}",Fingerprint:"fp"}
+	return control.FeedbackInspectDTO{LocalCandidate:&local,ExportArtifact:&exported}, nil
+}
+func (f *fakeControlAPI) FeedbackEmit(context.Context, domain.ID) (control.FeedbackEmitDTO, error) {
+	f.feedbackEmitCalls++
+	return control.FeedbackEmitDTO{CandidateID:"feedback-1",ArtifactID:"sanitized-1",TaskID:"task-feedback",Status:"GOVERNED_WORK_SCHEDULED"}, nil
+}
+func (f *fakeControlAPI) FeedbackObserve(_ context.Context, _ control.FeedbackObserveRequest) (control.FeedbackObservationDTO, error) {
+	f.feedbackObserveCalls++
+	return control.FeedbackObservationDTO{ID:"obs-1",Category:"TEST",SourceKind:"OPERATOR"}, nil
+}
+func (f *fakeControlAPI) FeedbackScan(context.Context) ([]control.FeedbackObservationDTO, error) {
+	f.feedbackScanCalls++
+	return []control.FeedbackObservationDTO{{ID:"obs-2",Category:"RECOVERY_FRICTION",SourceKind:"ATTEMPT_FAILURES"}}, nil
 }
 func (f *fakeControlAPI) Approve(_ context.Context, _ domain.ID, signer identity.Signer) (control.ApprovalDTO, error) {
 	f.approveCalls++
@@ -61,7 +84,7 @@ func TestRootWiresControlCommandsAndStableJSONOutput(t *testing.T) {
 	}
 
 	root := newRootCommandWithClient(api)
-	if findCommand(t, root, "status") == nil || findCommand(t, root, "task", "create") == nil || findCommand(t, root, "task", "show") == nil || findCommand(t, root, "approve") == nil || findCommand(t, root, "reject") == nil || findCommand(t, root, "inspect", "attempt") == nil || findCommand(t, root, "inspect", "operation") == nil {
+	if findCommand(t, root, "status") == nil || findCommand(t, root, "task", "create") == nil || findCommand(t, root, "task", "show") == nil || findCommand(t, root, "approve") == nil || findCommand(t, root, "reject") == nil || findCommand(t, root, "approvals") == nil || findCommand(t, root, "feedback") == nil || findCommand(t, root, "inspect", "attempt") == nil || findCommand(t, root, "inspect", "operation") == nil {
 		t.Fatal("expected control commands are not all registered")
 	}
 

@@ -431,3 +431,30 @@ func (s *Feedback) SanitizedFeedback(ctx context.Context, id domain.ID) (domain.
 	}
 	return out, nil
 }
+
+
+func (s *Feedback) LatestSanitizedFeedbackForCandidate(
+	ctx context.Context,
+	candidateID domain.ID,
+) (domain.SanitizedFeedback, bool, error) {
+	if err := s.configured(); err != nil {
+		return domain.SanitizedFeedback{}, false, err
+	}
+	candidateID = domain.ID(strings.TrimSpace(string(candidateID)))
+	if candidateID == "" {
+		return domain.SanitizedFeedback{}, false, errors.New("candidate id is required")
+	}
+	var feedbackID domain.ID
+	err := s.store.DB().QueryRowContext(ctx,
+		"SELECT feedback_id FROM sanitized_feedback WHERE candidate_id = ? ORDER BY created_at DESC, feedback_id DESC LIMIT 1",
+		candidateID,
+	).Scan(&feedbackID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SanitizedFeedback{}, false, nil
+	}
+	if err != nil {
+		return domain.SanitizedFeedback{}, false, err
+	}
+	artifact, err := s.SanitizedFeedback(ctx, feedbackID)
+	return artifact, err == nil, err
+}

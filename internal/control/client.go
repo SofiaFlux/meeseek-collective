@@ -21,6 +21,11 @@ type API interface {
 	Task(context.Context, domain.ID) (TaskDTO, error)
 	Approvals(context.Context) ([]ApprovalDTO, error)
 	Approval(context.Context, domain.ID) (ApprovalDTO, error)
+	Feedback(context.Context) ([]FeedbackCandidateDTO, error)
+	FeedbackInspect(context.Context, domain.ID) (FeedbackInspectDTO, error)
+	FeedbackEmit(context.Context, domain.ID) (FeedbackEmitDTO, error)
+	FeedbackObserve(context.Context, FeedbackObserveRequest) (FeedbackObservationDTO, error)
+	FeedbackScan(context.Context) ([]FeedbackObservationDTO, error)
 	Approve(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
 	Reject(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
 	Attempt(context.Context, domain.ID) (AttemptDTO, error)
@@ -76,6 +81,37 @@ func (c *Client) Approvals(ctx context.Context) ([]ApprovalDTO, error) {
 func (c *Client) Approval(ctx context.Context, id domain.ID) (ApprovalDTO, error) {
 	var result ApprovalDTO
 	err := c.doJSON(ctx, http.MethodGet, "/approvals/"+string(id), nil, &result, http.StatusOK)
+	return result, err
+}
+
+
+func (c *Client) Feedback(ctx context.Context) ([]FeedbackCandidateDTO, error) {
+	var result []FeedbackCandidateDTO
+	err := c.doJSON(ctx, http.MethodGet, "/feedback", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) FeedbackInspect(ctx context.Context, id domain.ID) (FeedbackInspectDTO, error) {
+	var result FeedbackInspectDTO
+	err := c.doJSON(ctx, http.MethodGet, "/feedback/"+string(id), nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) FeedbackEmit(ctx context.Context, id domain.ID) (FeedbackEmitDTO, error) {
+	var result FeedbackEmitDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/"+string(id)+"/emit", nil, &result, http.StatusAccepted)
+	return result, err
+}
+
+func (c *Client) FeedbackObserve(ctx context.Context, request FeedbackObserveRequest) (FeedbackObservationDTO, error) {
+	var result FeedbackObservationDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/observations", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) FeedbackScan(ctx context.Context) ([]FeedbackObservationDTO, error) {
+	var result []FeedbackObservationDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/scan", nil, &result, http.StatusOK)
 	return result, err
 }
 
