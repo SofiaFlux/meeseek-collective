@@ -146,6 +146,7 @@ type Dependencies struct {
 	Operations OperationReader
 	Feedback   FeedbackService
 	FieldObserver FieldObserver
+	Experience ExperienceService
 	Shutdown   ShutdownService
 }
 
@@ -206,6 +207,10 @@ func NewServer(config ServerConfig, deps Dependencies) (*Server, error) {
 	mux.HandleFunc("POST /feedback/{id}/emit", s.handleFeedbackEmit)
 	mux.HandleFunc("POST /feedback/observations", s.handleFeedbackObserve)
 	mux.HandleFunc("POST /feedback/scan", s.handleFeedbackScan)
+	mux.HandleFunc("POST /experience/grants/requests", s.handleExperienceGrantRequest)
+	mux.HandleFunc("POST /experience/grants/{id}/activate", s.handleExperienceGrantActivate)
+	mux.HandleFunc("GET /experience", s.handleExperienceList)
+	mux.HandleFunc("GET /experience/{id}", s.handleExperienceGet)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
 	s.handler = s.authenticate(mux)
 	s.httpServer = &http.Server{Handler: s.handler}

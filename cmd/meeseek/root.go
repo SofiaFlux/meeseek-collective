@@ -34,6 +34,7 @@ func newRootCommandWithClient(api control.API) *cobra.Command {
 		newRejectCommand(api, &jsonOutput),
 		newApprovalsCommand(api, &jsonOutput),
 		newFeedbackCommand(api, &jsonOutput),
+		newExperienceCommand(api, &jsonOutput),
 		newInspectCommand(api, &jsonOutput),
 	)
 	return command

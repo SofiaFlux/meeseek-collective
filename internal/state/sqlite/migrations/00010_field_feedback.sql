@@ -184,6 +184,13 @@ CREATE TABLE experience_proposals (
 );
 CREATE INDEX experience_proposals_scope ON experience_proposals(scope_key, generic_task_class, state);
 
+CREATE TABLE experience_proposal_evidence (
+    proposal_id TEXT NOT NULL REFERENCES experience_proposals(proposal_id),
+    observation_id TEXT NOT NULL REFERENCES field_observations(observation_id),
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (proposal_id, observation_id)
+);
+
 CREATE TABLE experience_rules (
     rule_id TEXT PRIMARY KEY,
     proposal_id TEXT NOT NULL REFERENCES experience_proposals(proposal_id),
@@ -230,6 +237,15 @@ CREATE TABLE experience_outcomes (
 );
 CREATE INDEX experience_outcomes_scope_time
     ON experience_outcomes(scope_key, generic_task_class, executor_kind, recorded_at);
+CREATE UNIQUE INDEX experience_outcomes_dedupe
+    ON experience_outcomes(task_id, generic_task_class, scope_key, executor_kind, accepted);
+
+CREATE TABLE experience_rule_outcomes (
+    rule_id TEXT NOT NULL REFERENCES experience_rules(rule_id),
+    outcome_id TEXT NOT NULL REFERENCES experience_outcomes(outcome_id),
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (rule_id, outcome_id)
+);
 
 -- +goose StatementBegin
 CREATE TRIGGER sanitization_results_no_update
@@ -283,11 +299,14 @@ DROP TRIGGER sanitized_feedback_no_delete;
 DROP TRIGGER sanitized_feedback_no_update;
 DROP TRIGGER sanitization_results_no_delete;
 DROP TRIGGER sanitization_results_no_update;
+DROP TABLE experience_rule_outcomes;
+DROP INDEX experience_outcomes_dedupe;
 DROP INDEX experience_outcomes_scope_time;
 DROP TABLE experience_outcomes;
 DROP TABLE experience_rule_evidence;
 DROP INDEX experience_rules_active_scope;
 DROP TABLE experience_rules;
+DROP TABLE experience_proposal_evidence;
 DROP INDEX experience_proposals_scope;
 DROP TABLE experience_proposals;
 DROP INDEX adaptation_grants_kind_scope;

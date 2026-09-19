@@ -26,6 +26,10 @@ type API interface {
 	FeedbackEmit(context.Context, domain.ID) (FeedbackEmitDTO, error)
 	FeedbackObserve(context.Context, FeedbackObserveRequest) (FeedbackObservationDTO, error)
 	FeedbackScan(context.Context) ([]FeedbackObservationDTO, error)
+	ExperienceGrantRequest(context.Context, ExperienceGrantCreateRequest) (ExperienceGrantRequestDTO, error)
+	ExperienceGrantActivate(context.Context, domain.ID) (AdaptationGrantDTO, error)
+	ExperienceRules(context.Context) ([]ExperienceRuleDTO, error)
+	ExperienceRule(context.Context, domain.ID) (ExperienceRuleDTO, error)
 	Approve(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
 	Reject(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
 	Attempt(context.Context, domain.ID) (AttemptDTO, error)
@@ -112,6 +116,31 @@ func (c *Client) FeedbackObserve(ctx context.Context, request FeedbackObserveReq
 func (c *Client) FeedbackScan(ctx context.Context) ([]FeedbackObservationDTO, error) {
 	var result []FeedbackObservationDTO
 	err := c.doJSON(ctx, http.MethodPost, "/feedback/scan", nil, &result, http.StatusOK)
+	return result, err
+}
+
+
+func (c *Client) ExperienceGrantRequest(ctx context.Context, request ExperienceGrantCreateRequest) (ExperienceGrantRequestDTO, error) {
+	var result ExperienceGrantRequestDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/grants/requests", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) ExperienceGrantActivate(ctx context.Context, id domain.ID) (AdaptationGrantDTO, error) {
+	var result AdaptationGrantDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/grants/"+string(id)+"/activate", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) ExperienceRules(ctx context.Context) ([]ExperienceRuleDTO, error) {
+	var result []ExperienceRuleDTO
+	err := c.doJSON(ctx, http.MethodGet, "/experience", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) ExperienceRule(ctx context.Context, id domain.ID) (ExperienceRuleDTO, error) {
+	var result ExperienceRuleDTO
+	err := c.doJSON(ctx, http.MethodGet, "/experience/"+string(id), nil, &result, http.StatusOK)
 	return result, err
 }
 

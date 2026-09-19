@@ -356,8 +356,11 @@ func (s *Service) validateCreate(request CreateRequest) (CreateRequest, error) {
 	request.RequestedBy = domain.ID(strings.TrimSpace(string(request.RequestedBy)))
 	request.RequiredApprovers = cleanIDs(request.RequiredApprovers)
 	if request.SubjectKind == "" || request.SubjectID == "" || request.RequestDigest == "" ||
-		request.PolicyDecisionID == "" || request.RequestedBy == "" || len(request.RequiredApprovers) == 0 {
-		return CreateRequest{}, errors.New("approval subject, digest, policy decision, requester, and required approvers are required")
+		request.RequestedBy == "" || len(request.RequiredApprovers) == 0 {
+		return CreateRequest{}, errors.New("approval subject, digest, requester, and required approvers are required")
+	}
+	if request.SubjectKind == "EXTERNAL_OPERATION" && request.PolicyDecisionID == "" {
+		return CreateRequest{}, errors.New("external-operation approval requires policy decision provenance")
 	}
 	if request.ExpiresAt.IsZero() || !request.ExpiresAt.After(s.clock.Now().UTC()) {
 		return CreateRequest{}, errors.New("approval expiry must be in the future")

@@ -59,6 +59,18 @@ func (f *fakeControlAPI) FeedbackScan(context.Context) ([]control.FeedbackObserv
 	f.feedbackScanCalls++
 	return []control.FeedbackObservationDTO{{ID:"obs-2",Category:"RECOVERY_FRICTION",SourceKind:"ATTEMPT_FAILURES"}}, nil
 }
+func (f *fakeControlAPI) ExperienceGrantRequest(context.Context, control.ExperienceGrantCreateRequest) (control.ExperienceGrantRequestDTO,error) {
+	return control.ExperienceGrantRequestDTO{RequestID:"grant-request-1",Digest:"digest",ApprovalID:"approval-1"},nil
+}
+func (f *fakeControlAPI) ExperienceGrantActivate(context.Context, domain.ID) (control.AdaptationGrantDTO,error) {
+	return control.AdaptationGrantDTO{ID:"grant-1",RequestID:"grant-request-1",Kind:"EXECUTOR_PREFERENCE",ScopeKey:"repo.review"},nil
+}
+func (f *fakeControlAPI) ExperienceRules(context.Context) ([]control.ExperienceRuleDTO,error) {
+	return []control.ExperienceRuleDTO{{ID:"rule-1",ScopeKey:"repo.review",PreferredExecutor:"codex",State:domain.ExperienceActive}},nil
+}
+func (f *fakeControlAPI) ExperienceRule(context.Context, domain.ID) (control.ExperienceRuleDTO,error) {
+	return control.ExperienceRuleDTO{ID:"rule-1",ScopeKey:"repo.review",PreferredExecutor:"codex",State:domain.ExperienceActive},nil
+}
 func (f *fakeControlAPI) Approve(_ context.Context, _ domain.ID, signer identity.Signer) (control.ApprovalDTO, error) {
 	f.approveCalls++
 	return control.ApprovalDTO{ApprovalID: "approval-1", ApprovedBy: signer.PrincipalID(), Status: "APPROVED"}, nil
@@ -84,7 +96,7 @@ func TestRootWiresControlCommandsAndStableJSONOutput(t *testing.T) {
 	}
 
 	root := newRootCommandWithClient(api)
-	if findCommand(t, root, "status") == nil || findCommand(t, root, "task", "create") == nil || findCommand(t, root, "task", "show") == nil || findCommand(t, root, "approve") == nil || findCommand(t, root, "reject") == nil || findCommand(t, root, "approvals") == nil || findCommand(t, root, "feedback") == nil || findCommand(t, root, "inspect", "attempt") == nil || findCommand(t, root, "inspect", "operation") == nil {
+	if findCommand(t, root, "status") == nil || findCommand(t, root, "task", "create") == nil || findCommand(t, root, "task", "show") == nil || findCommand(t, root, "approve") == nil || findCommand(t, root, "reject") == nil || findCommand(t, root, "approvals") == nil || findCommand(t, root, "feedback") == nil || findCommand(t, root, "experience") == nil || findCommand(t, root, "inspect", "attempt") == nil || findCommand(t, root, "inspect", "operation") == nil {
 		t.Fatal("expected control commands are not all registered")
 	}
 
