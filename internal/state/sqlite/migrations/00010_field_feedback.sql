@@ -123,6 +123,9 @@ CREATE INDEX approval_decisions_action
 ALTER TABLE external_operations
     ADD COLUMN approval_id TEXT REFERENCES approval_requests(approval_id);
 
+ALTER TABLE external_operations
+    ADD COLUMN caller_required_approvers_json TEXT NOT NULL DEFAULT '[]';
+
 ALTER TABLE tasks
     ADD COLUMN task_class TEXT NOT NULL DEFAULT '';
 
@@ -284,6 +287,7 @@ DROP TABLE adaptation_grants;
 DROP TABLE adaptation_grant_requests;
 DROP TABLE feedback_emissions;
 ALTER TABLE tasks DROP COLUMN task_class;
+ALTER TABLE external_operations DROP COLUMN caller_required_approvers_json;
 ALTER TABLE external_operations DROP COLUMN approval_id;
 DROP INDEX approval_decisions_action;
 DROP TABLE approval_decisions;

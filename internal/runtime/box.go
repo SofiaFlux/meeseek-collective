@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SofiaFlux/meeseek-collective/internal/approvals"
 	"github.com/SofiaFlux/meeseek-collective/internal/audit"
 	"github.com/SofiaFlux/meeseek-collective/internal/capabilities"
 	"github.com/SofiaFlux/meeseek-collective/internal/clock"
@@ -51,6 +52,7 @@ type Box struct {
 	Evidence      *evidence.Store
 	Verification  *verification.Service
 	Resources     *resources.Service
+	Approvals     *approvals.Service
 	Operations    *operations.Service
 	Capabilities  *capabilities.Registry
 	Scheduler     *scheduler.Service
@@ -117,7 +119,8 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	}
 	verificationSvc := verification.New(store, cfg.Clock, executionSvc)
 	resourceSvc := resources.New(store, cfg.Clock)
-	operationsSvc := operations.New(store, cfg.Clock, executionSvc, cfg.PolicyEngine, resourceSvc, cfg.CollectiveID, cfg.OperationProviders...)
+	approvalSvc := approvals.New(store, cfg.Clock)
+	operationsSvc := operations.New(store, cfg.Clock, executionSvc, cfg.PolicyEngine, resourceSvc, approvalSvc, cfg.CollectiveID, cfg.OperationProviders...)
 	capabilityRegistry := capabilities.NewRegistry(store, cfg.Clock, executionSvc, cfg.CapabilityProviders...)
 	schedulerSvc := scheduler.New(store, cfg.Clock, purposes, executionSvc, resourceSvc, cfg.LeaseDuration)
 	wakeSvc := wake.New(store, cfg.Clock, schedulerSvc)
@@ -140,6 +143,7 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 		Evidence: evidenceStore,
 		Verification: verificationSvc,
 		Resources: resourceSvc,
+		Approvals: approvalSvc,
 		Operations: operationsSvc,
 		Capabilities: capabilityRegistry,
 		Scheduler: schedulerSvc,

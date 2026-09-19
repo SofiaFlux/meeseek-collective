@@ -99,18 +99,35 @@ func (s *Service) Get(ctx context.Context, id domain.ID) (domain.ApprovalRequest
 	if err := s.configured(); err != nil {
 		return domain.ApprovalRequestRecord{}, err
 	}
+	return s.get(ctx, s.store.DB(), id)
+}
+
+func (s *Service) GetInTx(ctx context.Context, tx *sql.Tx, id domain.ID) (domain.ApprovalRequestRecord, error) {
+	if err := s.configured(); err != nil {
+		return domain.ApprovalRequestRecord{}, err
+	}
+	if tx == nil {
+		return domain.ApprovalRequestRecord{}, errors.New("approval read requires transaction")
+	}
+	return s.get(ctx, tx, id)
+}
+
+func (s *Service) get(ctx context.Context, q interface {
+	rowQueryer
+	rowsQueryer
+}, id domain.ID) (domain.ApprovalRequestRecord, error) {
 	id = domain.ID(strings.TrimSpace(string(id)))
 	if id == "" {
 		return domain.ApprovalRequestRecord{}, errors.New("approval id is required")
 	}
-	record, err := loadByID(ctx, s.store.DB(), id)
+	record, err := loadByID(ctx, q, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ApprovalRequestRecord{}, fmt.Errorf("approval %s not found", id)
 	}
 	if err != nil {
 		return domain.ApprovalRequestRecord{}, err
 	}
-	record.Decisions, err = loadDecisions(ctx, s.store.DB(), id)
+	record.Decisions, err = loadDecisions(ctx, q, id)
 	if err != nil {
 		return domain.ApprovalRequestRecord{}, err
 	}
@@ -184,41 +201,52 @@ func (s *Service) Consume(ctx context.Context, id domain.ID, requestDigest strin
 	if err := s.configured(); err != nil {
 		return err
 	}
+	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		return s.ConsumeInTx(ctx, tx, id, requestDigest)
+	})
+}
+
+func (s *Service) ConsumeInTx(ctx context.Context, tx *sql.Tx, id domain.ID, requestDigest string) error {
+	if err := s.configured(); err != nil {
+		return err
+	}
+	if tx == nil {
+		return errors.New("approval consume requires transaction")
+	}
+	id = domain.ID(strings.TrimSpace(string(id)))
 	requestDigest = strings.TrimSpace(requestDigest)
 	if id == "" || requestDigest == "" {
 		return errors.New("approval id and request digest are required")
 	}
 	now := s.clock.Now().UTC()
-	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		record, err := loadByID(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if !sameDigest(record.RequestDigest, requestDigest) {
-			return errors.New("approval request digest mismatch")
-		}
-		if !record.ExpiresAt.After(now) {
-			return errors.New("approval request expired")
-		}
-		if record.State != domain.ApprovalApproved {
-			return fmt.Errorf("approval %s is %s, not APPROVED", id, record.State)
-		}
-		result, err := tx.ExecContext(ctx,
-			`UPDATE approval_requests SET state = ? WHERE approval_id = ? AND state = ?`,
-			domain.ApprovalConsumed, id, domain.ApprovalApproved,
-		)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return errors.New("approval was concurrently changed")
-		}
-		return nil
-	})
+	record, err := loadByID(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if !sameDigest(record.RequestDigest, requestDigest) {
+		return errors.New("approval request digest mismatch")
+	}
+	if !record.ExpiresAt.After(now) {
+		return errors.New("approval request expired")
+	}
+	if record.State != domain.ApprovalApproved {
+		return fmt.Errorf("approval %s is %s, not APPROVED", id, record.State)
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE approval_requests SET state = ? WHERE approval_id = ? AND state = ?`,
+		domain.ApprovalConsumed, id, domain.ApprovalApproved,
+	)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("approval was concurrently changed")
+	}
+	return nil
 }
 
 func (s *Service) decide(ctx context.Context, id, approver domain.ID, requestDigest, action string) error {
