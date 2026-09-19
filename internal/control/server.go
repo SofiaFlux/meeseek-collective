@@ -4,10 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +89,7 @@ type OperationDTO struct {
 type ApprovalChallengeDTO struct {
 	Challenge     string `json:"challenge"`
 	RequestDigest string `json:"request_digest"`
+	Action        string `json:"action"`
 }
 
 type ApprovalRequest struct {
@@ -99,9 +98,16 @@ type ApprovalRequest struct {
 }
 
 type ApprovalDTO struct {
-	ApprovalID domain.ID `json:"approval_id"`
-	ApprovedBy domain.ID `json:"approved_by"`
-	Status     string    `json:"status"`
+	ApprovalID        domain.ID            `json:"approval_id"`
+	SubjectKind       string               `json:"subject_kind,omitempty"`
+	SubjectID         domain.ID            `json:"subject_id,omitempty"`
+	RequestDigest     string               `json:"request_digest,omitempty"`
+	RequiredApprovers []domain.ID          `json:"required_approvers,omitempty"`
+	RequestedBy       domain.ID            `json:"requested_by,omitempty"`
+	State             domain.ApprovalState `json:"state,omitempty"`
+	ExpiresAt         time.Time            `json:"expires_at,omitempty"`
+	ApprovedBy        domain.ID            `json:"approved_by,omitempty"`
+	Status            string               `json:"status"`
 }
 
 type StatusProvider interface {
@@ -114,7 +120,10 @@ type TaskService interface {
 }
 
 type ApprovalService interface {
-	Approve(context.Context, domain.ID, domain.ID) error
+	Get(context.Context, domain.ID) (domain.ApprovalRequestRecord, error)
+	Pending(context.Context) ([]domain.ApprovalRequestRecord, error)
+	Approve(context.Context, domain.ID, domain.ID, string) error
+	Reject(context.Context, domain.ID, domain.ID, string) error
 }
 
 type AttemptReader interface {
@@ -148,6 +157,7 @@ type ServerConfig struct {
 type challengeState struct {
 	value   string
 	digest  string
+	action  string
 	expires time.Time
 }
 
@@ -182,8 +192,11 @@ func NewServer(config ServerConfig, deps Dependencies) (*Server, error) {
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("POST /tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /tasks/{id}", s.handleTask)
+	mux.HandleFunc("GET /approvals", s.handleApprovals)
+	mux.HandleFunc("GET /approvals/{id}", s.handleApprovalGet)
 	mux.HandleFunc("GET /approvals/{id}/challenge", s.handleApprovalChallenge)
-	mux.HandleFunc("POST /approvals/{id}", s.handleApproval)
+	mux.HandleFunc("POST /approvals/{id}/approve", s.handleApprovalApprove)
+	mux.HandleFunc("POST /approvals/{id}/reject", s.handleApprovalReject)
 	mux.HandleFunc("GET /inspect/attempts/{id}", s.handleAttempt)
 	mux.HandleFunc("GET /inspect/operations/{id}", s.handleOperation)
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
@@ -230,13 +243,13 @@ func constantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func ApprovalSigningMessage(challenge, requestDigest string) []byte {
-	return []byte("meeseek-owner-approval-v1\nchallenge:" + challenge + "\nrequest-digest:" + requestDigest + "\n")
-}
-
-func approvalRequestDigest(id domain.ID) string {
-	digest := sha256.Sum256([]byte("meeseek-approval-v1\napproval-id:" + string(id) + "\naction:APPROVE\n"))
-	return hex.EncodeToString(digest[:])
+func ApprovalSigningMessage(challenge, requestDigest, action string) []byte {
+	return []byte(
+		"meeseek-owner-approval-v2\n" +
+			"challenge:" + challenge + "\n" +
+			"request-digest:" + requestDigest + "\n" +
+			"action:" + action + "\n",
+	)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -280,9 +293,49 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, taskDTO(task))
 }
 
+func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
+	records, err := s.deps.Approvals.Pending(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result := make([]ApprovalDTO, 0, len(records))
+	for _, record := range records {
+		result = append(result, approvalDTO(record))
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleApprovalGet(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	record, err := s.deps.Approvals.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, approvalDTO(record))
+}
+
 func (s *Server) handleApprovalChallenge(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	action := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("action")))
+	if action != "APPROVE" && action != "REJECT" {
+		writeError(w, http.StatusBadRequest, "action must be APPROVE or REJECT")
+		return
+	}
+	record, err := s.deps.Approvals.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if record.State != domain.ApprovalPending || !record.ExpiresAt.After(time.Now().UTC()) {
+		writeError(w, http.StatusConflict, "approval request is not live and pending")
 		return
 	}
 	var raw [32]byte
@@ -292,16 +345,27 @@ func (s *Server) handleApprovalChallenge(w http.ResponseWriter, r *http.Request)
 	}
 	state := challengeState{
 		value:   base64.RawURLEncoding.EncodeToString(raw[:]),
-		digest:  approvalRequestDigest(id),
+		digest:  record.RequestDigest,
+		action:  action,
 		expires: time.Now().UTC().Add(s.config.ChallengeTTL),
 	}
 	s.mu.Lock()
 	s.challenges[id] = state
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, ApprovalChallengeDTO{Challenge: state.value, RequestDigest: state.digest})
+	writeJSON(w, http.StatusOK, ApprovalChallengeDTO{
+		Challenge: state.value, RequestDigest: state.digest, Action: state.action,
+	})
 }
 
-func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
+	s.handleApprovalDecision(w, r, "APPROVE")
+}
+
+func (s *Server) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
+	s.handleApprovalDecision(w, r, "REJECT")
+}
+
+func (s *Server) handleApprovalDecision(w http.ResponseWriter, r *http.Request, action string) {
 	id, ok := pathID(w, r)
 	if !ok {
 		return
@@ -319,12 +383,18 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	state, exists := s.challenges[id]
-	if !exists || time.Now().UTC().After(state.expires) || !constantTimeEqual(request.Challenge, state.value) || state.digest != approvalRequestDigest(id) {
+	if !exists || time.Now().UTC().After(state.expires) ||
+		!constantTimeEqual(request.Challenge, state.value) ||
+		state.action != action {
 		s.mu.Unlock()
 		writeError(w, http.StatusForbidden, "invalid or expired approval challenge")
 		return
 	}
-	if !ed25519.Verify(s.config.OwnerPublicKey, ApprovalSigningMessage(state.value, state.digest), signature) {
+	if !ed25519.Verify(
+		s.config.OwnerPublicKey,
+		ApprovalSigningMessage(state.value, state.digest, state.action),
+		signature,
+	) {
 		s.mu.Unlock()
 		writeError(w, http.StatusForbidden, "invalid Owner signature")
 		return
@@ -332,11 +402,24 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 	delete(s.challenges, id)
 	s.mu.Unlock()
 
-	if err := s.deps.Approvals.Approve(r.Context(), id, s.config.OwnerPrincipalID); err != nil {
+	switch action {
+	case "APPROVE":
+		err = s.deps.Approvals.Approve(r.Context(), id, s.config.OwnerPrincipalID, state.digest)
+	case "REJECT":
+		err = s.deps.Approvals.Reject(r.Context(), id, s.config.OwnerPrincipalID, state.digest)
+	default:
+		err = errors.New("unsupported approval action")
+	}
+	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, ApprovalDTO{ApprovalID: id, ApprovedBy: s.config.OwnerPrincipalID, Status: "APPROVED"})
+	record, err := s.deps.Approvals.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, approvalDTO(record))
 }
 
 func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
@@ -427,5 +510,14 @@ func operationDTO(operation domain.ExternalOperation) OperationDTO {
 		State: operation.State, IntentFingerprint: operation.IntentFingerprint, IntentRevision: operation.IntentRevision,
 		Provider: operation.Provider, ProviderReference: operation.ProviderReference, ReservationID: operation.ReservationID,
 		CreatedAt: operation.CreatedAt, DispatchedAt: operation.DispatchedAt, SettledAt: operation.SettledAt,
+	}
+}
+
+func approvalDTO(record domain.ApprovalRequestRecord) ApprovalDTO {
+	return ApprovalDTO{
+		ApprovalID: record.ID, SubjectKind: record.SubjectKind, SubjectID: record.SubjectID,
+		RequestDigest: record.RequestDigest, RequiredApprovers: append([]domain.ID(nil), record.RequiredApprovers...),
+		RequestedBy: record.RequestedBy, State: record.State, ExpiresAt: record.ExpiresAt,
+		ApprovedBy: record.ApproverID, Status: string(record.State),
 	}
 }

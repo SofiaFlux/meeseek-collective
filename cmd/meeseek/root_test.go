@@ -20,6 +20,7 @@ type fakeControlAPI struct {
 	operation    control.OperationDTO
 	created      control.CreateTaskRequest
 	approveCalls int
+	rejectCalls  int
 	shutdowns    int
 }
 
@@ -31,9 +32,17 @@ func (f *fakeControlAPI) CreateTask(_ context.Context, request control.CreateTas
 func (f *fakeControlAPI) Task(context.Context, domain.ID) (control.TaskDTO, error) {
 	return f.task, nil
 }
+func (f *fakeControlAPI) Approvals(context.Context) ([]control.ApprovalDTO, error) { return nil, nil }
+func (f *fakeControlAPI) Approval(context.Context, domain.ID) (control.ApprovalDTO, error) {
+	return control.ApprovalDTO{ApprovalID: "approval-1", Status: "PENDING"}, nil
+}
 func (f *fakeControlAPI) Approve(_ context.Context, _ domain.ID, signer identity.Signer) (control.ApprovalDTO, error) {
 	f.approveCalls++
 	return control.ApprovalDTO{ApprovalID: "approval-1", ApprovedBy: signer.PrincipalID(), Status: "APPROVED"}, nil
+}
+func (f *fakeControlAPI) Reject(_ context.Context, _ domain.ID, signer identity.Signer) (control.ApprovalDTO, error) {
+	f.rejectCalls++
+	return control.ApprovalDTO{ApprovalID: "approval-1", ApprovedBy: signer.PrincipalID(), Status: "REJECTED"}, nil
 }
 func (f *fakeControlAPI) Attempt(context.Context, domain.ID) (control.AttemptDTO, error) {
 	return f.attempt, nil
@@ -52,7 +61,7 @@ func TestRootWiresControlCommandsAndStableJSONOutput(t *testing.T) {
 	}
 
 	root := newRootCommandWithClient(api)
-	if findCommand(t, root, "status") == nil || findCommand(t, root, "task", "create") == nil || findCommand(t, root, "task", "show") == nil || findCommand(t, root, "approve") == nil || findCommand(t, root, "inspect", "attempt") == nil || findCommand(t, root, "inspect", "operation") == nil {
+	if findCommand(t, root, "status") == nil || findCommand(t, root, "task", "create") == nil || findCommand(t, root, "task", "show") == nil || findCommand(t, root, "approve") == nil || findCommand(t, root, "reject") == nil || findCommand(t, root, "inspect", "attempt") == nil || findCommand(t, root, "inspect", "operation") == nil {
 		t.Fatal("expected control commands are not all registered")
 	}
 
@@ -100,6 +109,10 @@ func TestTaskCreateAndApproveCallControlAPI(t *testing.T) {
 	output = executeCommand(t, newRootCommandWithClient(api), "--json", "approve", "approval-1", "--owner-key", keyPath)
 	if api.approveCalls != 1 || !strings.Contains(output, `"status":"APPROVED"`) {
 		t.Fatalf("approve calls=%d output=%s", api.approveCalls, output)
+	}
+	output = executeCommand(t, newRootCommandWithClient(api), "--json", "reject", "approval-1", "--owner-key", keyPath)
+	if api.rejectCalls != 1 || !strings.Contains(output, `"status":"REJECTED"`) {
+		t.Fatalf("reject calls=%d output=%s", api.rejectCalls, output)
 	}
 }
 

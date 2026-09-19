@@ -19,7 +19,10 @@ type API interface {
 	Status(context.Context) (StatusDTO, error)
 	CreateTask(context.Context, CreateTaskRequest) (TaskDTO, error)
 	Task(context.Context, domain.ID) (TaskDTO, error)
+	Approvals(context.Context) ([]ApprovalDTO, error)
+	Approval(context.Context, domain.ID) (ApprovalDTO, error)
 	Approve(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
+	Reject(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
 	Attempt(context.Context, domain.ID) (AttemptDTO, error)
 	Operation(context.Context, domain.ID) (OperationDTO, error)
 	Shutdown(context.Context) error
@@ -64,21 +67,46 @@ func (c *Client) Task(ctx context.Context, id domain.ID) (TaskDTO, error) {
 	return result, err
 }
 
+func (c *Client) Approvals(ctx context.Context) ([]ApprovalDTO, error) {
+	var result []ApprovalDTO
+	err := c.doJSON(ctx, http.MethodGet, "/approvals", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) Approval(ctx context.Context, id domain.ID) (ApprovalDTO, error) {
+	var result ApprovalDTO
+	err := c.doJSON(ctx, http.MethodGet, "/approvals/"+string(id), nil, &result, http.StatusOK)
+	return result, err
+}
+
 func (c *Client) Approve(ctx context.Context, id domain.ID, signer identity.Signer) (ApprovalDTO, error) {
+	return c.decideApproval(ctx, id, signer, "APPROVE")
+}
+
+func (c *Client) Reject(ctx context.Context, id domain.ID, signer identity.Signer) (ApprovalDTO, error) {
+	return c.decideApproval(ctx, id, signer, "REJECT")
+}
+
+func (c *Client) decideApproval(ctx context.Context, id domain.ID, signer identity.Signer, action string) (ApprovalDTO, error) {
 	if signer == nil {
 		return ApprovalDTO{}, errors.New("Owner signer is required")
 	}
 	var challenge ApprovalChallengeDTO
-	if err := c.doJSON(ctx, http.MethodGet, "/approvals/"+string(id)+"/challenge", nil, &challenge, http.StatusOK); err != nil {
+	path := "/approvals/" + string(id) + "/challenge?action=" + action
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &challenge, http.StatusOK); err != nil {
 		return ApprovalDTO{}, err
 	}
-	signature, err := signer.Sign(ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest))
+	if challenge.Action != action {
+		return ApprovalDTO{}, errors.New("approval challenge action mismatch")
+	}
+	signature, err := signer.Sign(ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest, challenge.Action))
 	if err != nil {
 		return ApprovalDTO{}, fmt.Errorf("sign approval challenge: %w", err)
 	}
 	request := ApprovalRequest{Challenge: challenge.Challenge, Signature: base64.StdEncoding.EncodeToString(signature)}
 	var result ApprovalDTO
-	err = c.doJSON(ctx, http.MethodPost, "/approvals/"+string(id), request, &result, http.StatusOK)
+	endpoint := "/approvals/" + string(id) + "/" + strings.ToLower(action)
+	err = c.doJSON(ctx, http.MethodPost, endpoint, request, &result, http.StatusOK)
 	return result, err
 }
 
