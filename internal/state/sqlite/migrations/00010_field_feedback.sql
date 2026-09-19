@@ -109,6 +109,17 @@ CREATE TABLE approval_requests (
 CREATE INDEX approval_requests_state_expiry ON approval_requests(state, expires_at);
 CREATE INDEX approval_requests_subject_digest ON approval_requests(subject_kind, subject_id, request_digest);
 
+CREATE TABLE approval_decisions (
+    approval_id TEXT NOT NULL REFERENCES approval_requests(approval_id),
+    approver_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    decision_action TEXT NOT NULL CHECK (decision_action IN ('APPROVE','REJECT')),
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (approval_id, approver_id)
+);
+CREATE INDEX approval_decisions_action
+    ON approval_decisions(approval_id, decision_action);
+
 ALTER TABLE external_operations
     ADD COLUMN approval_id TEXT REFERENCES approval_requests(approval_id);
 
@@ -274,6 +285,8 @@ DROP TABLE adaptation_grant_requests;
 DROP TABLE feedback_emissions;
 ALTER TABLE tasks DROP COLUMN task_class;
 ALTER TABLE external_operations DROP COLUMN approval_id;
+DROP INDEX approval_decisions_action;
+DROP TABLE approval_decisions;
 DROP INDEX approval_requests_subject_digest;
 DROP INDEX approval_requests_state_expiry;
 DROP TABLE approval_requests;

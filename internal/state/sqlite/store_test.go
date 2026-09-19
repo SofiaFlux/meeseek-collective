@@ -48,7 +48,7 @@ func TestFieldFeedbackMigrationCreatesDurableSchema(t *testing.T) {
 		"field_observations", "field_observation_evidence",
 		"feedback_candidates", "feedback_candidate_observations",
 		"sanitization_results", "sanitized_feedback", "feedback_emissions",
-		"approval_requests", "adaptation_grant_requests", "adaptation_grants",
+		"approval_requests", "approval_decisions", "adaptation_grant_requests", "adaptation_grants",
 		"experience_proposals", "experience_rules", "experience_rule_evidence",
 		"experience_outcomes",
 	} {

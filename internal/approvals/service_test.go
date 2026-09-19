@@ -161,3 +161,78 @@ func TestPendingReturnsOnlyLivePendingRequests(t *testing.T) {
 		t.Fatalf("pending=%v, want only %s", items, live.ID)
 	}
 }
+
+
+func TestAllRequiredApproversMustApprove(t *testing.T) {
+	svc, clk, owner := newHarness(t)
+	ctx := context.Background()
+	security := domain.ID("security_1")
+	record, err := svc.Create(ctx, CreateRequest{
+		SubjectKind: "EXTERNAL_OPERATION", SubjectID: "operation_multi", RequestDigest: "multi-digest",
+		PolicyDecisionID: "decision_multi", RequiredApprovers: []domain.ID{owner, security},
+		RequestedBy: "cube_1", ExpiresAt: clk.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Approve(ctx, record.ID, owner, "multi-digest"); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := svc.IsApproved(ctx, record.ID, "multi-digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("one of two required approvers made request APPROVED")
+	}
+	partial, err := svc.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.State != domain.ApprovalPending || len(partial.Decisions) != 1 {
+		t.Fatalf("partial approval = state:%s decisions:%v", partial.State, partial.Decisions)
+	}
+
+	if err := svc.Approve(ctx, record.ID, security, "multi-digest"); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = svc.IsApproved(ctx, record.ID, "multi-digest")
+	if err != nil || !ok {
+		t.Fatalf("all required approvers completed ok=%v err=%v", ok, err)
+	}
+	complete, err := svc.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complete.State != domain.ApprovalApproved || len(complete.Decisions) != 2 {
+		t.Fatalf("complete approval = state:%s decisions:%v", complete.State, complete.Decisions)
+	}
+}
+
+func TestAnyRequiredApproverCanRejectMultiPartyRequest(t *testing.T) {
+	svc, clk, owner := newHarness(t)
+	ctx := context.Background()
+	security := domain.ID("security_1")
+	record, err := svc.Create(ctx, CreateRequest{
+		SubjectKind: "EXTERNAL_OPERATION", SubjectID: "operation_reject_multi", RequestDigest: "reject-multi",
+		PolicyDecisionID: "decision_reject_multi", RequiredApprovers: []domain.ID{owner, security},
+		RequestedBy: "cube_1", ExpiresAt: clk.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Approve(ctx, record.ID, owner, "reject-multi"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Reject(ctx, record.ID, security, "reject-multi"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Get(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != domain.ApprovalRejected || len(got.Decisions) != 2 {
+		t.Fatalf("rejected multi-party approval = state:%s decisions:%v", got.State, got.Decisions)
+	}
+}

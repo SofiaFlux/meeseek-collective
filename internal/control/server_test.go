@@ -405,3 +405,18 @@ func TestApprovalRejectAndReadRoutesUseDurableDigest(t *testing.T) {
 		t.Fatalf("reject calls=%d digest=%s dto=%+v", approvals.rejectCalls, approvals.digest, got)
 	}
 }
+
+
+func TestOwnerCannotChallengeApprovalThatDoesNotRequireOwner(t *testing.T) {
+	server, _, _, approvals, _, _, _ := newTestServer(t)
+	approvals.record.RequiredApprovers = []domain.ID{"security-only"}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	response := doRequest(t, http.MethodGet,
+		httpServer.URL+"/approvals/approval-1/challenge?action=APPROVE", "control-secret", nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("challenge status = %d, want 403", response.StatusCode)
+	}
+}

@@ -338,6 +338,10 @@ func (s *Server) handleApprovalChallenge(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, "approval request is not live and pending")
 		return
 	}
+	if !approvalRequires(record.RequiredApprovers, s.config.OwnerPrincipalID) {
+		writeError(w, http.StatusForbidden, "Owner is not a required approver for this request")
+		return
+	}
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		writeError(w, http.StatusInternalServerError, "generate approval challenge")
@@ -520,4 +524,14 @@ func approvalDTO(record domain.ApprovalRequestRecord) ApprovalDTO {
 		RequestedBy: record.RequestedBy, State: record.State, ExpiresAt: record.ExpiresAt,
 		ApprovedBy: record.ApproverID, Status: string(record.State),
 	}
+}
+
+
+func approvalRequires(required []domain.ID, principal domain.ID) bool {
+	for _, candidate := range required {
+		if candidate == principal {
+			return true
+		}
+	}
+	return false
 }

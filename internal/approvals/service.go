@@ -107,7 +107,14 @@ func (s *Service) Get(ctx context.Context, id domain.ID) (domain.ApprovalRequest
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ApprovalRequestRecord{}, fmt.Errorf("approval %s not found", id)
 	}
-	return record, err
+	if err != nil {
+		return domain.ApprovalRequestRecord{}, err
+	}
+	record.Decisions, err = loadDecisions(ctx, s.store.DB(), id)
+	if err != nil {
+		return domain.ApprovalRequestRecord{}, err
+	}
+	return record, nil
 }
 
 func (s *Service) Pending(ctx context.Context) ([]domain.ApprovalRequestRecord, error) {
@@ -126,24 +133,37 @@ func (s *Service) Pending(ctx context.Context) ([]domain.ApprovalRequestRecord, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []domain.ApprovalRequestRecord
 	for rows.Next() {
 		record, err := scanApproval(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, record)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Decisions, err = loadDecisions(ctx, s.store.DB(), out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) Approve(ctx context.Context, id, approver domain.ID, requestDigest string) error {
-	return s.decide(ctx, id, approver, requestDigest, domain.ApprovalApproved, "APPROVE")
+	return s.decide(ctx, id, approver, requestDigest, "APPROVE")
 }
 
 func (s *Service) Reject(ctx context.Context, id, approver domain.ID, requestDigest string) error {
-	return s.decide(ctx, id, approver, requestDigest, domain.ApprovalRejected, "REJECT")
+	return s.decide(ctx, id, approver, requestDigest, "REJECT")
 }
 
 func (s *Service) IsApproved(ctx context.Context, id domain.ID, requestDigest string) (bool, error) {
@@ -201,7 +221,7 @@ func (s *Service) Consume(ctx context.Context, id domain.ID, requestDigest strin
 	})
 }
 
-func (s *Service) decide(ctx context.Context, id, approver domain.ID, requestDigest string, target domain.ApprovalState, action string) error {
+func (s *Service) decide(ctx context.Context, id, approver domain.ID, requestDigest, action string) error {
 	if err := s.configured(); err != nil {
 		return err
 	}
@@ -210,6 +230,9 @@ func (s *Service) decide(ctx context.Context, id, approver domain.ID, requestDig
 	requestDigest = strings.TrimSpace(requestDigest)
 	if id == "" || approver == "" || requestDigest == "" {
 		return errors.New("approval id, approver, and request digest are required")
+	}
+	if action != "APPROVE" && action != "REJECT" {
+		return errors.New("approval action must be APPROVE or REJECT")
 	}
 	now := s.clock.Now().UTC()
 	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
@@ -235,24 +258,66 @@ func (s *Service) decide(ctx context.Context, id, approver domain.ID, requestDig
 		if !containsID(record.RequiredApprovers, approver) {
 			return errors.New("principal is not a required approver")
 		}
-		result, err := tx.ExecContext(ctx, `
-			UPDATE approval_requests
-			SET state = ?, decided_at = ?, approver_id = ?, decision_action = ?
-			WHERE approval_id = ? AND state = ?`,
-			target, formatTime(now), approver, action, id, domain.ApprovalPending,
-		)
-		if err != nil {
+
+		existing, err := loadDecision(ctx, tx, id, approver)
+		if err == nil {
+			if existing.DecisionAction == action && sameDigest(existing.RequestDigest, requestDigest) {
+				return nil
+			}
+			return errors.New("approver already recorded a different decision")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		changed, err := result.RowsAffected()
-		if err != nil {
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO approval_decisions(
+				approval_id, approver_id, request_digest, decision_action, decided_at
+			) VALUES (?, ?, ?, ?, ?)`,
+			id, approver, requestDigest, action, formatTime(now),
+		); err != nil {
+			return fmt.Errorf("record approval decision: %w", err)
+		}
+
+		if action == "REJECT" {
+			return terminalize(ctx, tx, id, domain.ApprovalRejected, approver, action, now)
+		}
+
+		var approvedCount int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM approval_decisions
+			WHERE approval_id = ? AND decision_action = 'APPROVE'`, id,
+		).Scan(&approvedCount); err != nil {
 			return err
 		}
-		if changed != 1 {
-			return errors.New("approval was concurrently changed")
+		if approvedCount < len(record.RequiredApprovers) {
+			return nil
 		}
-		return nil
+		if approvedCount != len(record.RequiredApprovers) {
+			return errors.New("approval decision count exceeds required approvers")
+		}
+		return terminalize(ctx, tx, id, domain.ApprovalApproved, approver, action, now)
 	})
+}
+
+func terminalize(ctx context.Context, tx *sql.Tx, id domain.ID, target domain.ApprovalState, actor domain.ID, action string, now time.Time) error {
+	result, err := tx.ExecContext(ctx, `
+		UPDATE approval_requests
+		SET state = ?, decided_at = ?, approver_id = ?, decision_action = ?
+		WHERE approval_id = ? AND state = ?`,
+		target, formatTime(now), actor, action, id, domain.ApprovalPending,
+	)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("approval was concurrently changed")
+	}
+	return nil
 }
 
 func (s *Service) validateCreate(request CreateRequest) (CreateRequest, error) {
@@ -323,9 +388,15 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-func loadByID(ctx context.Context, q interface {
+type rowQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, id domain.ID) (domain.ApprovalRequestRecord, error) {
+}
+
+type rowsQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func loadByID(ctx context.Context, q rowQueryer, id domain.ID) (domain.ApprovalRequestRecord, error) {
 	return scanApproval(q.QueryRowContext(ctx, `
 		SELECT approval_id, subject_kind, subject_id, request_digest, policy_decision_id,
 		       required_approvers_json, requested_by, state, expires_at,
@@ -333,9 +404,7 @@ func loadByID(ctx context.Context, q interface {
 		FROM approval_requests WHERE approval_id = ?`, id))
 }
 
-func loadBySubjectDigest(ctx context.Context, q interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, kind string, subjectID domain.ID, digest string) (domain.ApprovalRequestRecord, error) {
+func loadBySubjectDigest(ctx context.Context, q rowQueryer, kind string, subjectID domain.ID, digest string) (domain.ApprovalRequestRecord, error) {
 	return scanApproval(q.QueryRowContext(ctx, `
 		SELECT approval_id, subject_kind, subject_id, request_digest, policy_decision_id,
 		       required_approvers_json, requested_by, state, expires_at,
@@ -343,6 +412,52 @@ func loadBySubjectDigest(ctx context.Context, q interface {
 		FROM approval_requests
 		WHERE subject_kind = ? AND subject_id = ? AND request_digest = ?`,
 		kind, subjectID, digest))
+}
+
+func loadDecision(ctx context.Context, q rowQueryer, approvalID, approverID domain.ID) (domain.ApprovalDecisionRecord, error) {
+	var out domain.ApprovalDecisionRecord
+	var decidedAt string
+	err := q.QueryRowContext(ctx, `
+		SELECT approver_id, request_digest, decision_action, decided_at
+		FROM approval_decisions
+		WHERE approval_id = ? AND approver_id = ?`,
+		approvalID, approverID,
+	).Scan(&out.ApproverID, &out.RequestDigest, &out.DecisionAction, &decidedAt)
+	if err != nil {
+		return domain.ApprovalDecisionRecord{}, err
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, decidedAt)
+	if err != nil {
+		return domain.ApprovalDecisionRecord{}, fmt.Errorf("parse approval decision time: %w", err)
+	}
+	out.DecidedAt = parsed
+	return out, nil
+}
+
+func loadDecisions(ctx context.Context, q rowsQueryer, approvalID domain.ID) ([]domain.ApprovalDecisionRecord, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT approver_id, request_digest, decision_action, decided_at
+		FROM approval_decisions
+		WHERE approval_id = ?
+		ORDER BY decided_at, approver_id`, approvalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.ApprovalDecisionRecord
+	for rows.Next() {
+		var decision domain.ApprovalDecisionRecord
+		var decidedAt string
+		if err := rows.Scan(&decision.ApproverID, &decision.RequestDigest, &decision.DecisionAction, &decidedAt); err != nil {
+			return nil, err
+		}
+		decision.DecidedAt, err = time.Parse(time.RFC3339Nano, decidedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse approval decision time: %w", err)
+		}
+		out = append(out, decision)
+	}
+	return out, rows.Err()
 }
 
 func scanApproval(row scanner) (domain.ApprovalRequestRecord, error) {
