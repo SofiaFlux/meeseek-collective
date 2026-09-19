@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/control"
+	"github.com/SofiaFlux/meeseek-collective/internal/feedbackgithub"
+	"github.com/SofiaFlux/meeseek-collective/internal/fieldfeedback"
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
 	"github.com/SofiaFlux/meeseek-collective/internal/policy"
@@ -132,6 +134,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	feedbackSink, err := buildFeedbackSink(cfg)
+	if err != nil {
+		return err
+	}
 
 	box, err := meeseekruntime.Open(ctx, meeseekruntime.Config{
 		StatePath:    cfg.DatabasePath,
@@ -139,6 +145,7 @@ func run(ctx context.Context) error {
 		CollectiveID: cfg.CollectiveID,
 		OwnerPrincipalID: cfg.OwnerPrincipalID,
 		FieldFeedback: cfg.FieldFeedback,
+		FeedbackSink: feedbackSink,
 		PolicyEngine: material.policyEngine,
 	})
 	if err != nil {
@@ -179,6 +186,32 @@ func run(ctx context.Context) error {
 		}
 	}()
 	return serveControl(serveCtx, listener, server)
+}
+
+
+func buildFeedbackSink(cfg localconfig.Config) (fieldfeedback.Sink, error) {
+	if !cfg.FieldFeedback.Enabled || cfg.FieldFeedback.Mode == localconfig.FeedbackModeLocalOnly {
+		return nil, nil
+	}
+	switch cfg.FieldFeedback.Provider {
+	case "github":
+		tokenFile := strings.TrimSpace(os.Getenv("MEESEEK_FEEDBACK_GITHUB_TOKEN_FILE"))
+		if tokenFile == "" {
+			return nil, errors.New("GitHub feedback export requires MEESEEK_FEEDBACK_GITHUB_TOKEN_FILE")
+		}
+		apiBaseURL := strings.TrimSpace(os.Getenv("MEESEEK_FEEDBACK_GITHUB_API_BASE_URL"))
+		sink, err := feedbackgithub.NewSink(feedbackgithub.Config{
+			APIBaseURL: apiBaseURL,
+			Repository: cfg.FieldFeedback.Destination,
+			CredentialSource: feedbackgithub.FileCredentialSource{Path: tokenFile},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("configure GitHub feedback sink: %w", err)
+		}
+		return sink, nil
+	default:
+		return nil, fmt.Errorf("unsupported field feedback provider %q", cfg.FieldFeedback.Provider)
+	}
 }
 
 func loadStartupMaterial(ctx context.Context, cfg localconfig.Config) (startupMaterial, error) {

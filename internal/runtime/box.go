@@ -40,6 +40,7 @@ type Config struct {
 	CollectiveID        domain.ID
 	OwnerPrincipalID    domain.ID
 	FieldFeedback       localconfig.FieldFeedbackConfig
+	FeedbackSink        fieldfeedback.Sink
 	PolicyEngine        policy.PolicyEngine
 	OperationProviders  []operations.Provider
 	CapabilityProviders []capabilities.Provider
@@ -129,7 +130,24 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	if err := feedbackSvc.ConfigureEmission(executionSvc, cfg.FieldFeedback, cfg.OwnerPrincipalID); err != nil {
 		return nil, fmt.Errorf("configure field feedback: %w", err)
 	}
-	operationsSvc := operations.New(store, cfg.Clock, executionSvc, cfg.PolicyEngine, resourceSvc, approvalSvc, cfg.CollectiveID, cfg.OperationProviders...)
+	operationProviders := append([]operations.Provider(nil), cfg.OperationProviders...)
+	if cfg.FieldFeedback.Enabled && cfg.FieldFeedback.Mode != localconfig.FeedbackModeLocalOnly {
+		if cfg.FeedbackSink != nil {
+			provider, err := fieldfeedback.NewProvider(
+				cfg.FieldFeedback.Provider,
+				cfg.FieldFeedback.Destination,
+				feedbackSvc,
+				cfg.FeedbackSink,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("construct field feedback provider: %w", err)
+			}
+			operationProviders = append(operationProviders, provider)
+		} else if !hasOperationProvider(operationProviders, cfg.FieldFeedback.Provider) {
+			return nil, errors.New("field feedback export is enabled but no feedback sink/provider is configured")
+		}
+	}
+	operationsSvc := operations.New(store, cfg.Clock, executionSvc, cfg.PolicyEngine, resourceSvc, approvalSvc, cfg.CollectiveID, operationProviders...)
 	capabilityRegistry := capabilities.NewRegistry(store, cfg.Clock, executionSvc, cfg.CapabilityProviders...)
 	schedulerSvc := scheduler.New(store, cfg.Clock, purposes, executionSvc, resourceSvc, cfg.LeaseDuration)
 	wakeSvc := wake.New(store, cfg.Clock, schedulerSvc)
@@ -199,4 +217,15 @@ func (b *Box) ShutdownRequested() <-chan struct{} {
 		return closed
 	}
 	return b.shutdown
+}
+
+
+func hasOperationProvider(providers []operations.Provider, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, provider := range providers {
+		if provider != nil && provider.Name() == name {
+			return true
+		}
+	}
+	return false
 }
