@@ -81,12 +81,13 @@ CREATE TABLE sanitized_feedback (
     candidate_id TEXT NOT NULL REFERENCES feedback_candidates(candidate_id),
     schema_version INTEGER NOT NULL,
     content_json TEXT NOT NULL,
-    content_hash TEXT NOT NULL UNIQUE,
+    content_hash TEXT NOT NULL,
     sanitization_result_id TEXT NOT NULL REFERENCES sanitization_results(sanitization_id),
     correlation_key TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE INDEX sanitized_feedback_content_hash ON sanitized_feedback(content_hash);
 CREATE INDEX sanitized_feedback_fingerprint ON sanitized_feedback(fingerprint);
 CREATE INDEX sanitized_feedback_correlation ON sanitized_feedback(correlation_key);
 
@@ -296,6 +297,7 @@ DROP INDEX approval_requests_state_expiry;
 DROP TABLE approval_requests;
 DROP INDEX sanitized_feedback_correlation;
 DROP INDEX sanitized_feedback_fingerprint;
+DROP INDEX sanitized_feedback_content_hash;
 DROP TABLE sanitized_feedback;
 DROP INDEX sanitization_results_candidate;
 DROP TABLE sanitization_results;

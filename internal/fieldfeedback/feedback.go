@@ -173,38 +173,44 @@ func (s *Feedback) transitionCandidate(ctx context.Context, id domain.ID, to dom
 	if err := s.configured(); err != nil {
 		return err
 	}
+	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		return s.transitionCandidateInTx(ctx, tx, id, to)
+	})
+}
+
+func (s *Feedback) transitionCandidateInTx(ctx context.Context, tx *sql.Tx, id domain.ID, to domain.FeedbackCandidateState) error {
+	if tx == nil {
+		return errors.New("candidate transition requires transaction")
+	}
 	id = domain.ID(strings.TrimSpace(string(id)))
 	if id == "" || !validCandidateState(to) {
 		return errors.New("candidate id and valid target state are required")
 	}
-	now := s.clock.Now().UTC()
-	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		current, err := loadCandidate(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if current.State == to {
-			return nil
-		}
-		if !candidateTransitionAllowed(current.State, to) {
-			return fmt.Errorf("illegal feedback candidate transition %s -> %s", current.State, to)
-		}
-		result, err := tx.ExecContext(ctx,
-			"UPDATE feedback_candidates SET state = ?, updated_at = ? WHERE candidate_id = ? AND state = ?",
-			to, formatTime(now), id, current.State,
-		)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return errors.New("feedback candidate was concurrently changed")
-		}
+	current, err := loadCandidate(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if current.State == to {
 		return nil
-	})
+	}
+	if !candidateTransitionAllowed(current.State, to) {
+		return fmt.Errorf("illegal feedback candidate transition %s -> %s", current.State, to)
+	}
+	result, err := tx.ExecContext(ctx,
+		"UPDATE feedback_candidates SET state = ?, updated_at = ? WHERE candidate_id = ? AND state = ?",
+		to, formatTime(s.clock.Now().UTC()), id, current.State,
+	)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("feedback candidate was concurrently changed")
+	}
+	return nil
 }
 
 func normalizeCandidateInput(input CandidateInput) (CandidateInput, string, string, string, error) {
@@ -317,7 +323,7 @@ func candidateTransitionAllowed(from, to domain.FeedbackCandidateState) bool {
 	case domain.FeedbackStateSanitizing:
 		return to == domain.FeedbackStateSanitized || to == domain.FeedbackStateRejectedUnsafe || to == domain.FeedbackStateLocalOnly
 	case domain.FeedbackStateSanitized:
-		return to == domain.FeedbackStateApprovalPending || to == domain.FeedbackStateExportReady ||
+		return to == domain.FeedbackStateSanitizing || to == domain.FeedbackStateApprovalPending || to == domain.FeedbackStateExportReady ||
 			to == domain.FeedbackStateDuplicate || to == domain.FeedbackStateLocalOnly
 	case domain.FeedbackStateApprovalPending:
 		return to == domain.FeedbackStateExportReady || to == domain.FeedbackStateRejectedPolicy ||
