@@ -285,11 +285,15 @@ func (s *DeterministicSanitizer) persistUnsafeWithDigest(
 		InputDigest: inputDigest, Outcome: outcome, ReasonCodesJSON: string(reasonsJSON),
 		CreatedAt: s.clock.Now().UTC(),
 	}
+	target := domain.FeedbackStateRejectedUnsafe
+	if outcome == domain.SanitizationUncertain {
+		target = domain.FeedbackStateLocalOnly
+	}
 	err = s.store.WithTx(ctx, func(tx *sql.Tx) error {
 		if err := insertSanitizationResult(ctx, tx, result); err != nil {
 			return err
 		}
-		return s.feedback.transitionCandidateInTx(ctx, tx, candidate.ID, domain.FeedbackStateRejectedUnsafe)
+		return s.feedback.transitionCandidateInTx(ctx, tx, candidate.ID, target)
 	})
 	if err != nil {
 		return domain.SanitizedFeedback{}, domain.SanitizationResult{}, err

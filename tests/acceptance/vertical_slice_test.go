@@ -106,6 +106,7 @@ func TestUsefulWorkVerticalSlice(t *testing.T) {
 		EvidencePath: evidencePath,
 		Clock: clk,
 		CollectiveID: initResult.CollectiveID,
+		OwnerPrincipalID: initResult.OwnerPrincipalID,
 		PolicyEngine: pol,
 		Executors: map[string]executors.Executor{
 			"agentic-fake": agenticExecutor,

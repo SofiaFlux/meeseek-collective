@@ -290,3 +290,37 @@ func feedbackCapability(provider string) string {
 	provider = strings.TrimSpace(provider)
 	return "feedback." + provider + ".issue.create"
 }
+
+
+func (s *Feedback) MarkReported(ctx context.Context, feedbackID domain.ID, operationID domain.ID, providerReference string) error {
+	if err := s.configured(); err != nil {
+		return err
+	}
+	artifact, err := s.SanitizedFeedback(ctx, feedbackID)
+	if err != nil {
+		return err
+	}
+	candidate, err := s.Candidate(ctx, artifact.CandidateID)
+	if err != nil {
+		return err
+	}
+	if candidate.State != domain.FeedbackStateReported {
+		if err := s.transitionCandidate(ctx, candidate.ID, domain.FeedbackStateReported); err != nil {
+			return err
+		}
+	}
+	payload, err := json.Marshal(map[string]any{
+		"candidate_id": candidate.ID,
+		"feedback_id": artifact.ID,
+		"operation_id": operationID,
+		"provider_reference": strings.TrimSpace(providerReference),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = s.store.DB().ExecContext(ctx,
+		"INSERT INTO audit_events(audit_id, kind, actor_id, subject_id, payload_json, created_at) VALUES (?, 'FEEDBACK_REPORTED', 'feedback-emitter', ?, ?, ?)",
+		domain.NewID("audit"), candidate.ID, string(payload), formatTime(s.clock.Now().UTC()),
+	)
+	return err
+}

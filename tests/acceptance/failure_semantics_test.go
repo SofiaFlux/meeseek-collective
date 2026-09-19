@@ -201,6 +201,7 @@ func newFixture(t *testing.T, hardLimit int64) *fixture {
 		EvidencePath: filepath.Join(dir, "evidence"),
 		Clock: clk,
 		CollectiveID: domain.ID("collective_acceptance"),
+		OwnerPrincipalID: domain.ID("owner_acceptance"),
 		PolicyEngine: pol,
 		OperationProviders: []operations.Provider{provider},
 		CapabilityProviders: []capabilities.Provider{caps},

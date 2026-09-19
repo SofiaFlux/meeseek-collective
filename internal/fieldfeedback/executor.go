@@ -16,6 +16,7 @@ type EmitTaskLookup interface {
 		context.Context,
 		domain.ID,
 	) (feedback domain.SanitizedFeedback, destination string, requiredApprovers []domain.ID, err error)
+	MarkReported(context.Context, domain.ID, domain.ID, string) error
 }
 
 type EmitExecutor struct {
@@ -68,6 +69,9 @@ func (e *EmitExecutor) Start(ctx context.Context, envelope executors.AttemptEnve
 
 	switch op.State {
 	case domain.OperationConfirmedEffect:
+		if err := e.feedback.MarkReported(ctx, artifact.ID, op.ID, op.ProviderReference); err != nil {
+			return failureResult(err), err
+		}
 		return successResult(artifact.ID, op), nil
 	case domain.OperationConfirmedNoEffect:
 		err := errors.New("feedback effect is confirmed absent; governed retry is required")
@@ -85,6 +89,9 @@ func (e *EmitExecutor) Start(ctx context.Context, envelope executors.AttemptEnve
 	}
 	switch settled.State {
 	case domain.OperationConfirmedEffect:
+		if err := e.feedback.MarkReported(ctx, artifact.ID, settled.ID, settled.ProviderReference); err != nil {
+			return failureResult(err), err
+		}
 		return successResult(artifact.ID, settled), nil
 	case domain.OperationConfirmedNoEffect:
 		err := errors.New("feedback effect is confirmed absent; governed retry is required")
