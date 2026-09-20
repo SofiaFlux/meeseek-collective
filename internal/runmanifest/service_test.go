@@ -11,11 +11,12 @@ import (
 	"github.com/SofiaFlux/meeseek-collective/internal/execution"
 	"github.com/SofiaFlux/meeseek-collective/internal/purpose"
 	"github.com/SofiaFlux/meeseek-collective/internal/runmanifest"
+	state "github.com/SofiaFlux/meeseek-collective/internal/state/sqlite"
 	"github.com/SofiaFlux/meeseek-collective/internal/teb"
 	"github.com/SofiaFlux/meeseek-collective/internal/testutil"
 )
 
-func newManifestHarness(t *testing.T) (context.Context, *runmanifest.Service, *execution.Service, domain.ID) {
+func newManifestHarness(t *testing.T) (context.Context, *state.Store, *runmanifest.Service, *execution.Service, domain.ID) {
 	t.Helper()
 	ctx := context.Background()
 	store := testutil.OpenStore(t)
@@ -32,7 +33,7 @@ func newManifestHarness(t *testing.T) (context.Context, *runmanifest.Service, *e
 	missionID, err := purposes.CreateMission(ctx, "Exercise attempt run provenance")
 	if err != nil { t.Fatal(err) }
 	execSvc := execution.New(store, clk, purposes, manifests)
-	return ctx, manifests, execSvc, missionID
+	return ctx, store, manifests, execSvc, missionID
 }
 
 func createManifestTask(t *testing.T, ctx context.Context, execSvc *execution.Service, missionID domain.ID) domain.Task {
@@ -50,9 +51,9 @@ func createManifestTask(t *testing.T, ctx context.Context, execSvc *execution.Se
 }
 
 func TestStartAttemptPersistsImmutableCanonicalRunManifest(t *testing.T) {
-	ctx, manifests, execSvc, missionID := newManifestHarness(t)
+	ctx, store, manifests, execSvc, missionID := newManifestHarness(t)
 	task := createManifestTask(t, ctx, execSvc, missionID)
-	seedCapability(t, manifests, "cap_a_id", "cap-a", "v2", "provider-a", "assessment-a")
+	seedCapability(t, store, "cap_a_id", "cap-a", "v2", "provider-a", "assessment-a")
 
 	attempt, err := execSvc.StartAttempt(ctx, task.ID, "codex", time.Minute)
 	if err != nil { t.Fatal(err) }
@@ -105,12 +106,12 @@ func TestStartAttemptPersistsImmutableCanonicalRunManifest(t *testing.T) {
 		}
 	}
 
-	if _, err := manifests.Store().DB().ExecContext(ctx,
+	if _, err := store.DB().ExecContext(ctx,
 		"UPDATE attempt_run_manifests SET manifest_hash='changed' WHERE attempt_id=?", attempt.ID,
 	); err == nil {
 		t.Fatal("immutable manifest UPDATE succeeded")
 	}
-	if _, err := manifests.Store().DB().ExecContext(ctx,
+	if _, err := store.DB().ExecContext(ctx,
 		"DELETE FROM attempt_run_manifests WHERE attempt_id=?", attempt.ID,
 	); err == nil {
 		t.Fatal("immutable manifest DELETE succeeded")
@@ -118,7 +119,7 @@ func TestStartAttemptPersistsImmutableCanonicalRunManifest(t *testing.T) {
 }
 
 func TestReplacementAttemptGetsDistinctManifestAndFence(t *testing.T) {
-	ctx, manifests, execSvc, missionID := newManifestHarness(t)
+	ctx, store, manifests, execSvc, missionID := newManifestHarness(t)
 	task := createManifestTask(t, ctx, execSvc, missionID)
 	first, err := execSvc.StartAttempt(ctx, task.ID, "codex", time.Minute)
 	if err != nil { t.Fatal(err) }
@@ -139,7 +140,7 @@ func TestReplacementAttemptGetsDistinctManifestAndFence(t *testing.T) {
 }
 
 func TestProvenanceJoinsLaterEvidenceAndSettledExternalCostWithoutMutatingManifest(t *testing.T) {
-	ctx, manifests, execSvc, missionID := newManifestHarness(t)
+	ctx, store, manifests, execSvc, missionID := newManifestHarness(t)
 	task := createManifestTask(t, ctx, execSvc, missionID)
 	attempt, err := execSvc.StartAttempt(ctx, task.ID, "codex", time.Minute)
 	if err != nil { t.Fatal(err) }
@@ -147,7 +148,7 @@ func TestProvenanceJoinsLaterEvidenceAndSettledExternalCostWithoutMutatingManife
 	if err != nil { t.Fatal(err) }
 
 	now := time.Date(2026, 9, 21, 9, 1, 0, 0, time.UTC).Format(time.RFC3339Nano)
-	db := manifests.Store().DB()
+	db := store.DB()
 	if _, err := db.ExecContext(ctx,
 		"INSERT INTO evidence_objects(evidence_id,content_hash,media_type,kind,size_bytes,created_at) VALUES('e1','hash-e1','text/plain','TEST',1,?)", now,
 	); err != nil { t.Fatal(err) }
@@ -189,11 +190,11 @@ func TestProvenanceJoinsLaterEvidenceAndSettledExternalCostWithoutMutatingManife
 	}
 }
 
-func seedCapability(t *testing.T, manifests *runmanifest.Service, id, name, version, provider, assessmentID string) {
+func seedCapability(t *testing.T, store *state.Store, id, name, version, provider, assessmentID string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Date(2026,9,21,8,59,0,0,time.UTC).Format(time.RFC3339Nano)
-	db := manifests.Store().DB()
+	db := store.DB()
 	if _, err := db.ExecContext(ctx,
 		"INSERT INTO capability_definitions(capability_id,semantic_name,semantic_version,provider,access_context,authority_requirements_json,minimum_enforcement,active,created_at,updated_at) VALUES(?,?,?,?,?,'[\""+name+"\"]','PARTIAL',1,?,?)",
 		id,name,version,provider,"local",now,now,
