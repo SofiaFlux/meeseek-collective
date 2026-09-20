@@ -119,7 +119,7 @@ func TestStartAttemptPersistsImmutableCanonicalRunManifest(t *testing.T) {
 }
 
 func TestReplacementAttemptGetsDistinctManifestAndFence(t *testing.T) {
-	ctx, store, manifests, execSvc, missionID := newManifestHarness(t)
+	ctx, _, manifests, execSvc, missionID := newManifestHarness(t)
 	task := createManifestTask(t, ctx, execSvc, missionID)
 	first, err := execSvc.StartAttempt(ctx, task.ID, "codex", time.Minute)
 	if err != nil { t.Fatal(err) }
