@@ -37,14 +37,23 @@ type GuardedAttempt struct {
 	TaskState       domain.TaskState
 }
 
-type Service struct {
-	store   *state.Store
-	clock   clock.Clock
-	purpose *purpose.Service
+type AttemptStartRecorder interface {
+	RecordAttemptStartInTx(context.Context, *sql.Tx, domain.Attempt, domain.Task) error
 }
 
-func New(store *state.Store, clk clock.Clock, purposes *purpose.Service) *Service {
-	return &Service{store: store, clock: clk, purpose: purposes}
+type Service struct {
+	store         *state.Store
+	clock         clock.Clock
+	purpose       *purpose.Service
+	startRecorder AttemptStartRecorder
+}
+
+func New(store *state.Store, clk clock.Clock, purposes *purpose.Service, recorders ...AttemptStartRecorder) *Service {
+	var recorder AttemptStartRecorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
+	return &Service{store: store, clock: clk, purpose: purposes, startRecorder: recorder}
 }
 
 func (s *Service) CreateTask(ctx context.Context, request TaskRequest) (domain.Task, error) {
@@ -174,6 +183,10 @@ func (s *Service) StartAttempt(ctx context.Context, taskID domain.ID, executorKi
 		if taskState != domain.TaskEligible {
 			return fmt.Errorf("task %q is %s, not ELIGIBLE", taskID, taskState)
 		}
+		task, err := loadTask(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
 		attempt.FenceGeneration = fence + 1
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO attempts(attempt_id, task_id, state, fence_generation, lease_state, lease_expires_at, started_at, executor_kind)
@@ -198,6 +211,11 @@ func (s *Service) StartAttempt(ctx context.Context, taskID domain.ID, executorKi
 		}
 		if changed != 1 {
 			return domain.ErrStaleAttempt
+		}
+		if s.startRecorder != nil {
+			if err := s.startRecorder.RecordAttemptStartInTx(ctx, tx, attempt, task); err != nil {
+				return fmt.Errorf("record Attempt start provenance: %w", err)
+			}
 		}
 		return appendEvent(ctx, tx, taskID, attempt.ID, "ATTEMPT_LEASED", now)
 	})
