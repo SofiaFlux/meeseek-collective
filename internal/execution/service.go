@@ -45,15 +45,17 @@ type Service struct {
 	store         *state.Store
 	clock         clock.Clock
 	purpose       *purpose.Service
-	startRecorder AttemptStartRecorder
+	startRecorders []AttemptStartRecorder
 }
 
 func New(store *state.Store, clk clock.Clock, purposes *purpose.Service, recorders ...AttemptStartRecorder) *Service {
-	var recorder AttemptStartRecorder
-	if len(recorders) > 0 {
-		recorder = recorders[0]
+	active := make([]AttemptStartRecorder, 0, len(recorders))
+	for _, recorder := range recorders {
+		if recorder != nil {
+			active = append(active, recorder)
+		}
 	}
-	return &Service{store: store, clock: clk, purpose: purposes, startRecorder: recorder}
+	return &Service{store: store, clock: clk, purpose: purposes, startRecorders: active}
 }
 
 func (s *Service) CreateTask(ctx context.Context, request TaskRequest) (domain.Task, error) {
@@ -212,8 +214,8 @@ func (s *Service) StartAttempt(ctx context.Context, taskID domain.ID, executorKi
 		if changed != 1 {
 			return domain.ErrStaleAttempt
 		}
-		if s.startRecorder != nil {
-			if err := s.startRecorder.RecordAttemptStartInTx(ctx, tx, attempt, task); err != nil {
+		for _, recorder := range s.startRecorders {
+			if err := recorder.RecordAttemptStartInTx(ctx, tx, attempt, task); err != nil {
 				return fmt.Errorf("record Attempt start provenance: %w", err)
 			}
 		}
