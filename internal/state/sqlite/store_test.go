@@ -88,3 +88,23 @@ func TestFieldFeedbackMigrationCreatesDurableSchema(t *testing.T) {
 		t.Fatalf("migration columns task_class=%d approval_id=%d, want 1/1", taskClassColumn, approvalColumn)
 	}
 }
+
+
+func TestAttemptRunManifestMigrationCreatesImmutableSchema(t *testing.T) {
+	store := testutil.OpenStore(t)
+	ctx := context.Background()
+	var table string
+	if err := store.DB().QueryRowContext(ctx,
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='attempt_run_manifests'",
+	).Scan(&table); err != nil {
+		t.Fatal(err)
+	}
+	for _, trigger := range []string{"attempt_run_manifests_no_update","attempt_run_manifests_no_delete"} {
+		var name string
+		if err := store.DB().QueryRowContext(ctx,
+			"SELECT name FROM sqlite_master WHERE type='trigger' AND name=?", trigger,
+		).Scan(&name); err != nil {
+			t.Fatalf("trigger %s missing: %v", trigger, err)
+		}
+	}
+}
