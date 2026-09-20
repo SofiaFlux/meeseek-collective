@@ -59,9 +59,9 @@ The native local Box defaults to `UNENFORCED` containment. The Codex adapter def
 
 Every leased Attempt gets one immutable, hash-bound Run Manifest in the same SQLite transaction that creates the lease. The manifest is descriptive only: copying it does not recreate authority, extend a lease, mint a capability session or change canonical Task/Attempt state.
 
-For the MVC it snapshots only facts that are actually known at lease time: Task/Attempt identity and fence, executor kind, runtime build metadata when available, policy-set provenance when exposed by the policy engine, the effective TEB profile, the Task's executor-visible capability set with any durable capability assessment metadata, and the resource envelope. There is no Context Projection subsystem yet, so no projection hash is invented.
+For the MVC it snapshots only facts that are actually known at lease time: Task/Attempt identity and fence, executor kind, runtime build metadata when available, policy-set provenance when exposed by the policy engine, the effective TEB profile, the Task's `RequiredCapabilities`, which the current MVC treats as the declared executor-visible capability set at lease time, with any durable capability assessment metadata, and the resource envelope. There is no Context Projection subsystem yet, so no projection hash is invented.
 
-Later output Evidence and settled External Operation cost remain canonical in their existing stores. `AttemptRunProvenance` joins those records for inspection without mutating the immutable lease-time manifest. Executor usage/model/version fields remain empty unless a future canonical source can supply them; the MVC does not fabricate zero/default measurements.
+Later output Evidence and settled External Operation cost remain canonical in their existing stores. `runmanifest.Provenance` joins those records for inspection without mutating the immutable lease-time manifest. Executor usage/model/version fields remain empty unless a future canonical source can supply them; the MVC does not fabricate zero/default measurements.
 
 ## Field dogfooding and local experience
 
