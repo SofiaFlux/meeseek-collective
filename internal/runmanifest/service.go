@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -61,6 +62,10 @@ type EvidenceRef struct {
 	ContentHash string    `json:"content_hash"`
 }
 
+// Manifest is a descriptive lease-time snapshot. In the current MVC there is
+// no separate materialized capability-session projection, so the executor-visible
+// set is derived from Task.RequiredCapabilities at lease time. Missing IDs remain
+// empty rather than being inferred.
 type Manifest struct {
 	Version               int                  `json:"version"`
 	TaskID                domain.ID            `json:"task_id"`
@@ -124,6 +129,12 @@ func (s *Service) RecordAttemptStartInTx(ctx context.Context, tx *sql.Tx, attemp
 	}
 	if strings.TrimSpace(attempt.ExecutorKind) == "" || attempt.StartedAt.IsZero() {
 		return errors.New("attempt run manifest requires executor kind and start time")
+	}
+	if err := s.static.TEBProfile.Validate(); err != nil {
+		return fmt.Errorf("invalid TEB snapshot: %w", err)
+	}
+	if !validPolicySnapshot(s.static.Policy) {
+		return errors.New("attempt run manifest policy provenance must be either complete or absent")
 	}
 
 	capabilities, err := loadCapabilitySnapshots(ctx, tx, task.RequiredCapabilities)
@@ -206,6 +217,13 @@ func (s *Service) Manifest(ctx context.Context, attemptID domain.ID) (Record, er
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&record.Manifest); err != nil {
 		return Record{}, fmt.Errorf("decode attempt run manifest: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return Record{}, errors.New("attempt run manifest contains trailing JSON")
+		}
+		return Record{}, fmt.Errorf("decode attempt run manifest trailer: %w", err)
 	}
 	if record.Manifest.Version != manifestVersion ||
 		record.Manifest.AttemptID != record.AttemptID ||
@@ -371,6 +389,14 @@ func loadCapabilitySnapshots(ctx context.Context, tx *sql.Tx, semanticNames []st
 		result = append(result, snapshot)
 	}
 	return result, nil
+}
+
+func validPolicySnapshot(snapshot PolicySnapshot) bool {
+	count := 0
+	if snapshot.PolicySetID != "" { count++ }
+	if snapshot.PolicySetHash != "" { count++ }
+	if snapshot.PolicyCapabilitiesHash != "" { count++ }
+	return count == 0 || count == 3
 }
 
 func normalizeStrings(values []string) []string {
