@@ -26,6 +26,7 @@ import (
 	"github.com/SofiaFlux/meeseek-collective/internal/policy"
 	"github.com/SofiaFlux/meeseek-collective/internal/purpose"
 	"github.com/SofiaFlux/meeseek-collective/internal/resources"
+	"github.com/SofiaFlux/meeseek-collective/internal/runmanifest"
 	"github.com/SofiaFlux/meeseek-collective/internal/scheduler"
 	state "github.com/SofiaFlux/meeseek-collective/internal/state/sqlite"
 	"github.com/SofiaFlux/meeseek-collective/internal/teb"
@@ -49,6 +50,8 @@ type Config struct {
 	Executors           map[string]executors.Executor
 	ExecutorPreference  scheduler.ExecutorPreference
 	TEBProfile          teb.Profile
+	RuntimeVersion      string
+	RuntimeCommit       string
 	LeaseDuration       time.Duration
 }
 
@@ -60,6 +63,7 @@ type Box struct {
 	Evidence      *evidence.Store
 	Verification  *verification.Service
 	Resources     *resources.Service
+	RunManifests  *runmanifest.Service
 	Approvals     *approvals.Service
 	FieldObserver *fieldfeedback.Observer
 	Feedback      *fieldfeedback.Feedback
@@ -115,6 +119,11 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	if err := cfg.TEBProfile.Validate(); err != nil {
 		return nil, fmt.Errorf("TEB profile: %w", err)
 	}
+	policySnapshot, err := capturePolicySnapshot(cfg.PolicyEngine)
+	if err != nil {
+		return nil, fmt.Errorf("capture policy metadata for Attempt manifests: %w", err)
+	}
+	buildMetadata := resolveBuildMetadata(cfg.RuntimeVersion, cfg.RuntimeCommit)
 
 	store, err := state.Open(ctx, cfg.StatePath)
 	if err != nil {
@@ -128,7 +137,12 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	}()
 
 	purposes := purpose.New(store, cfg.Clock)
-	executionSvc := execution.New(store, cfg.Clock, purposes)
+	runManifestSvc := runmanifest.New(store, runmanifest.StaticContext{
+		Build: buildMetadata,
+		Policy: policySnapshot,
+		TEBProfile: cfg.TEBProfile,
+	})
+	executionSvc := execution.New(store, cfg.Clock, purposes, runManifestSvc)
 	evidenceStore, err := evidence.New(store, cfg.EvidencePath, cfg.Clock)
 	if err != nil {
 		return nil, err
@@ -215,6 +229,7 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 		Evidence: evidenceStore,
 		Verification: verificationSvc,
 		Resources: resourceSvc,
+		RunManifests: runManifestSvc,
 		Approvals: approvalSvc,
 		FieldObserver: fieldObserver,
 		Feedback: feedbackSvc,
