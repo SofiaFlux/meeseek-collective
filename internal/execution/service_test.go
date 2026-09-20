@@ -64,7 +64,7 @@ func (failingAttemptStartRecorder) RecordAttemptStartInTx(context.Context, *sql.
 
 func TestStartAttemptRollsBackWhenRunManifestCannotBePersisted(t *testing.T) {
 	svc, _, ctx, missionID := newExecutionService(t)
-	svc.startRecorder = failingAttemptStartRecorder{}
+	svc.startRecorders = []AttemptStartRecorder{failingAttemptStartRecorder{}}
 	task, err := svc.CreateTask(ctx, baseTaskRequest(missionID))
 	if err != nil {
 		t.Fatal(err)
