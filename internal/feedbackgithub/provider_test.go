@@ -149,3 +149,61 @@ func TestIssueBodyContainsStableMarker(t *testing.T) {
 	text, _ := body["body"].(string)
 	if !strings.Contains(text,"<!-- meeseek-feedback:abc -->") { t.Fatalf("body=%q",text) }
 }
+
+
+func TestProviderReconcilePaginatesBeforeConfirmingNoEffect(t *testing.T) {
+	tokenFile := writeTokenFile(t, "token-value", 0o600)
+	var pages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			issues := make([]issueResponse, 100)
+			for i := range issues {
+				issues[i] = issueResponse{Number:int64(i+1), Body:"no marker"}
+			}
+			if err := json.NewEncoder(w).Encode(issues); err != nil { t.Fatal(err) }
+		case "2":
+			if err := json.NewEncoder(w).Encode([]issueResponse{{
+				Number:101,
+				HTMLURL:"https://github.com/owner/repo/issues/101",
+				Body:"safe\n<!-- meeseek-feedback:fp-old -->",
+			}}); err != nil { t.Fatal(err) }
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	}))
+	defer server.Close()
+
+	artifact := domain.SanitizedFeedback{ID:"feedback-old", ContentJSON:`{"category":"TEST"}`, Fingerprint:"fp-old"}
+	provider, err := New(Config{
+		APIBaseURL:server.URL, Repository:"owner/repo",
+		CredentialSource:FileCredentialSource{Path:tokenFile}, HTTPClient:server.Client(),
+	}, memoryFeedback{artifact:artifact})
+	if err != nil { t.Fatal(err) }
+	canonical, _ := provider.CanonicalIntent(fieldfeedback.EmitIntent{SanitizedFeedbackID:artifact.ID,Destination:"owner/repo"})
+	outcome, err := provider.LookupOutcome(context.Background(), operations.ProviderDispatchRequest{CanonicalIntent:canonical})
+	if err != nil { t.Fatal(err) }
+	if outcome.State != domain.OperationConfirmedEffect {
+		t.Fatalf("outcome=%s, want CONFIRMED_EFFECT", outcome.State)
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("pages=%v, want [1 2]", pages)
+	}
+}
+
+func TestConfigRejectsPlaintextNonLoopbackAPI(t *testing.T) {
+	_, err := New(Config{
+		APIBaseURL:"http://github-proxy.example.test",
+		Repository:"owner/repo",
+		CredentialSource:staticCredential("token"),
+	}, memoryFeedback{})
+	if err == nil {
+		t.Fatal("plaintext non-loopback GitHub API accepted")
+	}
+}
