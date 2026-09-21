@@ -246,27 +246,21 @@ Each sanitization attempt records:
 
 `SanitizedFeedback` is an immutable export-eligible artifact created only after `PASS`.
 
-It contains an allowlisted schema:
+For the MVC deterministic sanitizer, the **outbound serialized content is structural-only**. It contains only allowlisted, privacy-safe fields:
 
-- `feedback_id`;
 - schema version;
-- candidate ID;
-- Collective version/commit;
-- executor type/version when explicitly marked safe;
-- generic task class;
-- execution/enforcement profile;
-- expected behavior;
-- observed behavior;
-- failure/friction category;
-- generic state transitions;
-- normalized cost/latency/retry observations;
+- closed generic task class;
+- closed failure/friction category;
+- closed generic state-transition tokens;
+- normalized numeric cost/latency/retry observations;
 - human-intervention flag;
-- recovery result;
-- correlation key / exact fingerprint;
-- optional synthetic reproduction;
-- sanitization attestation: sanitizer version, ruleset hash, result ID;
-- creation timestamp;
-- immutable content hash.
+- enforcement level.
+
+Free-form `expected_behavior`, `observed_behavior`, `recovery_result`, local summaries, repository/customer/project names, local correlation keys, and caller-controlled runtime/executor metadata remain local and are not serialized into the outbound content.
+
+The immutable local artifact record additionally stores its candidate linkage, sanitization result reference, content hash, fingerprint, and timestamps. Those local metadata fields are not automatically rendered into the external issue body.
+
+A future semantic abstraction layer MAY add generic text fields only if its output passes the same deterministic post-scan and the export schema is explicitly extended. The initial MVC does not rely on semantic abstraction as proof of safety.
 
 The artifact MUST NOT contain raw local evidence IDs that allow an external sink to dereference workload data.
 
@@ -672,17 +666,32 @@ The Experience service supplies bounded preference hints; it does not become ano
 Initial operator surface:
 
 ```text
+meeseek task create ... --task-class <local-scope>
+
+meeseek feedback observe ...
+meeseek feedback scan
+meeseek feedback candidate ...
+meeseek feedback sanitize <candidate-id>
 meeseek feedback list
-meeseek feedback inspect <candidate-or-feedback-id>
-meeseek feedback emit <feedback-id>
-meeseek approvals list
+meeseek feedback inspect <candidate-id>
+meeseek feedback emit <candidate-id>
+
+meeseek approvals
 meeseek approve <approval-id>
 meeseek reject <approval-id>
+
+meeseek experience grant request ...
+meeseek experience grant activate <grant-request-id>
+meeseek experience propose ...
+meeseek experience observe-outcome <task-id>
+meeseek experience evaluate <proposal-id>
 meeseek experience list
 meeseek experience inspect <rule-id>
 ```
 
 `feedback inspect` must clearly distinguish LOCAL raw/candidate information from the exact immutable artifact proposed for export.
+
+`experience observe-outcome` accepts the Task ID and measurements only. Scope, generic task class, and executor identity are derived from canonical Task/Attempt state and cannot be supplied as authority-bearing caller metadata.
 
 Approval UI/CLI must show the exact sanitized representation/digest being approved, not merely an opaque ID.
 
