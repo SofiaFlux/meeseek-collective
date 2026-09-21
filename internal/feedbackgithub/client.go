@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -98,8 +99,12 @@ func newClient(cfg Config) (*client, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
 		return nil, errors.New("GitHub API base URL must be an absolute HTTP(S) URL without user info")
 	}
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return nil, errors.New("GitHub API base URL scheme must be http or https")
+	if parsed.Scheme != "https" {
+		host := strings.TrimSpace(parsed.Hostname())
+		ip := net.ParseIP(host)
+		if parsed.Scheme != "http" || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
+			return nil, errors.New("GitHub API base URL must use HTTPS except for explicit loopback test endpoints")
+		}
 	}
 	if cfg.CredentialSource == nil {
 		return nil, errors.New("GitHub credential source is required")
@@ -154,35 +159,42 @@ func (c *client) findByMarker(ctx context.Context, marker string) (string, bool,
 	query.Set("state", "all")
 	query.Set("per_page", "100")
 	query.Set("sort", "created")
-	query.Set("direction", "desc")
-	parsed.RawQuery = query.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		return "", false, fmt.Errorf("create GitHub reconcile request: %w", err)
-	}
-	var issues []issueResponse
-	status, err := c.doJSON(req, &issues)
-	if err != nil {
-		return "", false, err
-	}
-	if status != http.StatusOK {
-		return "", false, sanitizedStatusError("reconcile issue", status)
-	}
+	// Ascending creation order keeps page boundaries stable when new issues are
+	// created while reconciliation is walking the repository history.
+	query.Set("direction", "asc")
 	exact := "<!-- " + marker + " -->"
-	for _, issue := range issues {
-		if !strings.Contains(issue.Body, exact) {
-			continue
+	for page := 1; ; page++ {
+		query.Set("page", fmt.Sprintf("%d", page))
+		parsed.RawQuery = query.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+		if err != nil {
+			return "", false, fmt.Errorf("create GitHub reconcile request: %w", err)
 		}
-		reference := strings.TrimSpace(issue.HTMLURL)
-		if reference == "" && issue.Number > 0 {
-			reference = fmt.Sprintf("github:%s#%d", c.repository, issue.Number)
+		var issues []issueResponse
+		status, err := c.doJSON(req, &issues)
+		if err != nil {
+			return "", false, err
 		}
-		if reference == "" {
-			return "", false, errors.New("GitHub reconciliation found marker without issue reference")
+		if status != http.StatusOK {
+			return "", false, sanitizedStatusError("reconcile issue", status)
 		}
-		return reference, true, nil
+		for _, issue := range issues {
+			if !strings.Contains(issue.Body, exact) {
+				continue
+			}
+			reference := strings.TrimSpace(issue.HTMLURL)
+			if reference == "" && issue.Number > 0 {
+				reference = fmt.Sprintf("github:%s#%d", c.repository, issue.Number)
+			}
+			if reference == "" {
+				return "", false, errors.New("GitHub reconciliation found marker without issue reference")
+			}
+			return reference, true, nil
+		}
+		if len(issues) < 100 {
+			return "", false, nil
+		}
 	}
-	return "", false, nil
 }
 
 func (c *client) doJSON(req *http.Request, out any) (int, error) {
