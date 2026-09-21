@@ -45,9 +45,6 @@ type TaskDTO struct {
 	ParentTaskID         domain.ID               `json:"parent_task_id,omitempty"`
 	Purpose              domain.PurposeRef       `json:"purpose"`
 	TaskClass            string                  `json:"task_class,omitempty"`
-	State               `json:"id"`
-	ParentTaskID         domain.ID               `json:"parent_task_id,omitempty"`
-	Purpose              domain.PurposeRef       `json:"purpose"`
 	State                domain.TaskState        `json:"state"`
 	CurrentAttemptID     domain.ID               `json:"current_attempt_id,omitempty"`
 	CurrentFence         int64                   `json:"current_fence"`
