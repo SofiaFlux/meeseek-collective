@@ -93,8 +93,14 @@ func insertVerifiedTask(t *testing.T,svc *Service,name,executor string,accepted 
 			domain.NewID("acceptance"),taskID,attemptID,now);err!=nil{t.Fatal(err)}
 	}else{
 		if _,err:=svc.store.DB().ExecContext(ctx,
+			"UPDATE tasks SET state = 'CHALLENGED', updated_at = ? WHERE task_id = ?",
+			now,taskID);err!=nil{t.Fatal(err)}
+		if _,err:=svc.store.DB().ExecContext(ctx,
 			"INSERT INTO task_challenges(challenge_id,task_id,scope,reason,evidence_ids_json,created_at) VALUES (?, ?, 'TASK', 'verified regression', '[]', ?)",
 			domain.NewID("challenge"),taskID,now);err!=nil{t.Fatal(err)}
+		if _,err:=svc.store.DB().ExecContext(ctx,
+			"INSERT INTO execution_events(event_id,task_id,attempt_id,event_type,details_json,created_at) VALUES (?, ?, ?, 'TASK_CHALLENGED', '{}', ?)",
+			domain.NewID("event"),taskID,attemptID,now);err!=nil{t.Fatal(err)}
 	}
 	return taskID
 }
