@@ -23,4 +23,14 @@ func TestFeedbackHumanOutputSeparatesLocalAndExportSurfaces(t *testing.T) {
 	if strings.Contains(out,"local-only") || !strings.Contains(out,"RECOVERY_FRICTION") {
 		t.Fatalf("scan output=%q",out)
 	}
+	out=executeCommand(t,newRootCommandWithClient(api),"feedback","candidate",
+		"--observation","obs-1","--generic-task-class","DEBUGGING","--category","TEST",
+		"--expected","local expected","--observed","local observed")
+	if api.feedbackCandidateCalls!=1 || !strings.Contains(out,"LOCAL — DO NOT EXPORT"){
+		t.Fatalf("candidate calls=%d output=%q",api.feedbackCandidateCalls,out)
+	}
+	out=executeCommand(t,newRootCommandWithClient(api),"feedback","sanitize","feedback-created")
+	if api.feedbackSanitizeCalls!=1 || !strings.Contains(out,"Immutable artifact sanitized-created"){
+		t.Fatalf("sanitize calls=%d output=%q",api.feedbackSanitizeCalls,out)
+	}
 }
