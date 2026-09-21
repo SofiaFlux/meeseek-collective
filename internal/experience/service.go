@@ -189,14 +189,19 @@ func (s *Service) Propose(ctx context.Context,input ProposalInput)(domain.Experi
 	input.ScopeKey=strings.TrimSpace(input.ScopeKey)
 	input.PreferredExecutor=strings.TrimSpace(input.PreferredExecutor)
 	input.EvidenceObservationIDs=cleanIDs(input.EvidenceObservationIDs)
-	if input.GrantID==""||input.ScopeKey==""||input.PreferredExecutor==""||!input.GenericTaskClass.Valid()||len(input.EvidenceObservationIDs)==0{
-		return domain.ExperienceProposal{},errors.New("proposal requires grant, valid task class, scope, preferred executor, and evidence")
+	if input.GrantID==""||input.PreferredExecutor==""||len(input.EvidenceObservationIDs)==0{
+		return domain.ExperienceProposal{},errors.New("proposal requires grant, preferred executor, and evidence")
 	}
 	grant,err:=s.Grant(ctx,input.GrantID);if err!=nil{return domain.ExperienceProposal{},err}
 	if !grant.ExpiresAt.After(s.clock.Now().UTC()){return domain.ExperienceProposal{},errors.New("adaptation grant expired")}
 	if grant.Kind!=AdaptationExecutorPreference{return domain.ExperienceProposal{},errors.New("grant does not authorize executor preference")}
-	if grant.ScopeKey!=input.ScopeKey{return domain.ExperienceProposal{},errors.New("proposal scope is outside grant")}
+	canonicalScope:=strings.TrimSpace(grant.ScopeKey)
+	canonicalClass:=genericTaskClassForScope(canonicalScope)
+	if input.ScopeKey!=""&&input.ScopeKey!=canonicalScope{return domain.ExperienceProposal{},errors.New("proposal scope does not match canonical grant scope")}
+	if input.GenericTaskClass!=""&&input.GenericTaskClass!=canonicalClass{return domain.ExperienceProposal{},errors.New("proposal generic task class does not match canonical scope classification")}
 	if !containsString(grant.AllowedExecutors,input.PreferredExecutor){return domain.ExperienceProposal{},errors.New("preferred executor is not allowed by grant")}
+	input.ScopeKey=canonicalScope
+	input.GenericTaskClass=canonicalClass
 	now:=s.clock.Now().UTC()
 	out:=domain.ExperienceProposal{
 		ID:domain.NewID("experience-proposal"),GrantID:grant.ID,GenericTaskClass:input.GenericTaskClass,
@@ -231,31 +236,47 @@ func (s *Service) ObserveVerifiedOutcome(ctx context.Context,input VerifiedOutco
 	input.TaskID=domain.ID(strings.TrimSpace(string(input.TaskID)))
 	input.ScopeKey=strings.TrimSpace(input.ScopeKey)
 	input.ExecutorKind=strings.TrimSpace(input.ExecutorKind)
-	if input.TaskID==""||input.ScopeKey==""||input.ExecutorKind==""||!input.GenericTaskClass.Valid(){
-		return errors.New("verified outcome requires task, valid class, scope, and executor")
-	}
+	if input.TaskID==""{return errors.New("verified outcome requires task")}
+	if input.GenericTaskClass!=""&&!input.GenericTaskClass.Valid(){return errors.New("verified outcome generic task class is invalid")}
 	if input.RetryCount<0{return errors.New("retry count cannot be negative")}
 	if input.CostUnits!=nil&&*input.CostUnits<0{return errors.New("cost cannot be negative")}
 	if input.LatencyMs!=nil&&*input.LatencyMs<0{return errors.New("latency cannot be negative")}
 
+	var taskClass string
 	var currentAttempt domain.ID
 	var actualExecutor string
+	var taskState domain.TaskState
 	if err:=s.store.DB().QueryRowContext(ctx,
-		"SELECT t.current_attempt_id, a.executor_kind FROM tasks t JOIN attempts a ON a.attempt_id = t.current_attempt_id WHERE t.task_id = ?",input.TaskID,
-	).Scan(&currentAttempt,&actualExecutor);err!=nil{
+		"SELECT t.task_class, t.current_attempt_id, t.state, a.executor_kind FROM tasks t JOIN attempts a ON a.attempt_id = t.current_attempt_id WHERE t.task_id = ?",input.TaskID,
+	).Scan(&taskClass,&currentAttempt,&taskState,&actualExecutor);err!=nil{
 		return fmt.Errorf("load canonical task attempt: %w",err)
 	}
-	if actualExecutor!=input.ExecutorKind{return errors.New("verified outcome executor does not match canonical attempt")}
+	taskClass=strings.TrimSpace(taskClass)
+	if taskClass==""{return errors.New("verified outcome task has no canonical TaskClass")}
+	canonicalClass:=genericTaskClassForScope(taskClass)
+	if input.ScopeKey!=""&&input.ScopeKey!=taskClass{return errors.New("verified outcome scope does not match canonical TaskClass")}
+	if input.GenericTaskClass!=""&&input.GenericTaskClass!=canonicalClass{return errors.New("verified outcome class does not match canonical TaskClass")}
+	if input.ExecutorKind!=""&&input.ExecutorKind!=actualExecutor{return errors.New("verified outcome executor does not match canonical attempt")}
+	input.ScopeKey=taskClass
+	input.GenericTaskClass=canonicalClass
+	input.ExecutorKind=actualExecutor
 
 	if input.Accepted {
+		if taskState!=domain.TaskSucceeded{return errors.New("accepted outcome requires canonical SUCCEEDED task")}
 		var one int
-		if err:=s.store.DB().QueryRowContext(ctx,"SELECT 1 FROM acceptance_records WHERE task_id = ?",input.TaskID).Scan(&one);err!=nil{
-			return errors.New("accepted outcome lacks canonical acceptance record")
+		if err:=s.store.DB().QueryRowContext(ctx,
+			"SELECT 1 FROM acceptance_records WHERE task_id = ? AND attempt_id = ?",input.TaskID,currentAttempt,
+		).Scan(&one);err!=nil{
+			return errors.New("accepted outcome lacks canonical acceptance for current Attempt")
 		}
 	} else {
+		if taskState!=domain.TaskChallenged{return errors.New("negative outcome requires canonical CHALLENGED task")}
 		var one int
-		if err:=s.store.DB().QueryRowContext(ctx,"SELECT 1 FROM task_challenges WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",input.TaskID).Scan(&one);err!=nil{
-			return errors.New("negative outcome lacks canonical task challenge")
+		if err:=s.store.DB().QueryRowContext(ctx,
+			"SELECT 1 FROM execution_events WHERE task_id = ? AND attempt_id = ? AND event_type = 'TASK_CHALLENGED' ORDER BY created_at DESC LIMIT 1",
+			input.TaskID,currentAttempt,
+		).Scan(&one);err!=nil{
+			return errors.New("negative outcome lacks canonical challenge for current Attempt")
 		}
 	}
 	_,err:=s.store.DB().ExecContext(ctx,
