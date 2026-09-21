@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/experience"
@@ -84,5 +83,4 @@ func TestExperienceControlExposesGovernedLifecycleWithoutCallerScopeAuthority(t 
 		t.Fatalf("evaluated=%s rule=%+v",fake.evaluatedID,rule)
 	}
 
-	_ = time.Time{} // keep this fixture independent from grant expiration behavior.
 }
