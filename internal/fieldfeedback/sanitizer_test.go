@@ -215,7 +215,7 @@ func TestSanitizerNeverExportsUntrustedFreeTextWithoutAbstraction(t *testing.T) 
 	artifact,result,err:=sanitizer.Sanitize(context.Background(),candidate.ID)
 	if err!=nil{t.Fatal(err)}
 	if result.Outcome!=domain.SanitizationPass{t.Fatalf("outcome=%s",result.Outcome)}
-	for _,forbidden:=range []string{"AcmeBank","Phoenix","SofiaFlux","meeseek-collective","expected_behavior","observed_behavior","recovery_result"}{
+	for _,forbidden:=range []string{"AcmeBank","Phoenix","SofiaFlux","meeseek-collective","expected_behavior","observed_behavior","recovery_result","correlation_key"}{
 		if strings.Contains(artifact.ContentJSON,forbidden){
 			t.Fatalf("structured export leaked %q: %s",forbidden,artifact.ContentJSON)
 		}
