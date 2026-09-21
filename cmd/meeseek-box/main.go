@@ -145,6 +145,7 @@ func run(ctx context.Context) error {
 		Tasks:      box.Execution,
 		Approvals:  box.Approvals,
 		Feedback:   box.Feedback,
+		Sanitizer:  box.Sanitizer,
 		FieldObserver: box.FieldObserver,
 		Experience: box.Experience,
 		Attempts:   box.Execution,
