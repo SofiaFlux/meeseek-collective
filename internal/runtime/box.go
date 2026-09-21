@@ -189,7 +189,7 @@ func Open(ctx context.Context, cfg Config) (*Box, error) {
 	sanitizer, err := fieldfeedback.NewDeterministicSanitizer(
 		store, cfg.Clock, feedbackSvc,
 		fieldfeedback.DeterministicSanitizerConfig{
-			Version: "deterministic-v1", DenyPatterns: denyPatterns, AllowExecutorMetadata: true,
+			Version: "deterministic-v1", DenyPatterns: denyPatterns, AllowExecutorMetadata: false,
 		},
 	)
 	if err != nil {
