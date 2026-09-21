@@ -65,7 +65,7 @@ Later output Evidence and settled External Operation cost remain canonical in th
 
 ## Field dogfooding and local experience
 
-Field dogfooding is **disabled and LOCAL_ONLY by default**. Raw `FieldObservation` records may contain workload-sensitive context and remain local. Only a deterministic, fail-closed sanitizer can produce an immutable `SanitizedFeedback` export artifact; sanitization and authorization are separate gates.
+Field dogfooding is **disabled and LOCAL_ONLY by default**. Raw `FieldObservation` records and candidate free text may contain workload-sensitive context and remain local. The MVC deterministic sanitizer exports a structural allowlist only (closed categories/classes/state tokens, numeric metrics, human-intervention and enforcement flags); free-form behavior text, customer/repository/project identifiers, correlation hashes, and caller-controlled runtime/executor metadata are not serialized into outbound feedback. Only a deterministic, fail-closed sanitizer can produce an immutable `SanitizedFeedback` export artifact; sanitization and authorization are separate gates.
 
 Outbound GitHub feedback is normal governed work: a `COLLECTIVE_MAINTENANCE` Task is leased to the deterministic `feedback-emitter`, which uses the protected External Operation PREPARED → DISPATCHED → reconciliation boundary. It never sends directly from the CLI. GitHub credentials are not stored in `config.json`; set `MEESEEK_FEEDBACK_GITHUB_TOKEN_FILE` to a private regular file (0600 on Unix) only when GitHub export is explicitly enabled.
 
