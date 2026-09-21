@@ -69,3 +69,66 @@ func TestGrantRejectsTrustedControlKindsAndProposalRequiresEvidence(t *testing.T
 		PreferredExecutor:"not-allowed",EvidenceObservationIDs:[]domain.ID{"missing"},
 	});err==nil{t.Fatal("proposal accepted executor outside grant")}
 }
+
+
+func seedExperienceCanonicalTask(t *testing.T, svc *Service, taskID, taskClass string, currentAttempt domain.ID, executor string) {
+	t.Helper()
+	now := svc.clock.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := svc.store.DB().ExecContext(context.Background(), `
+		INSERT INTO tasks(
+			task_id, purpose_kind, purpose_id, task_class, state, current_attempt_id, current_fence,
+			acceptance_criteria_json, required_capabilities_json, required_enforcement,
+			authority_ceiling_json, resource_envelope_id, priority, created_at, updated_at
+		) VALUES (?, 'OWNER_DIRECTIVE', ?, ?, 'SUCCEEDED', ?, 2, '["ok"]', '[]', 'UNENFORCED', '[]', 'env', 0, ?, ?)`,
+		taskID, "purpose-"+taskID, taskClass, currentAttempt, now, now,
+	); err != nil { t.Fatal(err) }
+	for _, attempt := range []struct{id domain.ID; fence int64; kind string}{
+		{id:"attempt-old", fence:1, kind:"claude"},
+		{id:currentAttempt, fence:2, kind:executor},
+	} {
+		if _, err := svc.store.DB().ExecContext(context.Background(), `
+			INSERT OR IGNORE INTO attempts(
+				attempt_id, task_id, state, fence_generation, lease_state, lease_expires_at, started_at, completed_at, executor_kind
+			) VALUES (?, ?, 'COMPLETED', ?, 'REVOKED', ?, ?, ?, ?)`,
+			attempt.id, taskID, attempt.fence, now, now, now, attempt.kind,
+		); err != nil { t.Fatal(err) }
+	}
+}
+
+func TestObserveVerifiedOutcomeDerivesScopeAndClassFromCanonicalTask(t *testing.T) {
+	svc,_,_:=newExpHarness(t)
+	ctx:=context.Background()
+	seedExperienceCanonicalTask(t,svc,"task-scope","repo.review","attempt-current","codex")
+	now:=svc.clock.Now().UTC().Format(time.RFC3339Nano)
+	if _,err:=svc.store.DB().ExecContext(ctx,`
+		INSERT INTO acceptance_records(
+			acceptance_id, task_id, attempt_id, verifier_id, verifier_type, criteria_result_json, evidence_ids_json, created_at
+		) VALUES ('accept-scope','task-scope','attempt-current','owner','TEST','{"met":true}','[]',?)`,now);err!=nil{t.Fatal(err)}
+
+	err:=svc.ObserveVerifiedOutcome(ctx,VerifiedOutcome{
+		TaskID:"task-scope",GenericTaskClass:domain.GenericTaskDebugging,ScopeKey:"repo.debug",
+		ExecutorKind:"codex",Accepted:true,
+	})
+	if err==nil{t.Fatal("caller-provided scope/class overrode canonical TaskClass")}
+}
+
+func TestObserveVerifiedOutcomeRequiresEvidenceForExactCurrentAttempt(t *testing.T) {
+	svc,_,_:=newExpHarness(t)
+	ctx:=context.Background()
+	seedExperienceCanonicalTask(t,svc,"task-attempt","repo.review","attempt-current","codex")
+	now:=svc.clock.Now().UTC().Format(time.RFC3339Nano)
+	if _,err:=svc.store.DB().ExecContext(ctx,`
+		INSERT INTO acceptance_records(
+			acceptance_id, task_id, attempt_id, verifier_id, verifier_type, criteria_result_json, evidence_ids_json, created_at
+		) VALUES ('accept-old','task-attempt','attempt-old','owner','TEST','{"met":true}','[]',?)`,now);err!=nil{t.Fatal(err)}
+	if err:=svc.ObserveVerifiedOutcome(ctx,VerifiedOutcome{TaskID:"task-attempt",Accepted:true});err==nil{
+		t.Fatal("acceptance from a different Attempt counted as verified outcome")
+	}
+
+	if _,err:=svc.store.DB().ExecContext(ctx,`
+		INSERT INTO execution_events(event_id, task_id, attempt_id, event_type, details_json, created_at)
+		VALUES ('event-old-challenge','task-attempt','attempt-old','TASK_CHALLENGED','{}',?)`,now);err!=nil{t.Fatal(err)}
+	if err:=svc.ObserveVerifiedOutcome(ctx,VerifiedOutcome{TaskID:"task-attempt",Accepted:false});err==nil{
+		t.Fatal("challenge from a different Attempt counted as verified negative outcome")
+	}
+}
