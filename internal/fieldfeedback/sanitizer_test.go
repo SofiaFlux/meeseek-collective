@@ -197,3 +197,24 @@ func candidateObservationID(t *testing.T, feedback *Feedback, candidateID domain
 	}
 	return id
 }
+
+
+func TestSanitizerNeverExportsUntrustedFreeTextWithoutAbstraction(t *testing.T) {
+	feedback,candidate:=sanitizerCandidate(t,"AcmeBank Phoenix migration failed in SofiaFlux/meeseek-collective")
+	if _,err:=feedback.store.DB().ExecContext(context.Background(),
+		"UPDATE feedback_candidates SET expected_behavior = ?, recovery_result = ? WHERE candidate_id = ?",
+		"customer AcmeBank should recover","Phoenix project manual recovery",candidate.ID,
+	);err!=nil{t.Fatal(err)}
+	sanitizer,err:=NewDeterministicSanitizer(feedback.store,feedback.clock,feedback,DeterministicSanitizerConfig{
+		Version:"test-v1",AllowExecutorMetadata:true,
+	})
+	if err!=nil{t.Fatal(err)}
+	artifact,result,err:=sanitizer.Sanitize(context.Background(),candidate.ID)
+	if err!=nil{t.Fatal(err)}
+	if result.Outcome!=domain.SanitizationPass{t.Fatalf("outcome=%s",result.Outcome)}
+	for _,forbidden:=range []string{"AcmeBank","Phoenix","SofiaFlux","meeseek-collective","expected_behavior","observed_behavior","recovery_result"}{
+		if strings.Contains(artifact.ContentJSON,forbidden){
+			t.Fatalf("structured export leaked %q: %s",forbidden,artifact.ContentJSON)
+		}
+	}
+}
