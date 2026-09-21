@@ -29,6 +29,7 @@ type StatusDTO struct {
 
 type CreateTaskRequest struct {
 	Purpose              domain.PurposeRef       `json:"purpose"`
+	TaskClass            string                  `json:"task_class,omitempty"`
 	AcceptanceCriteria   []string                `json:"acceptance_criteria"`
 	RequiredCapabilities []string                `json:"required_capabilities,omitempty"`
 	RequiredEnforcement  domain.EnforcementLevel `json:"required_enforcement"`
@@ -41,6 +42,10 @@ type CreateTaskRequest struct {
 
 type TaskDTO struct {
 	ID                   domain.ID               `json:"id"`
+	ParentTaskID         domain.ID               `json:"parent_task_id,omitempty"`
+	Purpose              domain.PurposeRef       `json:"purpose"`
+	TaskClass            string                  `json:"task_class,omitempty"`
+	State               `json:"id"`
 	ParentTaskID         domain.ID               `json:"parent_task_id,omitempty"`
 	Purpose              domain.PurposeRef       `json:"purpose"`
 	State                domain.TaskState        `json:"state"`
@@ -145,6 +150,7 @@ type Dependencies struct {
 	Attempts   AttemptReader
 	Operations OperationReader
 	Feedback   FeedbackService
+	Sanitizer  FeedbackSanitizer
 	FieldObserver FieldObserver
 	Experience ExperienceService
 	Shutdown   ShutdownService
@@ -203,8 +209,10 @@ func NewServer(config ServerConfig, deps Dependencies) (*Server, error) {
 	mux.HandleFunc("GET /inspect/attempts/{id}", s.handleAttempt)
 	mux.HandleFunc("GET /inspect/operations/{id}", s.handleOperation)
 	mux.HandleFunc("GET /feedback", s.handleFeedbackList)
+	mux.HandleFunc("POST /feedback/candidates", s.handleFeedbackCandidateCreate)
 	mux.HandleFunc("GET /feedback/{id}", s.handleFeedbackInspect)
 	mux.HandleFunc("POST /feedback/{id}/emit", s.handleFeedbackEmit)
+	mux.HandleFunc("POST /feedback/{id}/sanitize", s.handleFeedbackSanitize)
 	mux.HandleFunc("POST /feedback/observations", s.handleFeedbackObserve)
 	mux.HandleFunc("POST /feedback/scan", s.handleFeedbackScan)
 	mux.HandleFunc("POST /experience/grants/requests", s.handleExperienceGrantRequest)
@@ -280,7 +288,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := s.deps.Tasks.CreateTask(r.Context(), execution.TaskRequest{
-		Purpose: request.Purpose, AcceptanceCriteria: request.AcceptanceCriteria,
+		Purpose: request.Purpose, TaskClass: request.TaskClass, AcceptanceCriteria: request.AcceptanceCriteria,
 		RequiredCapabilities: request.RequiredCapabilities, RequiredEnforcement: request.RequiredEnforcement,
 		AuthorityCeiling: request.AuthorityCeiling, ResourceEnvelopeID: request.ResourceEnvelopeID,
 		Priority: request.Priority, EarliestStart: request.EarliestStart, Deadline: request.Deadline,
@@ -502,7 +510,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 func taskDTO(task domain.Task) TaskDTO {
 	return TaskDTO{
-		ID: task.ID, ParentTaskID: task.ParentTaskID, Purpose: task.Purpose, State: task.State,
+		ID: task.ID, ParentTaskID: task.ParentTaskID, Purpose: task.Purpose, TaskClass: task.TaskClass, State: task.State,
 		CurrentAttemptID: task.CurrentAttemptID, CurrentFence: task.CurrentFence,
 		AcceptanceCriteria:   append([]string(nil), task.AcceptanceCriteria...),
 		RequiredCapabilities: append([]string(nil), task.RequiredCapabilities...), RequiredEnforcement: task.RequiredEnforcement,
