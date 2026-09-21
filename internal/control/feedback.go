@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
@@ -48,6 +49,29 @@ type FeedbackObserveRequest struct {
 	Enforcement  domain.EnforcementLevel `json:"enforcement,omitempty"`
 }
 
+type FeedbackCandidateCreateRequest struct {
+	ObservationIDs     []domain.ID                     `json:"observation_ids"`
+	GenericTaskClass   domain.GenericTaskClass          `json:"generic_task_class"`
+	Category           string                           `json:"category"`
+	ExpectedBehavior   string                           `json:"expected_behavior"`
+	ObservedBehavior   string                           `json:"observed_behavior"`
+	StateTransitions   []string                         `json:"state_transitions,omitempty"`
+	Metrics            fieldfeedback.NormalizedMetrics  `json:"metrics,omitempty"`
+	HumanIntervention  bool                             `json:"human_intervention,omitempty"`
+	RecoveryResult     string                           `json:"recovery_result,omitempty"`
+	RuntimeVersion     string                           `json:"runtime_version,omitempty"`
+	ExecutorKind       string                           `json:"executor_kind,omitempty"`
+	ExecutorVersion    string                           `json:"executor_version,omitempty"`
+	Enforcement        domain.EnforcementLevel          `json:"enforcement"`
+}
+
+type FeedbackSanitizeDTO struct {
+	CandidateID domain.ID                  `json:"candidate_id"`
+	Outcome     domain.SanitizationOutcome `json:"outcome"`
+	ReasonCodes []string                   `json:"reason_codes,omitempty"`
+	Artifact    *SanitizedFeedbackDTO       `json:"artifact,omitempty"`
+}
+
 type FeedbackObservationDTO struct {
 	ID         domain.ID `json:"id"`
 	TaskID     domain.ID `json:"task_id,omitempty"`
@@ -65,15 +89,80 @@ type FeedbackEmitDTO struct {
 }
 
 type FeedbackService interface {
+	CreateCandidate(context.Context, fieldfeedback.CandidateInput) (domain.FeedbackCandidate, error)
+	OnSanitized(context.Context, domain.ID) error
 	Candidates(context.Context, domain.FeedbackCandidateState) ([]domain.FeedbackCandidate, error)
 	Candidate(context.Context, domain.ID) (domain.FeedbackCandidate, error)
 	LatestSanitizedFeedbackForCandidate(context.Context, domain.ID) (domain.SanitizedFeedback, bool, error)
 	RequestEmit(context.Context, domain.ID) (domain.Task, error)
 }
 
+type FeedbackSanitizer interface {
+	Sanitize(context.Context, domain.ID) (domain.SanitizedFeedback, domain.SanitizationResult, error)
+}
+
 type FieldObserver interface {
 	Record(context.Context, fieldfeedback.ObservationInput) (domain.FieldObservation, error)
 	Scan(context.Context) ([]domain.FieldObservation, error)
+}
+
+func (s *Server) handleFeedbackCandidateCreate(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Feedback == nil {
+		writeError(w, http.StatusServiceUnavailable, "field feedback control is not configured")
+		return
+	}
+	var request FeedbackCandidateCreateRequest
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	candidate, err := s.deps.Feedback.CreateCandidate(r.Context(), fieldfeedback.CandidateInput{
+		ObservationIDs: request.ObservationIDs, GenericTaskClass: request.GenericTaskClass,
+		Category: request.Category, ExpectedBehavior: request.ExpectedBehavior, ObservedBehavior: request.ObservedBehavior,
+		StateTransitions: request.StateTransitions, Metrics: request.Metrics, HumanIntervention: request.HumanIntervention,
+		RecoveryResult: request.RecoveryResult, RuntimeVersion: request.RuntimeVersion, ExecutorKind: request.ExecutorKind,
+		ExecutorVersion: request.ExecutorVersion, Enforcement: request.Enforcement,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, feedbackCandidateDTO(candidate))
+}
+
+func (s *Server) handleFeedbackSanitize(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Feedback == nil || s.deps.Sanitizer == nil {
+		writeError(w, http.StatusServiceUnavailable, "field feedback sanitizer is not configured")
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok { return }
+	artifact, result, err := s.deps.Sanitizer.Sanitize(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	var reasons []string
+	if result.ReasonCodesJSON != "" {
+		if err := json.Unmarshal([]byte(result.ReasonCodesJSON), &reasons); err != nil {
+			writeError(w, http.StatusInternalServerError, "decode sanitization reason codes")
+			return
+		}
+	}
+	dto := FeedbackSanitizeDTO{CandidateID:id, Outcome:result.Outcome, ReasonCodes:reasons}
+	if result.Outcome == domain.SanitizationPass {
+		if artifact.ID == "" {
+			writeError(w, http.StatusInternalServerError, "sanitization PASS produced no immutable artifact")
+			return
+		}
+		if err := s.deps.Feedback.OnSanitized(r.Context(), artifact.ID); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		exported := sanitizedFeedbackDTO(artifact)
+		dto.Artifact = &exported
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 func (s *Server) handleFeedbackList(w http.ResponseWriter, r *http.Request) {
