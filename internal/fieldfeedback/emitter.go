@@ -200,6 +200,25 @@ func (s *Feedback) FeedbackForEmitTask(
 	return artifact, destination, cleanIDs(required), nil
 }
 
+func (s *Feedback) ValidateEmitAttempt(ctx context.Context, taskID, attemptID domain.ID) error {
+	taskID = domain.ID(strings.TrimSpace(string(taskID)))
+	attemptID = domain.ID(strings.TrimSpace(string(attemptID)))
+	if taskID == "" || attemptID == "" {
+		return errors.New("emit task and attempt ids are required")
+	}
+	var attemptTaskID domain.ID
+	if err := s.store.DB().QueryRowContext(ctx, "SELECT task_id FROM attempts WHERE attempt_id = ?", attemptID).Scan(&attemptTaskID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("emit attempt %s does not exist", attemptID)
+		}
+		return err
+	}
+	if attemptTaskID != taskID {
+		return fmt.Errorf("emit attempt %s does not belong to task %s", attemptID, taskID)
+	}
+	return nil
+}
+
 func (s *Feedback) emissionTask(ctx context.Context, feedbackID domain.ID) (domain.Task, bool, error) {
 	var taskID domain.ID
 	err := s.store.DB().QueryRowContext(ctx,
@@ -291,7 +310,6 @@ func feedbackCapability(provider string) string {
 	return "feedback." + provider + ".issue.create"
 }
 
-
 func (s *Feedback) MarkReported(ctx context.Context, feedbackID domain.ID, operationID domain.ID, providerReference string) error {
 	if err := s.configured(); err != nil {
 		return err
@@ -310,9 +328,9 @@ func (s *Feedback) MarkReported(ctx context.Context, feedbackID domain.ID, opera
 		}
 	}
 	payload, err := json.Marshal(map[string]any{
-		"candidate_id": candidate.ID,
-		"feedback_id": artifact.ID,
-		"operation_id": operationID,
+		"candidate_id":       candidate.ID,
+		"feedback_id":        artifact.ID,
+		"operation_id":       operationID,
 		"provider_reference": strings.TrimSpace(providerReference),
 	})
 	if err != nil {

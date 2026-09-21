@@ -149,7 +149,7 @@ func (p *Provider) LookupOutcome(ctx context.Context, request operations.Provide
 		return operations.ProviderOutcome{}, err
 	}
 	if !found {
-		return operations.ProviderOutcome{State: domain.OperationConfirmedNoEffect, ActualCost: 0}, nil
+		return operations.ProviderOutcome{State: domain.OperationOutcomeUnknown}, nil
 	}
 	if strings.TrimSpace(reference) == "" {
 		return operations.ProviderOutcome{}, errors.New("feedback sink found marker without provider reference")

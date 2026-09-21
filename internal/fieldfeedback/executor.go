@@ -17,6 +17,7 @@ type EmitTaskLookup interface {
 		domain.ID,
 	) (feedback domain.SanitizedFeedback, destination string, requiredApprovers []domain.ID, err error)
 	MarkReported(context.Context, domain.ID, domain.ID, string) error
+	ValidateEmitAttempt(context.Context, domain.ID, domain.ID) error
 }
 
 type EmitExecutor struct {
@@ -44,6 +45,9 @@ func (e *EmitExecutor) Start(ctx context.Context, envelope executors.AttemptEnve
 	if envelope.TaskID == "" || envelope.AttemptID == "" {
 		return executors.ExecutionResult{ExitCode: 1}, errors.New("feedback emit executor requires task and attempt ids")
 	}
+	if err := e.feedback.ValidateEmitAttempt(ctx, envelope.TaskID, envelope.AttemptID); err != nil {
+		return failureResult(err), err
+	}
 
 	artifact, destination, requiredApprovers, err := e.feedback.FeedbackForEmitTask(ctx, envelope.TaskID)
 	if err != nil {
@@ -56,11 +60,11 @@ func (e *EmitExecutor) Start(ctx context.Context, envelope executors.AttemptEnve
 
 	intent := EmitIntent{SanitizedFeedbackID: artifact.ID, Destination: destination}
 	op, err := e.operations.Prepare(ctx, operations.PrepareRequest{
-		AttemptID: envelope.AttemptID,
-		Provider: e.providerName,
-		TrustedSlotKey: "feedback:" + string(artifact.ID),
-		Intent: intent,
-		Risk: "LOW",
+		AttemptID:         envelope.AttemptID,
+		Provider:          e.providerName,
+		TrustedSlotKey:    "feedback:" + string(artifact.ID),
+		Intent:            intent,
+		Risk:              "LOW",
 		RequiredApprovals: append([]domain.ID(nil), requiredApprovers...),
 	})
 	if err != nil {
@@ -109,9 +113,9 @@ func successResult(feedbackID domain.ID, op domain.ExternalOperation) executors.
 	)
 	return executors.ExecutionResult{
 		ExitCode: 0,
-		Stdout: "feedback external effect confirmed",
+		Stdout:   "feedback external effect confirmed",
 		Evidence: []executors.Evidence{{
-			Kind: executors.EvidenceAgentMessage,
+			Kind:    executors.EvidenceAgentMessage,
 			Content: content,
 		}},
 	}

@@ -20,8 +20,8 @@ import (
 )
 
 type emitPolicy struct {
-	mu sync.Mutex
-	outcome domain.PolicyOutcome
+	mu       sync.Mutex
+	outcome  domain.PolicyOutcome
 	required []domain.ID
 }
 
@@ -31,22 +31,22 @@ func (p *emitPolicy) Evaluate(_ context.Context, in policy.PolicyInput) (domain.
 	return domain.PolicyDecision{
 		ID: domain.NewID("policy-decision"), Outcome: p.outcome,
 		RequiredApprovals: append([]domain.ID(nil), p.required...),
-		ReasonCodes: []string{"test"}, PolicySetID: "policy_test",
+		ReasonCodes:       []string{"test"}, PolicySetID: "policy_test",
 		PolicySetHash: "policy-v1", PolicyCapabilitiesHash: "caps_test",
 		InputDigest: "input", EvaluatedAt: in.Now,
 	}, nil
 }
 
 type emitHarness struct {
-	ctx      context.Context
-	feedback *Feedback
-	artifact domain.SanitizedFeedback
-	exec     *execution.Service
-	ops      *operations.Service
-	sink     *fakeSink
-	emitter  *EmitExecutor
-	task     domain.Task
-	attempt  domain.Attempt
+	ctx       context.Context
+	feedback  *Feedback
+	artifact  domain.SanitizedFeedback
+	exec      *execution.Service
+	ops       *operations.Service
+	sink      *fakeSink
+	emitter   *EmitExecutor
+	task      domain.Task
+	attempt   domain.Attempt
 	approvals *approvals.Service
 }
 
@@ -111,6 +111,26 @@ func TestEmitExecutorRefusesTaskWithoutEmissionLinkage(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("executor accepted task without feedback_emissions linkage")
+	}
+}
+
+func TestEmitExecutorRejectsAttemptForDifferentTask(t *testing.T) {
+	h := newEmitHarness(t, localconfig.FeedbackModeAutoIfAllowed, false)
+	other, err := h.exec.CreateTask(h.ctx, execution.TaskRequest{
+		Purpose:   domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: "unrelated-feedback-attempt"},
+		TaskClass: "test.unrelated", AcceptanceCriteria: []string{"done"},
+		RequiredEnforcement: domain.EnforcementEnforced, ResourceEnvelopeID: "env_feedback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAttempt, err := h.exec.StartAttempt(h.ctx, other.ID, "test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.emitter.Start(h.ctx, executors.AttemptEnvelope{TaskID: h.task.ID, AttemptID: otherAttempt.ID})
+	if err == nil || !strings.Contains(err.Error(), "does not belong to task") {
+		t.Fatalf("cross-task attempt error = %v, want explicit task binding rejection", err)
 	}
 }
 

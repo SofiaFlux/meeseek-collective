@@ -18,6 +18,7 @@ func (r fakeFeedbackReader) SanitizedFeedback(context.Context, domain.ID) (domai
 }
 
 type wrongEmitDescriptor struct{}
+
 func (wrongEmitDescriptor) DescriptorType() string { return "wrong" }
 
 func TestProviderCanonicalIntentAcceptsOnlyEmitIntentAndCarriesNoContent(t *testing.T) {
@@ -56,7 +57,7 @@ func TestProviderRequiresReaderAndRendersOnlyImmutableArtifact(t *testing.T) {
 		t.Fatal("provider constructed without feedback reader")
 	}
 	artifact := domain.SanitizedFeedback{
-		ID: "feedback-1",
+		ID:          "feedback-1",
 		ContentJSON: `{"category":"RECOVERY_FRICTION","observed_behavior":"generic safe behavior"}`,
 		Fingerprint: "f00baa",
 	}
@@ -109,5 +110,24 @@ func TestProviderLookupUsesMarkerWithoutCreate(t *testing.T) {
 	createCount, lookupCount := sink.counts()
 	if createCount != 0 || lookupCount != 1 {
 		t.Fatalf("sink counts create=%d lookup=%d", createCount, lookupCount)
+	}
+}
+
+func TestProviderLookupWithoutMarkerPreservesUnknownOutcome(t *testing.T) {
+	artifact := domain.SanitizedFeedback{ID: "feedback-1", ContentJSON: `{"category":"TEST"}`, Fingerprint: "fingerprint-1"}
+	provider, err := NewProvider("github", "owner/repo", fakeFeedbackReader{artifact: artifact}, newFakeSink())
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := provider.CanonicalIntent(EmitIntent{SanitizedFeedbackID: artifact.ID, Destination: "owner/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := provider.LookupOutcome(context.Background(), operations.ProviderDispatchRequest{CanonicalIntent: canonical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.State != domain.OperationOutcomeUnknown {
+		t.Fatalf("lookup outcome = %s, want OUTCOME_UNKNOWN", outcome.State)
 	}
 }
