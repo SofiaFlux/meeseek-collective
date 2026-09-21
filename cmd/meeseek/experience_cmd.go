@@ -17,6 +17,9 @@ func newExperienceCommand(api control.API,jsonOutput *bool)*cobra.Command{
 		newExperienceListCommand(api,jsonOutput),
 		newExperienceInspectCommand(api,jsonOutput),
 		newExperienceGrantCommand(api,jsonOutput),
+		newExperienceProposeCommand(api,jsonOutput),
+		newExperienceObserveOutcomeCommand(api,jsonOutput),
+		newExperienceEvaluateCommand(api,jsonOutput),
 	)
 	return root
 }
@@ -90,6 +93,77 @@ func newExperienceGrantActivateCommand(api control.API,jsonOutput *bool)*cobra.C
 			result,err:=api.ExperienceGrantActivate(cmd.Context(),domain.ID(args[0]));if err!=nil{return err}
 			if *jsonOutput{return json.NewEncoder(cmd.OutOrStdout()).Encode(result)}
 			_,err=fmt.Fprintf(cmd.OutOrStdout(),"AdaptationGrant %s ACTIVE for scope %s.\n",result.ID,result.ScopeKey)
+			return err
+		},
+	}
+}
+
+
+func newExperienceProposeCommand(api control.API,jsonOutput *bool)*cobra.Command{
+	var grantID,executor string
+	var evidence []string
+	command:=&cobra.Command{
+		Use:"propose",Short:"Propose an executor preference under an active AdaptationGrant",
+		RunE:func(cmd *cobra.Command,args []string)error{
+			grantID=strings.TrimSpace(grantID);executor=strings.TrimSpace(executor)
+			ids:=make([]domain.ID,0,len(evidence))
+			for _,raw:=range evidence{raw=strings.TrimSpace(raw);if raw!=""{ids=append(ids,domain.ID(raw))}}
+			if grantID==""||executor==""||len(ids)==0{return fmt.Errorf("grant, executor, and at least one evidence observation are required")}
+			result,err:=api.ExperienceProposalCreate(cmd.Context(),control.ExperienceProposalCreateRequest{
+				GrantID:domain.ID(grantID),PreferredExecutor:executor,EvidenceObservationIDs:ids,
+			});if err!=nil{return err}
+			if *jsonOutput{return json.NewEncoder(cmd.OutOrStdout()).Encode(result)}
+			_,err=fmt.Fprintf(cmd.OutOrStdout(),"Experience proposal %s created for canonical scope %s (%s).\n",result.ID,result.ScopeKey,result.GenericTaskClass)
+			return err
+		},
+	}
+	command.Flags().StringVar(&grantID,"grant","","active AdaptationGrant id")
+	command.Flags().StringVar(&executor,"executor","","preferred executor kind")
+	command.Flags().StringSliceVar(&evidence,"evidence-observation",nil,"supporting field observation id; repeat or comma-separate")
+	return command
+}
+
+func newExperienceObserveOutcomeCommand(api control.API,jsonOutput *bool)*cobra.Command{
+	var accepted,human bool
+	var retries int64
+	var cost,latency int64
+	var costSet,latencySet bool
+	command:=&cobra.Command{
+		Use:"observe-outcome <task-id>",Short:"Record a canonical verified Task outcome for local learning",Args:cobra.ExactArgs(1),
+		RunE:func(cmd *cobra.Command,args []string)error{
+			request:=control.ExperienceOutcomeCreateRequest{
+				TaskID:domain.ID(strings.TrimSpace(args[0])),Accepted:accepted,HumanIntervention:human,RetryCount:retries,
+			}
+			if costSet{v:=cost;request.CostUnits=&v}
+			if latencySet{v:=latency;request.LatencyMs=&v}
+			result,err:=api.ExperienceOutcomeCreate(cmd.Context(),request);if err!=nil{return err}
+			if *jsonOutput{return json.NewEncoder(cmd.OutOrStdout()).Encode(result)}
+			_,err=fmt.Fprintf(cmd.OutOrStdout(),"Verified outcome recorded for Task %s. Scope, class, and executor were derived from canonical state.\n",result.TaskID)
+			return err
+		},
+	}
+	command.Flags().BoolVar(&accepted,"accepted",false,"record canonical accepted success; omit for challenged negative outcome")
+	command.Flags().BoolVar(&human,"human-intervention",false,"human intervention was required")
+	command.Flags().Int64Var(&retries,"retry-count",0,"retry count")
+	command.Flags().Int64Var(&cost,"cost-units",0,"measured cost units")
+	command.Flags().Int64Var(&latency,"latency-ms",0,"measured latency in milliseconds")
+	command.Flags().Lookup("cost-units").NoOptDefVal = "0"
+	command.Flags().Lookup("latency-ms").NoOptDefVal = "0"
+	command.PreRunE=func(cmd *cobra.Command,args []string)error{
+		costSet=cmd.Flags().Changed("cost-units")
+		latencySet=cmd.Flags().Changed("latency-ms")
+		return nil
+	}
+	return command
+}
+
+func newExperienceEvaluateCommand(api control.API,jsonOutput *bool)*cobra.Command{
+	return &cobra.Command{
+		Use:"evaluate <proposal-id>",Short:"Evaluate a proposal against canonical verified outcomes",Args:cobra.ExactArgs(1),
+		RunE:func(cmd *cobra.Command,args []string)error{
+			result,err:=api.ExperienceEvaluate(cmd.Context(),domain.ID(strings.TrimSpace(args[0])));if err!=nil{return err}
+			if *jsonOutput{return json.NewEncoder(cmd.OutOrStdout()).Encode(result)}
+			_,err=fmt.Fprintf(cmd.OutOrStdout(),"Rule %s is %s for scope %s; verified samples=%d.\n",result.ID,result.State,result.ScopeKey,result.VerifiedSamples)
 			return err
 		},
 	}
