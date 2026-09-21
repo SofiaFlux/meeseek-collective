@@ -23,6 +23,7 @@ import (
 type experienceAcceptanceFixture struct {
 	ctx        context.Context
 	box        *meeseekruntime.Box
+	client     *control.Client
 	clock      *testutil.Clock
 	owner      *identity.LocalEd25519
 	envelopeID domain.ID
@@ -57,81 +58,66 @@ func newExperienceAcceptanceFixture(t *testing.T, withGrant bool) *experienceAcc
 	); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &experienceAcceptanceFixture{ctx: ctx, box: box, clock: clk, owner: owner, envelopeID: envelopeID}
+	server, err := control.NewServer(control.ServerConfig{
+		AuthToken:"experience-product-path",OwnerPrincipalID:owner.PrincipalID(),
+		OwnerPublicKey:owner.PublicKey(),ChallengeTTL:time.Minute,
+	},control.Dependencies{
+		Status:feedbackStatusProvider{box:box},Tasks:box.Execution,Approvals:box.Approvals,
+		Feedback:box.Feedback,Sanitizer:box.Sanitizer,FieldObserver:box.FieldObserver,Experience:box.Experience,
+		Attempts:box.Execution,Operations:box.Operations,Shutdown:box,
+	})
+	if err!=nil{t.Fatal(err)}
+	httpServer:=httptest.NewServer(server.Handler())
+	t.Cleanup(httpServer.Close)
+	client:=control.NewClient(httpServer.URL,"experience-product-path",httpServer.Client())
+	fixture := &experienceAcceptanceFixture{ctx: ctx, box: box, client: client, clock: clk, owner: owner, envelopeID: envelopeID}
 	if !withGrant {
 		return fixture
 	}
-	observation, err := box.FieldObserver.Record(ctx, fieldfeedback.ObservationInput{
-		Category: "EXECUTOR_SELECTION_FRICTION", BasisClass: "DETERMINISTIC_RUNTIME_PATTERN",
-		SourceKind: "ACCEPTANCE", SummaryLocal: "codex performed this local review class reliably",
-		Metrics: map[string]any{"sample_source": "acceptance"}, Enforcement: domain.EnforcementEnforced,
+	observation, err := client.FeedbackObserve(ctx, control.FeedbackObserveRequest{
+		Category:"EXECUTOR_SELECTION_FRICTION",
+		SummaryLocal:"codex performed this local review class reliably",
+		Enforcement:domain.EnforcementEnforced,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, err := box.Experience.RequestGrant(ctx, experience.GrantInput{
-		Kind: experience.AdaptationExecutorPreference, ScopeKey: "repo.review",
-		AllowedExecutors: []string{"claude", "codex"}, MinVerifiedSamples: 3,
-		MaxAcceptanceRegressionBps: 0, MaxCostRegressionBps: 0,
-		ExpiresAt: clk.Now().Add(7 * 24 * time.Hour),
-	}, "cube-experience")
-	if err != nil {
-		t.Fatal(err)
-	}
-	signedApproveExperience(t, fixture, request.ApprovalID)
-	grant, err := box.Experience.ActivateGrant(ctx, request.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	proposal, err := box.Experience.Propose(ctx, experience.ProposalInput{
-		GrantID: grant.ID, GenericTaskClass: domain.GenericTaskReview, ScopeKey: "repo.review",
-		PreferredExecutor: "codex", EvidenceObservationIDs: []domain.ID{observation.ID},
+	if err!=nil{t.Fatal(err)}
+	request, err := client.ExperienceGrantRequest(ctx, control.ExperienceGrantCreateRequest{
+		ScopeKey:"repo.review",AllowedExecutors:[]string{"claude","codex"},MinVerifiedSamples:3,
+		MaxAcceptanceRegressionBps:0,MaxCostRegressionBps:0,ExpiresAt:clk.Now().Add(7*24*time.Hour),
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err!=nil{t.Fatal(err)}
+	signedApproveExperience(t,fixture,request.ApprovalID)
+	grantDTO,err:=client.ExperienceGrantActivate(ctx,request.RequestID)
+	if err!=nil{t.Fatal(err)}
+	grant,err:=box.Experience.Grant(ctx,grantDTO.ID)
+	if err!=nil{t.Fatal(err)}
+	proposalDTO,err:=client.ExperienceProposalCreate(ctx,control.ExperienceProposalCreateRequest{
+		GrantID:grant.ID,PreferredExecutor:"codex",EvidenceObservationIDs:[]domain.ID{observation.ID},
+	})
+	if err!=nil{t.Fatal(err)}
+	fixture.grant=grant
+	fixture.proposal=domain.ExperienceProposal{
+		ID:proposalDTO.ID,GrantID:proposalDTO.GrantID,GenericTaskClass:proposalDTO.GenericTaskClass,
+		ScopeKey:proposalDTO.ScopeKey,PreferredExecutor:proposalDTO.PreferredExecutor,
+		EvidenceObservationIDs:append([]domain.ID(nil),proposalDTO.EvidenceObservationIDs...),State:proposalDTO.State,
 	}
-	fixture.grant = grant
-	fixture.proposal = proposal
 	return fixture
 }
 
 func signedApproveExperience(t *testing.T, f *experienceAcceptanceFixture, approvalID domain.ID) {
 	t.Helper()
-	server, err := control.NewServer(control.ServerConfig{
-		AuthToken: "experience-control-token", OwnerPrincipalID: f.owner.PrincipalID(),
-		OwnerPublicKey: f.owner.PublicKey(), ChallengeTTL: time.Minute,
-	}, control.Dependencies{
-		Status: feedbackStatusProvider{box: f.box}, Tasks: f.box.Execution, Approvals: f.box.Approvals,
-		Feedback: f.box.Feedback, FieldObserver: f.box.FieldObserver, Experience: f.box.Experience,
-		Attempts: f.box.Execution, Operations: f.box.Operations, Shutdown: f.box,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	httpServer := httptestNewServer(t, server)
-	client := control.NewClient(httpServer.URL, "experience-control-token", httpServer.Client())
-	if _, err := client.Approve(f.ctx, approvalID, f.owner); err != nil {
-		t.Fatal(err)
-	}
-}
-func httptestNewServer(t *testing.T, server *control.Server) *httptest.Server {
-	t.Helper()
-	httpServer := httptest.NewServer(server.Handler())
-	t.Cleanup(httpServer.Close)
-	return httpServer
+	if _,err:=f.client.Approve(f.ctx,approvalID,f.owner);err!=nil{t.Fatal(err)}
 }
 
 func (f *experienceAcceptanceFixture) verifiedSuccess(t *testing.T, name, executor string) domain.Task {
 	t.Helper()
-	task, err := f.box.Execution.CreateTask(f.ctx, execution.TaskRequest{
-		Purpose: domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("experience-" + name)},
-		TaskClass: "repo.review", AcceptanceCriteria: []string{"review accepted"},
-		RequiredCapabilities: []string{"repo.read"}, RequiredEnforcement: domain.EnforcementEnforced,
-		AuthorityCeiling: []string{"repo.read"}, ResourceEnvelopeID: f.envelopeID,
+	taskDTO,err:=f.client.CreateTask(f.ctx,control.CreateTaskRequest{
+		Purpose:domain.PurposeRef{Kind:domain.PurposeOwnerDirective,ID:domain.ID("experience-"+name)},
+		TaskClass:"repo.review",AcceptanceCriteria:[]string{"review accepted"},
+		RequiredCapabilities:[]string{"repo.read"},RequiredEnforcement:domain.EnforcementEnforced,
+		AuthorityCeiling:[]string{"repo.read"},ResourceEnvelopeID:f.envelopeID,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	if err!=nil{t.Fatal(err)}
+	task:=domain.Task{ID:taskDTO.ID,TaskClass:taskDTO.TaskClass}
 	attempt, err := f.box.Execution.StartAttempt(f.ctx, task.ID, executor, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -146,12 +132,9 @@ func (f *experienceAcceptanceFixture) verifiedSuccess(t *testing.T, name, execut
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.box.Experience.ObserveVerifiedOutcome(f.ctx, experience.VerifiedOutcome{
-		TaskID: task.ID, GenericTaskClass: domain.GenericTaskReview, ScopeKey: "repo.review",
-		ExecutorKind: executor, Accepted: true, RetryCount: 0, CostUnits: nil, LatencyMs: nil,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	if _,err:=f.client.ExperienceOutcomeCreate(f.ctx,control.ExperienceOutcomeCreateRequest{
+		TaskID:task.ID,Accepted:true,RetryCount:0,
+	});err!=nil{t.Fatal(err)}
 	return task
 }
 
@@ -160,7 +143,7 @@ func TestLocalExperienceEarnsAndLosesAutonomyFromVerifiedResults(t *testing.T) {
 	first := f.verifiedSuccess(t, "one", "codex")
 	_ = first
 	f.verifiedSuccess(t, "two", "codex")
-	rule, err := f.box.Experience.Evaluate(f.ctx, f.proposal.ID)
+	rule, err := f.client.ExperienceEvaluate(f.ctx, f.proposal.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +152,7 @@ func TestLocalExperienceEarnsAndLosesAutonomyFromVerifiedResults(t *testing.T) {
 	}
 
 	third := f.verifiedSuccess(t, "three", "codex")
-	rule, err = f.box.Experience.Evaluate(f.ctx, f.proposal.ID)
+	rule, err = f.client.ExperienceEvaluate(f.ctx, f.proposal.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,13 +168,10 @@ func TestLocalExperienceEarnsAndLosesAutonomyFromVerifiedResults(t *testing.T) {
 	if err := f.box.Execution.ChallengeTask(f.ctx, third.ID, domain.ChallengeTask, "verified regression after field use", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.box.Experience.ObserveVerifiedOutcome(f.ctx, experience.VerifiedOutcome{
-		TaskID: third.ID, GenericTaskClass: domain.GenericTaskReview, ScopeKey: "repo.review",
-		ExecutorKind: "codex", Accepted: false,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	rule, err = f.box.Experience.Evaluate(f.ctx, f.proposal.ID)
+	if _,err:=f.client.ExperienceOutcomeCreate(f.ctx,control.ExperienceOutcomeCreateRequest{
+		TaskID:third.ID,Accepted:false,
+	});err!=nil{t.Fatal(err)}
+	rule, err = f.client.ExperienceEvaluate(f.ctx, f.proposal.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +310,7 @@ func activeExperienceFixture(t *testing.T) *experienceAcceptanceFixture {
 	f.verifiedSuccess(t, "active-1", "codex")
 	f.verifiedSuccess(t, "active-2", "codex")
 	f.verifiedSuccess(t, "active-3", "codex")
-	rule, err := f.box.Experience.Evaluate(f.ctx, f.proposal.ID)
+	rule, err := f.client.ExperienceEvaluate(f.ctx, f.proposal.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
