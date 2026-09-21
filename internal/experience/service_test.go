@@ -125,6 +125,7 @@ func TestObserveVerifiedOutcomeRequiresEvidenceForExactCurrentAttempt(t *testing
 		t.Fatal("acceptance from a different Attempt counted as verified outcome")
 	}
 
+	if _,err:=svc.store.DB().ExecContext(ctx,"UPDATE tasks SET state = 'CHALLENGED' WHERE task_id = 'task-attempt'");err!=nil{t.Fatal(err)}
 	if _,err:=svc.store.DB().ExecContext(ctx,`
 		INSERT INTO execution_events(event_id, task_id, attempt_id, event_type, details_json, created_at)
 		VALUES ('event-old-challenge','task-attempt','attempt-old','TASK_CHALLENGED','{}',?)`,now);err!=nil{t.Fatal(err)}
