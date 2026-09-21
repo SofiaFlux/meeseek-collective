@@ -125,7 +125,7 @@ func TestSameSafeContentHasStableFingerprintButDistinctArtifacts(t *testing.T) {
 	}
 }
 
-func TestResanitizeChangedCandidateCreatesNewArtifactWithoutMutatingOld(t *testing.T) {
+func TestResanitizeChangedLocalTextDoesNotChangeStructuredExport(t *testing.T) {
 	feedback, candidate := sanitizerCandidate(t, "Generic safe behavior version one")
 	sanitizer, err := NewDeterministicSanitizer(feedback.store, feedback.clock, feedback, DeterministicSanitizerConfig{
 		Version: "test-v1",
@@ -147,8 +147,11 @@ func TestResanitizeChangedCandidateCreatesNewArtifactWithoutMutatingOld(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.ID == first.ID || second.ContentHash == first.ContentHash {
-		t.Fatalf("changed candidate did not create new immutable artifact: first=%+v second=%+v", first, second)
+	if second.ID == first.ID {
+		t.Fatal("resanitization reused immutable artifact identity")
+	}
+	if second.ContentHash != first.ContentHash || second.Fingerprint != first.Fingerprint {
+		t.Fatalf("local-only text changed structured export: first=%+v second=%+v", first, second)
 	}
 	storedFirst, err := feedback.SanitizedFeedback(context.Background(), first.ID)
 	if err != nil {
