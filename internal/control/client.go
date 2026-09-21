@@ -30,6 +30,9 @@ type API interface {
 	FeedbackScan(context.Context) ([]FeedbackObservationDTO, error)
 	ExperienceGrantRequest(context.Context, ExperienceGrantCreateRequest) (ExperienceGrantRequestDTO, error)
 	ExperienceGrantActivate(context.Context, domain.ID) (AdaptationGrantDTO, error)
+	ExperienceProposalCreate(context.Context, ExperienceProposalCreateRequest) (ExperienceProposalDTO, error)
+	ExperienceOutcomeCreate(context.Context, ExperienceOutcomeCreateRequest) (ExperienceOutcomeDTO, error)
+	ExperienceEvaluate(context.Context, domain.ID) (ExperienceRuleDTO, error)
 	ExperienceRules(context.Context) ([]ExperienceRuleDTO, error)
 	ExperienceRule(context.Context, domain.ID) (ExperienceRuleDTO, error)
 	Approve(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
@@ -143,6 +146,24 @@ func (c *Client) ExperienceGrantRequest(ctx context.Context, request ExperienceG
 func (c *Client) ExperienceGrantActivate(ctx context.Context, id domain.ID) (AdaptationGrantDTO, error) {
 	var result AdaptationGrantDTO
 	err := c.doJSON(ctx, http.MethodPost, "/experience/grants/"+string(id)+"/activate", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) ExperienceProposalCreate(ctx context.Context, request ExperienceProposalCreateRequest) (ExperienceProposalDTO, error) {
+	var result ExperienceProposalDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/proposals", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) ExperienceOutcomeCreate(ctx context.Context, request ExperienceOutcomeCreateRequest) (ExperienceOutcomeDTO, error) {
+	var result ExperienceOutcomeDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/outcomes", request, &result, http.StatusAccepted)
+	return result, err
+}
+
+func (c *Client) ExperienceEvaluate(ctx context.Context, id domain.ID) (ExperienceRuleDTO, error) {
+	var result ExperienceRuleDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/proposals/"+string(id)+"/evaluate", nil, &result, http.StatusOK)
 	return result, err
 }
 
