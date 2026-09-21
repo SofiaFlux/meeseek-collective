@@ -22,6 +22,8 @@ type API interface {
 	Approvals(context.Context) ([]ApprovalDTO, error)
 	Approval(context.Context, domain.ID) (ApprovalDTO, error)
 	Feedback(context.Context) ([]FeedbackCandidateDTO, error)
+	FeedbackCandidateCreate(context.Context, FeedbackCandidateCreateRequest) (FeedbackCandidateDTO, error)
+	FeedbackSanitize(context.Context, domain.ID) (FeedbackSanitizeDTO, error)
 	FeedbackInspect(context.Context, domain.ID) (FeedbackInspectDTO, error)
 	FeedbackEmit(context.Context, domain.ID) (FeedbackEmitDTO, error)
 	FeedbackObserve(context.Context, FeedbackObserveRequest) (FeedbackObservationDTO, error)
@@ -92,6 +94,18 @@ func (c *Client) Approval(ctx context.Context, id domain.ID) (ApprovalDTO, error
 func (c *Client) Feedback(ctx context.Context) ([]FeedbackCandidateDTO, error) {
 	var result []FeedbackCandidateDTO
 	err := c.doJSON(ctx, http.MethodGet, "/feedback", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) FeedbackCandidateCreate(ctx context.Context, request FeedbackCandidateCreateRequest) (FeedbackCandidateDTO, error) {
+	var result FeedbackCandidateDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/candidates", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) FeedbackSanitize(ctx context.Context, id domain.ID) (FeedbackSanitizeDTO, error) {
+	var result FeedbackSanitizeDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/"+string(id)+"/sanitize", nil, &result, http.StatusOK)
 	return result, err
 }
 
