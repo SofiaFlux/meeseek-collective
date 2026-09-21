@@ -42,7 +42,6 @@ func assertPragma(t *testing.T, db *sql.DB, name, want string) {
 	}
 }
 
-
 func TestFieldFeedbackMigrationCreatesDurableSchema(t *testing.T) {
 	store := testutil.OpenStore(t)
 	ctx := context.Background()
@@ -97,7 +96,6 @@ func TestFieldFeedbackMigrationCreatesDurableSchema(t *testing.T) {
 	}
 }
 
-
 func TestAttemptRunManifestMigrationCreatesImmutableSchema(t *testing.T) {
 	store := testutil.OpenStore(t)
 	ctx := context.Background()
@@ -107,7 +105,7 @@ func TestAttemptRunManifestMigrationCreatesImmutableSchema(t *testing.T) {
 	).Scan(&table); err != nil {
 		t.Fatal(err)
 	}
-	for _, trigger := range []string{"attempt_run_manifests_no_update","attempt_run_manifests_no_delete"} {
+	for _, trigger := range []string{"attempt_run_manifests_no_insert_replace", "attempt_run_manifests_no_update", "attempt_run_manifests_no_delete"} {
 		var name string
 		if err := store.DB().QueryRowContext(ctx,
 			"SELECT name FROM sqlite_master WHERE type='trigger' AND name=?", trigger,
@@ -117,40 +115,72 @@ func TestAttemptRunManifestMigrationCreatesImmutableSchema(t *testing.T) {
 	}
 }
 
+func TestAttemptRunManifestRejectsInsertOrReplace(t *testing.T) {
+	store := testutil.OpenStore(t)
+	ctx := context.Background()
+	db := store.DB()
+
+	for _, statement := range []string{
+		`INSERT INTO resource_envelopes(envelope_id,hard_limit,created_at) VALUES ('manifest-envelope',1,'2026-09-21T00:00:00Z')`,
+		`INSERT INTO tasks(task_id,purpose_kind,purpose_id,task_class,state,current_fence,acceptance_criteria_json,required_capabilities_json,required_enforcement,authority_ceiling_json,resource_envelope_id,created_at,updated_at) VALUES ('manifest-task','OWNER_DIRECTIVE','owner','test','EXECUTING',1,'[]','[]','ENFORCED','[]','manifest-envelope','2026-09-21T00:00:00Z','2026-09-21T00:00:00Z')`,
+		`INSERT INTO attempts(attempt_id,task_id,state,fence_generation,lease_state,lease_expires_at,started_at,executor_kind) VALUES ('manifest-attempt','manifest-task','RUNNING',1,'ACTIVE','2026-09-22T00:00:00Z','2026-09-21T00:00:00Z','test')`,
+		`INSERT INTO attempt_run_manifests(attempt_id,task_id,manifest_hash,manifest_json,created_at) VALUES ('manifest-attempt','manifest-task','original','{}','2026-09-21T00:00:00Z')`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO attempt_run_manifests(attempt_id,task_id,manifest_hash,manifest_json,created_at) VALUES ('manifest-attempt','manifest-task','replaced','{"changed":true}','2026-09-21T00:01:00Z')`); err == nil {
+		t.Fatal("INSERT OR REPLACE replaced immutable attempt run manifest")
+	}
+}
 
 func TestGovernanceBindingTriggersAllowLifecycleButRejectHistoryRewrite(t *testing.T) {
-	store:=testutil.OpenStore(t)
-	ctx:=context.Background()
-	if _,err:=store.DB().ExecContext(ctx,`
+	store := testutil.OpenStore(t)
+	ctx := context.Background()
+	if _, err := store.DB().ExecContext(ctx, `
 		INSERT INTO approval_requests(
 			approval_id,subject_kind,subject_id,request_digest,policy_decision_id,
 			required_approvers_json,requested_by,state,expires_at,created_at
-		) VALUES ('approval-hardening','TEST','subject-1','digest-1','policy-1','["owner"]','requester','PENDING','2026-09-22T00:00:00Z','2026-09-21T00:00:00Z')`
-	);err!=nil{t.Fatal(err)}
-	if _,err:=store.DB().ExecContext(ctx,
+		) VALUES ('approval-hardening','TEST','subject-1','digest-1','policy-1','["owner"]','requester','PENDING','2026-09-22T00:00:00Z','2026-09-21T00:00:00Z')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
 		"UPDATE approval_requests SET state='APPROVED', decided_at='2026-09-21T01:00:00Z', approver_id='owner', decision_action='APPROVE' WHERE approval_id='approval-hardening'",
-	);err!=nil{t.Fatalf("valid lifecycle transition blocked: %v",err)}
-	if _,err:=store.DB().ExecContext(ctx,
+	); err != nil {
+		t.Fatalf("valid lifecycle transition blocked: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
 		"UPDATE approval_requests SET request_digest='rewritten' WHERE approval_id='approval-hardening'",
-	);err==nil{t.Fatal("approval request digest rewrite succeeded")}
-	if _,err:=store.DB().ExecContext(ctx,`
+	); err == nil {
+		t.Fatal("approval request digest rewrite succeeded")
+	}
+	if _, err := store.DB().ExecContext(ctx, `
 		INSERT INTO approval_decisions(approval_id,approver_id,request_digest,decision_action,decided_at)
-		VALUES ('approval-hardening','owner','digest-1','APPROVE','2026-09-21T01:00:00Z')`
-	);err!=nil{t.Fatal(err)}
-	if _,err:=store.DB().ExecContext(ctx,
+		VALUES ('approval-hardening','owner','digest-1','APPROVE','2026-09-21T01:00:00Z')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
 		"UPDATE approval_decisions SET decision_action='REJECT' WHERE approval_id='approval-hardening' AND approver_id='owner'",
-	);err==nil{t.Fatal("approval decision rewrite succeeded")}
+	); err == nil {
+		t.Fatal("approval decision rewrite succeeded")
+	}
 }
 
-
 func TestGovernanceStateSurvivesCloseAndReopen(t *testing.T) {
-	ctx:=context.Background()
-	path:=filepath.Join(t.TempDir(),"restart.db")
-	store,err:=state.Open(ctx,path);if err!=nil{t.Fatal(err)}
-	db:=store.DB()
-	now:="2026-09-21T18:00:00Z"
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "restart.db")
+	store, err := state.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := store.DB()
+	now := "2026-09-21T18:00:00Z"
 
-	statements:=[]string{
+	statements := []string{
 		`INSERT INTO policy_sets(policy_set_id,version,module_name,module,policy_hash,capabilities_hash,active,created_at)
 		  VALUES ('policy-1',1,'test.rego','package test','ph','ch',1,'2026-09-21T18:00:00Z')`,
 		`INSERT INTO resource_envelopes(envelope_id,hard_limit,created_at)
@@ -204,21 +234,36 @@ func TestGovernanceStateSurvivesCloseAndReopen(t *testing.T) {
 		  '2026-09-21T18:00:00Z','2026-09-21T18:01:00Z','approval-1')`,
 	}
 	_ = now
-	for i,stmt:=range statements{
-		if _,err:=db.ExecContext(ctx,stmt);err!=nil{t.Fatalf("seed statement %d: %v",i,err)}
+	for i, stmt := range statements {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("seed statement %d: %v", i, err)
+		}
 	}
-	if err:=db.Close();err!=nil{t.Fatal(err)}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	reopened,err:=state.Open(ctx,path);if err!=nil{t.Fatal(err)}
+	reopened, err := state.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer reopened.DB().Close()
-	var manifestHash,approvalState,ruleState,operationState string
+	var manifestHash, approvalState, ruleState, operationState string
 	var reconciliation int
-	if err:=reopened.DB().QueryRowContext(ctx,"SELECT manifest_hash FROM attempt_run_manifests WHERE attempt_id='attempt-1'").Scan(&manifestHash);err!=nil{t.Fatal(err)}
-	if err:=reopened.DB().QueryRowContext(ctx,"SELECT state FROM approval_requests WHERE approval_id='approval-1'").Scan(&approvalState);err!=nil{t.Fatal(err)}
-	if err:=reopened.DB().QueryRowContext(ctx,"SELECT state FROM experience_rules WHERE rule_id='rule-1'").Scan(&ruleState);err!=nil{t.Fatal(err)}
-	if err:=reopened.DB().QueryRowContext(ctx,"SELECT state,reconciliation_required FROM external_operations WHERE operation_id='operation-1'").Scan(&operationState,&reconciliation);err!=nil{t.Fatal(err)}
-	if manifestHash!="manifest-hash"||approvalState!="PENDING"||ruleState!="ACTIVE"||operationState!="OUTCOME_UNKNOWN"||reconciliation!=1{
+	if err := reopened.DB().QueryRowContext(ctx, "SELECT manifest_hash FROM attempt_run_manifests WHERE attempt_id='attempt-1'").Scan(&manifestHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.DB().QueryRowContext(ctx, "SELECT state FROM approval_requests WHERE approval_id='approval-1'").Scan(&approvalState); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.DB().QueryRowContext(ctx, "SELECT state FROM experience_rules WHERE rule_id='rule-1'").Scan(&ruleState); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.DB().QueryRowContext(ctx, "SELECT state,reconciliation_required FROM external_operations WHERE operation_id='operation-1'").Scan(&operationState, &reconciliation); err != nil {
+		t.Fatal(err)
+	}
+	if manifestHash != "manifest-hash" || approvalState != "PENDING" || ruleState != "ACTIVE" || operationState != "OUTCOME_UNKNOWN" || reconciliation != 1 {
 		t.Fatalf("reopened state manifest=%q approval=%q rule=%q operation=%q reconcile=%d",
-			manifestHash,approvalState,ruleState,operationState,reconciliation)
+			manifestHash, approvalState, ruleState, operationState, reconciliation)
 	}
 }

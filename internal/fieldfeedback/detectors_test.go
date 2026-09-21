@@ -29,6 +29,20 @@ func TestCanonicalEventDetectorsAndCostOutlier(t *testing.T) {
 	}
 
 	for i := 0; i < 6; i++ {
+		outcomeTaskID := taskID
+		if i > 0 {
+			outcomeTaskID = domain.NewID("outlier-task")
+			if _, err := observer.store.DB().ExecContext(ctx, `
+				INSERT INTO tasks(task_id, purpose_kind, purpose_id, task_class, state, current_fence,
+					acceptance_criteria_json, required_capabilities_json, required_enforcement,
+					authority_ceiling_json, resource_envelope_id, created_at, updated_at)
+				SELECT ?, purpose_kind, purpose_id, task_class, state, current_fence,
+					acceptance_criteria_json, required_capabilities_json, required_enforcement,
+					authority_ceiling_json, resource_envelope_id, created_at, updated_at
+				FROM tasks WHERE task_id = ?`, outcomeTaskID, taskID); err != nil {
+				t.Fatal(err)
+			}
+		}
 		cost := int64(10)
 		latency := int64(100)
 		if i == 5 {
@@ -40,7 +54,7 @@ func TestCanonicalEventDetectorsAndCostOutlier(t *testing.T) {
 				outcome_id, task_id, generic_task_class, scope_key, executor_kind,
 				accepted, human_intervention, retry_count, cost_units, latency_ms, recorded_at
 			) VALUES (?, ?, 'DEBUGGING', 'repo', 'test-executor', 1, 0, 0, ?, ?, ?)`,
-			domain.NewID("outcome"), taskID, cost, latency,
+			domain.NewID("outcome"), outcomeTaskID, cost, latency,
 			now.Add(time.Duration(10+i)*time.Second).Format(time.RFC3339Nano),
 		); err != nil {
 			t.Fatal(err)

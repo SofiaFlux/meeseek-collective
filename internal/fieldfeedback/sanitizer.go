@@ -35,57 +35,20 @@ type DeterministicSanitizerConfig struct {
 	AllowSyntheticReproduction bool
 }
 
-var safeExportMetadataToken = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}package fieldfeedback
-
-import (
-	"context"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"regexp"
-	"sort"
-	"strings"
-	"time"
-
-	"github.com/SofiaFlux/meeseek-collective/internal/clock"
-	"github.com/SofiaFlux/meeseek-collective/internal/domain"
-	state "github.com/SofiaFlux/meeseek-collective/internal/state/sqlite"
-)
-
-const sanitizedFeedbackSchemaVersion = 1
-
-type Sanitizer interface {
-	Sanitize(context.Context, domain.ID) (domain.SanitizedFeedback, domain.SanitizationResult, error)
-}
-
-type Abstracter interface {
-	Abstract(context.Context, domain.FeedbackCandidate) (domain.FeedbackCandidate, error)
-}
-
-type DeterministicSanitizerConfig struct {
-	Version                    string
-	DenyPatterns               []*regexp.Regexp
-	AllowExecutorMetadata      bool
-	AllowSyntheticReproduction bool
-}
-
-)
+var safeExportMetadataToken = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 
 var safeExportCategories = map[string]struct{}{
-	"APPROVAL_FRICTION": {},
-	"ATTEMPT_RECOVERY": {},
-	"COST_LATENCY_OUTLIER": {},
-	"EXECUTOR_SELECTION_FRICTION": {},
-	"HUMAN_INTERVENTION": {},
-	"INDEPENDENT_PROBLEM": {},
-	"POLICY_AUTHORITY_FRICTION": {},
-	"RECOVERY_FRICTION": {},
-	"REPEATED_ATTEMPT_FAILURE": {},
-	"TEST": {},
-	"UNRESOLVED_OPERATION": {},
+	"APPROVAL_FRICTION":                       {},
+	"ATTEMPT_RECOVERY":                        {},
+	"COST_LATENCY_OUTLIER":                    {},
+	"EXECUTOR_SELECTION_FRICTION":             {},
+	"HUMAN_INTERVENTION":                      {},
+	"INDEPENDENT_PROBLEM":                     {},
+	"POLICY_AUTHORITY_FRICTION":               {},
+	"RECOVERY_FRICTION":                       {},
+	"REPEATED_ATTEMPT_FAILURE":                {},
+	"TEST":                                    {},
+	"UNRESOLVED_OPERATION":                    {},
 	"VERIFICATION_CHALLENGE_AFTER_ACCEPTANCE": {},
 }
 
@@ -105,16 +68,16 @@ type DeterministicSanitizer struct {
 }
 
 type exportProjection struct {
-	SchemaVersion      int                     `json:"schema_version"`
-	GenericTaskClass   domain.GenericTaskClass `json:"generic_task_class"`
-	Category           string                  `json:"category"`
-	StateTransitions   []string                `json:"state_transitions"`
-	Metrics            NormalizedMetrics       `json:"metrics"`
-	HumanIntervention  bool                    `json:"human_intervention"`
-	Enforcement        domain.EnforcementLevel `json:"enforcement"`
-	RuntimeVersion     string                  `json:"runtime_version,omitempty"`
-	ExecutorKind       string                  `json:"executor_kind,omitempty"`
-	ExecutorVersion    string                  `json:"executor_version,omitempty"`
+	SchemaVersion     int                     `json:"schema_version"`
+	GenericTaskClass  domain.GenericTaskClass `json:"generic_task_class"`
+	Category          string                  `json:"category"`
+	StateTransitions  []string                `json:"state_transitions"`
+	Metrics           NormalizedMetrics       `json:"metrics"`
+	HumanIntervention bool                    `json:"human_intervention"`
+	Enforcement       domain.EnforcementLevel `json:"enforcement"`
+	RuntimeVersion    string                  `json:"runtime_version,omitempty"`
+	ExecutorKind      string                  `json:"executor_kind,omitempty"`
+	ExecutorVersion   string                  `json:"executor_version,omitempty"`
 }
 
 func NewDeterministicSanitizer(
@@ -261,15 +224,15 @@ func (s *DeterministicSanitizer) project(candidate domain.FeedbackCandidate) (ex
 		return exportProjection{}, fmt.Errorf("candidate category %q is not in the outbound allowlist", candidate.Category)
 	}
 	projection := exportProjection{
-		SchemaVersion: sanitizedFeedbackSchemaVersion,
+		SchemaVersion:    sanitizedFeedbackSchemaVersion,
 		GenericTaskClass: candidate.GenericTaskClass, Category: candidate.Category,
 		StateTransitions: transitions, Metrics: metrics, HumanIntervention: candidate.HumanIntervention,
 		Enforcement: candidate.Enforcement,
 	}
 	if s.config.AllowExecutorMetadata {
 		for label, value := range map[string]string{
-			"runtime version": candidate.RuntimeVersion,
-			"executor kind": candidate.ExecutorKind,
+			"runtime version":  candidate.RuntimeVersion,
+			"executor kind":    candidate.ExecutorKind,
 			"executor version": candidate.ExecutorVersion,
 		} {
 			if value != "" && !safeExportMetadataToken.MatchString(value) {
@@ -425,7 +388,7 @@ func computeRulesetHash(cfg DeterministicSanitizerConfig, builtin []scanRule) (s
 		AllowSyntheticReproduction bool     `json:"allow_synthetic_reproduction"`
 	}{
 		Version: cfg.Version, Builtin: builtinValues, Deny: deny,
-		AllowExecutorMetadata: cfg.AllowExecutorMetadata,
+		AllowExecutorMetadata:      cfg.AllowExecutorMetadata,
 		AllowSyntheticReproduction: cfg.AllowSyntheticReproduction,
 	}
 	encoded, err := json.Marshal(material)
@@ -494,7 +457,6 @@ func (s *Feedback) SanitizedFeedback(ctx context.Context, id domain.ID) (domain.
 	}
 	return out, nil
 }
-
 
 func (s *Feedback) LatestSanitizedFeedbackForCandidate(
 	ctx context.Context,

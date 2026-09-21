@@ -18,11 +18,18 @@ type detectorCandidate struct {
 	input ObservationInput
 }
 
+type detectorEnforcementContextKey struct{}
+
 func (s *Observer) Detect(ctx context.Context, input DetectorInput) ([]domain.FieldObservation, error) {
 	if err := s.configured(); err != nil {
 		return nil, err
 	}
 	input.TaskID = domain.ID(strings.TrimSpace(string(input.TaskID)))
+	enforcement, err := s.loadDetectorEnforcement(ctx, input.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	ctx = context.WithValue(ctx, detectorEnforcementContextKey{}, enforcement)
 	detectors := []func(context.Context, domain.ID) ([]detectorCandidate, error){
 		s.detectRepeatedFailures,
 		s.detectAttemptRecovery,
@@ -114,7 +121,7 @@ func (s *Observer) detectRepeatedFailures(ctx context.Context, taskFilter domain
 				TaskID: g.taskID, AttemptID: g.attemptID, Category: "REPEATED_ATTEMPT_FAILURE",
 				BasisClass: "DETERMINISTIC_RUNTIME_PATTERN", SourceKind: "ATTEMPT_FAILURES",
 				SummaryLocal: fmt.Sprintf("Attempt failure signature repeated %d times: %s", g.count, g.signature),
-				Metrics: map[string]any{"failure_count": g.count}, Enforcement: enforcement,
+				Metrics:      map[string]any{"failure_count": g.count}, Enforcement: enforcement,
 				EvidenceIDs: cleanIDs(g.evidenceID),
 			},
 		})
@@ -154,7 +161,7 @@ func (s *Observer) detectAttemptRecovery(ctx context.Context, taskFilter domain.
 				TaskID: taskID, AttemptID: newAttempt, Category: "ATTEMPT_RECOVERY",
 				BasisClass: "DETERMINISTIC_RUNTIME_PATTERN", SourceKind: "ATTEMPT_LEASES",
 				SummaryLocal: fmt.Sprintf("Attempt %s was recovered by replacement %s", oldAttempt, newAttempt),
-				Metrics: map[string]any{"recovered_attempt_id": oldAttempt}, Enforcement: enforcement,
+				Metrics:      map[string]any{"recovered_attempt_id": oldAttempt}, Enforcement: enforcement,
 			},
 		})
 	}
@@ -191,7 +198,7 @@ func (s *Observer) detectPolicyAuthorityFriction(ctx context.Context, taskFilter
 				TaskID: taskID, Category: "POLICY_AUTHORITY_FRICTION",
 				BasisClass: "DETERMINISTIC_RUNTIME_PATTERN", SourceKind: "EXECUTION_EVENTS",
 				SummaryLocal: fmt.Sprintf("Consequential operations were cancelled before dispatch %d times", count),
-				Metrics: map[string]any{"denial_count": count}, Enforcement: enforcement,
+				Metrics:      map[string]any{"denial_count": count}, Enforcement: enforcement,
 			},
 		})
 	}
@@ -227,7 +234,7 @@ func (s *Observer) detectUnresolvedOperations(ctx context.Context, taskFilter do
 				OperationID: operationID, Category: "UNRESOLVED_OPERATION",
 				BasisClass: "DETERMINISTIC_RUNTIME_PATTERN", SourceKind: "EXTERNAL_OPERATIONS",
 				SummaryLocal: "External operation requires outcome reconciliation",
-				Metrics: map[string]any{}, Enforcement: enforcement,
+				Metrics:      map[string]any{}, Enforcement: enforcement,
 			},
 		})
 	}
@@ -263,7 +270,7 @@ func (s *Observer) detectHumanIntervention(ctx context.Context, taskFilter domai
 				TaskID: taskID, AttemptID: attemptID, Category: "HUMAN_INTERVENTION",
 				BasisClass: "EXPLICIT_OPERATOR_EVENT", SourceKind: "EXECUTION_EVENTS",
 				SummaryLocal: "Human intervention was required during Collective work",
-				Metrics: map[string]any{}, Enforcement: enforcement,
+				Metrics:      map[string]any{}, Enforcement: enforcement,
 			},
 		})
 	}
@@ -311,7 +318,7 @@ func (s *Observer) detectVerificationChallengeAfterAcceptance(ctx context.Contex
 				TaskID: taskID, AttemptID: attemptID, Category: "VERIFICATION_CHALLENGE_AFTER_ACCEPTANCE",
 				BasisClass: "CANONICAL_VERIFICATION_CONTRADICTION", SourceKind: "VERIFICATION_STATE",
 				SummaryLocal: "Task was challenged after an earlier evidence-backed acceptance",
-				Metrics: map[string]any{}, Enforcement: enforcement, EvidenceIDs: cleanIDs(evidence),
+				Metrics:      map[string]any{}, Enforcement: enforcement, EvidenceIDs: cleanIDs(evidence),
 			},
 		})
 	}
@@ -319,14 +326,14 @@ func (s *Observer) detectVerificationChallengeAfterAcceptance(ctx context.Contex
 }
 
 type outcomeSample struct {
-	id          domain.ID
-	taskID      domain.ID
-	taskClass   string
-	scopeKey    string
-	executor    string
-	cost        sql.NullInt64
-	latency     sql.NullInt64
-	recordedAt  time.Time
+	id         domain.ID
+	taskID     domain.ID
+	taskClass  string
+	scopeKey   string
+	executor   string
+	cost       sql.NullInt64
+	latency    sql.NullInt64
+	recordedAt time.Time
 }
 
 func (s *Observer) detectCostLatencyOutliers(ctx context.Context, taskFilter domain.ID) ([]detectorCandidate, error) {
@@ -376,7 +383,7 @@ func (s *Observer) detectCostLatencyOutliers(ctx context.Context, taskFilter dom
 					TaskID: sample.taskID, Category: "COST_LATENCY_OUTLIER",
 					BasisClass: "DETERMINISTIC_VERIFIED_OUTLIER", SourceKind: "EXPERIENCE_OUTCOMES",
 					SummaryLocal: "Verified outcome exceeded the conservative cost/latency outlier threshold",
-					Metrics: metrics, ExecutorKind: sample.executor, Enforcement: enforcement,
+					Metrics:      metrics, ExecutorKind: sample.executor, Enforcement: enforcement,
 				},
 			})
 		}
@@ -408,6 +415,13 @@ func isHighSignalOutlier(sample outcomeSample, previous []outcomeSample) bool {
 }
 
 func (s *Observer) taskEnforcement(ctx context.Context, taskID domain.ID) (domain.EnforcementLevel, error) {
+	if levels, ok := ctx.Value(detectorEnforcementContextKey{}).(map[domain.ID]domain.EnforcementLevel); ok {
+		level, found := levels[taskID]
+		if !found {
+			return "", fmt.Errorf("task %s has no enforcement level", taskID)
+		}
+		return level, nil
+	}
 	var level domain.EnforcementLevel
 	if err := s.store.DB().QueryRowContext(ctx,
 		"SELECT required_enforcement FROM tasks WHERE task_id = ?", taskID,
@@ -415,6 +429,33 @@ func (s *Observer) taskEnforcement(ctx context.Context, taskID domain.ID) (domai
 		return "", err
 	}
 	return level, nil
+}
+
+func (s *Observer) loadDetectorEnforcement(ctx context.Context, taskFilter domain.ID) (map[domain.ID]domain.EnforcementLevel, error) {
+	query := "SELECT task_id, required_enforcement FROM tasks"
+	args := []any{}
+	if taskFilter != "" {
+		query += " WHERE task_id = ?"
+		args = append(args, taskFilter)
+	}
+	rows, err := s.store.DB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	levels := make(map[domain.ID]domain.EnforcementLevel)
+	for rows.Next() {
+		var taskID domain.ID
+		var level domain.EnforcementLevel
+		if err := rows.Scan(&taskID, &level); err != nil {
+			return nil, err
+		}
+		levels[taskID] = level
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return levels, nil
 }
 
 func parseIDs(raw string) ([]domain.ID, error) {
