@@ -15,6 +15,8 @@ func newFeedbackCommand(api control.API, jsonOutput *bool) *cobra.Command {
 	root := &cobra.Command{Use:"feedback",Short:"Inspect and manage local field feedback"}
 	root.AddCommand(
 		newFeedbackListCommand(api,jsonOutput),
+		newFeedbackCandidateCommand(api,jsonOutput),
+		newFeedbackSanitizeCommand(api,jsonOutput),
 		newFeedbackInspectCommand(api,jsonOutput),
 		newFeedbackEmitCommand(api,jsonOutput),
 		newFeedbackObserveCommand(api,jsonOutput),
@@ -110,6 +112,62 @@ func newFeedbackScanCommand(api control.API, jsonOutput *bool) *cobra.Command {
 				if _,err=fmt.Fprintf(cmd.OutOrStdout(),"%s\t%s\n",item.ID,item.Category);err!=nil{return err}
 			}
 			return nil
+		},
+	}
+}
+
+
+func newFeedbackCandidateCommand(api control.API, jsonOutput *bool) *cobra.Command {
+	var observations []string
+	var genericClass, category, expected, observed, enforcement string
+	var transitions []string
+	var human bool
+	command:=&cobra.Command{
+		Use:"candidate",Short:"Create a local feedback candidate from observations",
+		RunE:func(cmd *cobra.Command,args []string)error{
+			ids:=make([]domain.ID,0,len(observations))
+			for _,raw:=range observations{
+				raw=strings.TrimSpace(raw)
+				if raw!=""{ids=append(ids,domain.ID(raw))}
+			}
+			if len(ids)==0||strings.TrimSpace(genericClass)==""||strings.TrimSpace(category)==""||strings.TrimSpace(expected)==""||strings.TrimSpace(observed)==""{
+				return errors.New("observation, generic-task-class, category, expected, and observed are required")
+			}
+			result,err:=api.FeedbackCandidateCreate(cmd.Context(),control.FeedbackCandidateCreateRequest{
+				ObservationIDs:ids,GenericTaskClass:domain.GenericTaskClass(strings.TrimSpace(genericClass)),
+				Category:strings.TrimSpace(category),ExpectedBehavior:expected,ObservedBehavior:observed,
+				StateTransitions:append([]string(nil),transitions...),HumanIntervention:human,
+				Enforcement:domain.EnforcementLevel(strings.TrimSpace(enforcement)),
+			})
+			if err!=nil{return err}
+			if *jsonOutput{return json.NewEncoder(cmd.OutOrStdout()).Encode(result)}
+			_,err=fmt.Fprintf(cmd.OutOrStdout(),"LOCAL — DO NOT EXPORT\nCandidate %s created from %d observation(s).\n",result.ID,len(ids))
+			return err
+		},
+	}
+	command.Flags().StringSliceVar(&observations,"observation",nil,"observation id; repeat or comma-separate")
+	command.Flags().StringVar(&genericClass,"generic-task-class","","privacy-safe generic task class")
+	command.Flags().StringVar(&category,"category","","privacy-safe categorical feedback type")
+	command.Flags().StringVar(&expected,"expected","","local expected behavior")
+	command.Flags().StringVar(&observed,"observed","","local observed behavior")
+	command.Flags().StringSliceVar(&transitions,"transition",nil,"privacy-safe state transition token")
+	command.Flags().BoolVar(&human,"human-intervention",false,"human intervention was required")
+	command.Flags().StringVar(&enforcement,"enforcement",string(domain.EnforcementEnforced),"enforcement level")
+	return command
+}
+
+func newFeedbackSanitizeCommand(api control.API, jsonOutput *bool) *cobra.Command {
+	return &cobra.Command{
+		Use:"sanitize <candidate-id>",Short:"Run the outbound privacy gate for a local candidate",Args:cobra.ExactArgs(1),
+		RunE:func(cmd *cobra.Command,args []string)error{
+			result,err:=api.FeedbackSanitize(cmd.Context(),domain.ID(args[0]));if err!=nil{return err}
+			if *jsonOutput{return json.NewEncoder(cmd.OutOrStdout()).Encode(result)}
+			if result.Artifact==nil{
+				_,err=fmt.Fprintf(cmd.OutOrStdout(),"Candidate %s sanitization: %s (%s)\n",result.CandidateID,result.Outcome,strings.Join(result.ReasonCodes,","))
+				return err
+			}
+			_,err=fmt.Fprintf(cmd.OutOrStdout(),"Candidate %s sanitization: PASS. Immutable artifact %s created; follow-up emission remains governed work.\n",result.CandidateID,result.Artifact.ID)
+			return err
 		},
 	}
 }
