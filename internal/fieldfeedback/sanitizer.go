@@ -112,7 +112,6 @@ type exportProjection struct {
 	Metrics            NormalizedMetrics       `json:"metrics"`
 	HumanIntervention  bool                    `json:"human_intervention"`
 	Enforcement        domain.EnforcementLevel `json:"enforcement"`
-	CorrelationKey     string                  `json:"correlation_key"`
 	RuntimeVersion     string                  `json:"runtime_version,omitempty"`
 	ExecutorKind       string                  `json:"executor_kind,omitempty"`
 	ExecutorVersion    string                  `json:"executor_version,omitempty"`
@@ -265,7 +264,7 @@ func (s *DeterministicSanitizer) project(candidate domain.FeedbackCandidate) (ex
 		SchemaVersion: sanitizedFeedbackSchemaVersion,
 		GenericTaskClass: candidate.GenericTaskClass, Category: candidate.Category,
 		StateTransitions: transitions, Metrics: metrics, HumanIntervention: candidate.HumanIntervention,
-		Enforcement: candidate.Enforcement, CorrelationKey: candidate.CorrelationKey,
+		Enforcement: candidate.Enforcement,
 	}
 	if s.config.AllowExecutorMetadata {
 		for label, value := range map[string]string{
