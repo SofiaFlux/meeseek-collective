@@ -35,6 +35,60 @@ type DeterministicSanitizerConfig struct {
 	AllowSyntheticReproduction bool
 }
 
+var safeExportMetadataToken = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}package fieldfeedback
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/SofiaFlux/meeseek-collective/internal/clock"
+	"github.com/SofiaFlux/meeseek-collective/internal/domain"
+	state "github.com/SofiaFlux/meeseek-collective/internal/state/sqlite"
+)
+
+const sanitizedFeedbackSchemaVersion = 1
+
+type Sanitizer interface {
+	Sanitize(context.Context, domain.ID) (domain.SanitizedFeedback, domain.SanitizationResult, error)
+}
+
+type Abstracter interface {
+	Abstract(context.Context, domain.FeedbackCandidate) (domain.FeedbackCandidate, error)
+}
+
+type DeterministicSanitizerConfig struct {
+	Version                    string
+	DenyPatterns               []*regexp.Regexp
+	AllowExecutorMetadata      bool
+	AllowSyntheticReproduction bool
+}
+
+)
+
+var safeExportCategories = map[string]struct{}{
+	"APPROVAL_FRICTION": {},
+	"ATTEMPT_RECOVERY": {},
+	"COST_LATENCY_OUTLIER": {},
+	"EXECUTOR_SELECTION_FRICTION": {},
+	"HUMAN_INTERVENTION": {},
+	"INDEPENDENT_PROBLEM": {},
+	"POLICY_AUTHORITY_FRICTION": {},
+	"RECOVERY_FRICTION": {},
+	"REPEATED_ATTEMPT_FAILURE": {},
+	"TEST": {},
+	"UNRESOLVED_OPERATION": {},
+	"VERIFICATION_CHALLENGE_AFTER_ACCEPTANCE": {},
+}
+
 type scanRule struct {
 	Code    string
 	Pattern *regexp.Regexp
@@ -54,12 +108,9 @@ type exportProjection struct {
 	SchemaVersion      int                     `json:"schema_version"`
 	GenericTaskClass   domain.GenericTaskClass `json:"generic_task_class"`
 	Category           string                  `json:"category"`
-	ExpectedBehavior   string                  `json:"expected_behavior"`
-	ObservedBehavior   string                  `json:"observed_behavior"`
 	StateTransitions   []string                `json:"state_transitions"`
 	Metrics            NormalizedMetrics       `json:"metrics"`
 	HumanIntervention  bool                    `json:"human_intervention"`
-	RecoveryResult     string                  `json:"recovery_result,omitempty"`
 	Enforcement        domain.EnforcementLevel `json:"enforcement"`
 	CorrelationKey     string                  `json:"correlation_key"`
 	RuntimeVersion     string                  `json:"runtime_version,omitempty"`
@@ -207,15 +258,25 @@ func (s *DeterministicSanitizer) project(candidate domain.FeedbackCandidate) (ex
 	if err := json.Unmarshal([]byte(candidate.MetricsJSON), &metrics); err != nil {
 		return exportProjection{}, fmt.Errorf("decode candidate metrics: %w", err)
 	}
+	if _, ok := safeExportCategories[candidate.Category]; !ok {
+		return exportProjection{}, fmt.Errorf("candidate category %q is not in the outbound allowlist", candidate.Category)
+	}
 	projection := exportProjection{
 		SchemaVersion: sanitizedFeedbackSchemaVersion,
 		GenericTaskClass: candidate.GenericTaskClass, Category: candidate.Category,
-		ExpectedBehavior: candidate.ExpectedBehavior, ObservedBehavior: candidate.ObservedBehavior,
 		StateTransitions: transitions, Metrics: metrics, HumanIntervention: candidate.HumanIntervention,
-		RecoveryResult: candidate.RecoveryResult, Enforcement: candidate.Enforcement,
-		CorrelationKey: candidate.CorrelationKey,
+		Enforcement: candidate.Enforcement, CorrelationKey: candidate.CorrelationKey,
 	}
 	if s.config.AllowExecutorMetadata {
+		for label, value := range map[string]string{
+			"runtime version": candidate.RuntimeVersion,
+			"executor kind": candidate.ExecutorKind,
+			"executor version": candidate.ExecutorVersion,
+		} {
+			if value != "" && !safeExportMetadataToken.MatchString(value) {
+				return exportProjection{}, fmt.Errorf("%s is not a privacy-safe metadata token", label)
+			}
+		}
 		projection.RuntimeVersion = candidate.RuntimeVersion
 		projection.ExecutorKind = candidate.ExecutorKind
 		projection.ExecutorVersion = candidate.ExecutorVersion
@@ -225,8 +286,7 @@ func (s *DeterministicSanitizer) project(candidate domain.FeedbackCandidate) (ex
 
 func (s *DeterministicSanitizer) scanProjection(p exportProjection) []string {
 	parts := []string{
-		p.ExpectedBehavior, p.ObservedBehavior, p.RecoveryResult,
-		p.RuntimeVersion, p.ExecutorKind, p.ExecutorVersion,
+		p.Category, p.RuntimeVersion, p.ExecutorKind, p.ExecutorVersion,
 	}
 	return s.scanText(strings.Join(parts, "\n"))
 }
