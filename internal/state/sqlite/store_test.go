@@ -64,6 +64,11 @@ func TestFieldFeedbackMigrationCreatesDurableSchema(t *testing.T) {
 		"sanitization_results_no_update", "sanitization_results_no_delete",
 		"sanitized_feedback_no_update", "sanitized_feedback_no_delete",
 		"adaptation_grants_no_update", "adaptation_grants_no_delete",
+		"approval_requests_binding_immutable", "approval_requests_no_delete",
+		"approval_decisions_no_update", "approval_decisions_no_delete",
+		"experience_proposals_binding_immutable",
+		"experience_rules_no_update", "experience_rules_no_delete",
+		"experience_outcomes_no_update", "experience_outcomes_no_delete",
 	} {
 		var name string
 		if err := store.DB().QueryRowContext(ctx,
@@ -107,4 +112,29 @@ func TestAttemptRunManifestMigrationCreatesImmutableSchema(t *testing.T) {
 			t.Fatalf("trigger %s missing: %v", trigger, err)
 		}
 	}
+}
+
+
+func TestGovernanceBindingTriggersAllowLifecycleButRejectHistoryRewrite(t *testing.T) {
+	store:=testutil.OpenStore(t)
+	ctx:=context.Background()
+	if _,err:=store.DB().ExecContext(ctx,`
+		INSERT INTO approval_requests(
+			approval_id,subject_kind,subject_id,request_digest,policy_decision_id,
+			required_approvers_json,requested_by,state,expires_at,created_at
+		) VALUES ('approval-hardening','TEST','subject-1','digest-1','policy-1','["owner"]','requester','PENDING','2026-09-22T00:00:00Z','2026-09-21T00:00:00Z')`
+	);err!=nil{t.Fatal(err)}
+	if _,err:=store.DB().ExecContext(ctx,
+		"UPDATE approval_requests SET state='APPROVED', decided_at='2026-09-21T01:00:00Z', approver_id='owner', decision_action='APPROVE' WHERE approval_id='approval-hardening'",
+	);err!=nil{t.Fatalf("valid lifecycle transition blocked: %v",err)}
+	if _,err:=store.DB().ExecContext(ctx,
+		"UPDATE approval_requests SET request_digest='rewritten' WHERE approval_id='approval-hardening'",
+	);err==nil{t.Fatal("approval request digest rewrite succeeded")}
+	if _,err:=store.DB().ExecContext(ctx,`
+		INSERT INTO approval_decisions(approval_id,approver_id,request_digest,decision_action,decided_at)
+		VALUES ('approval-hardening','owner','digest-1','APPROVE','2026-09-21T01:00:00Z')`
+	);err!=nil{t.Fatal(err)}
+	if _,err:=store.DB().ExecContext(ctx,
+		"UPDATE approval_decisions SET decision_action='REJECT' WHERE approval_id='approval-hardening' AND approver_id='owner'",
+	);err==nil{t.Fatal("approval decision rewrite succeeded")}
 }
