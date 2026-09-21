@@ -202,6 +202,7 @@ func TestControlRoutesUseCoreServiceInterfaces(t *testing.T) {
 
 	create := CreateTaskRequest{
 		Purpose:             domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: "owner-directive-1"},
+		TaskClass:           "repo.review",
 		AcceptanceCriteria:  []string{"result is verified"},
 		RequiredEnforcement: domain.EnforcementPartial,
 		ResourceEnvelopeID:  "resource-1",
@@ -217,8 +218,8 @@ func TestControlRoutesUseCoreServiceInterfaces(t *testing.T) {
 	}
 	var task TaskDTO
 	decodeJSON(t, response, &task)
-	if task.ID != "task-1" || tasks.created != 1 || tasks.last.Priority != 7 {
-		t.Fatalf("task route did not use task service: dto=%+v calls=%d request=%+v", task, tasks.created, tasks.last)
+	if task.ID != "task-1" || tasks.created != 1 || tasks.last.Priority != 7 || tasks.last.TaskClass != "repo.review" {
+		t.Fatalf("task route did not preserve TaskClass: dto=%+v calls=%d request=%+v", task, tasks.created, tasks.last)
 	}
 
 	response = doRequest(t, http.MethodGet, httpServer.URL+"/tasks/task-1", "control-secret", nil)
