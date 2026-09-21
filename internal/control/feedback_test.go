@@ -16,6 +16,8 @@ type fakeFeedbackControl struct {
 	candidate domain.FeedbackCandidate
 	artifact  domain.SanitizedFeedback
 	task      domain.Task
+	createdInput fieldfeedback.CandidateInput
+	onSanitized domain.ID
 }
 
 func (f *fakeFeedbackControl) Candidates(context.Context, domain.FeedbackCandidateState) ([]domain.FeedbackCandidate,error) {
@@ -29,6 +31,24 @@ func (f *fakeFeedbackControl) LatestSanitizedFeedbackForCandidate(context.Contex
 }
 func (f *fakeFeedbackControl) RequestEmit(context.Context, domain.ID) (domain.Task,error) {
 	return f.task,nil
+}
+func (f *fakeFeedbackControl) CreateCandidate(_ context.Context, input fieldfeedback.CandidateInput) (domain.FeedbackCandidate,error) {
+	f.createdInput=input
+	return f.candidate,nil
+}
+func (f *fakeFeedbackControl) OnSanitized(_ context.Context, id domain.ID) error {
+	f.onSanitized=id
+	return nil
+}
+
+type fakeFeedbackSanitizer struct {
+	artifact domain.SanitizedFeedback
+	result domain.SanitizationResult
+	candidateID domain.ID
+}
+func (f *fakeFeedbackSanitizer) Sanitize(_ context.Context, id domain.ID) (domain.SanitizedFeedback,domain.SanitizationResult,error) {
+	f.candidateID=id
+	return f.artifact,f.result,nil
 }
 
 type fakeFieldObserver struct {
@@ -107,4 +127,48 @@ func readResponse(t *testing.T,response *http.Response) string {
 	var buf bytes.Buffer
 	if _,err:=buf.ReadFrom(response.Body);err!=nil{t.Fatal(err)}
 	return buf.String()
+}
+
+
+func TestFeedbackControlExposesCandidateToSanitizedProductPath(t *testing.T) {
+	server,_,_,_,_,_,_:=newTestServer(t)
+	feedback:=&fakeFeedbackControl{
+		candidate:domain.FeedbackCandidate{
+			ID:"candidate-1",State:domain.FeedbackStateCandidate,GenericTaskClass:domain.GenericTaskDebugging,
+			Category:"RECOVERY_FRICTION",ExpectedBehavior:"local expected",ObservedBehavior:"local observed",
+			Enforcement:domain.EnforcementEnforced,
+		},
+	}
+	sanitizer:=&fakeFeedbackSanitizer{
+		artifact:domain.SanitizedFeedback{ID:"sanitized-1",CandidateID:"candidate-1",ContentJSON:`{"category":"RECOVERY_FRICTION"}`},
+		result:domain.SanitizationResult{CandidateID:"candidate-1",Outcome:domain.SanitizationPass,ReasonCodesJSON:"[]"},
+	}
+	server.deps.Feedback=feedback
+	server.deps.Sanitizer=sanitizer
+	httpServer:=httptest.NewServer(server.Handler());defer httpServer.Close()
+
+	response:=doRequest(t,http.MethodPost,httpServer.URL+"/feedback/candidates","control-secret",
+		bytes.NewBufferString(`{
+			"observation_ids":["obs-1"],
+			"generic_task_class":"DEBUGGING",
+			"category":"RECOVERY_FRICTION",
+			"expected_behavior":"local expected",
+			"observed_behavior":"local observed",
+			"state_transitions":["EXECUTING","FAILED"],
+			"enforcement":"ENFORCED"
+		}`))
+	if response.StatusCode!=http.StatusCreated{t.Fatalf("candidate create status=%d body=%s",response.StatusCode,readResponse(t,response))}
+	var candidate FeedbackCandidateDTO
+	decodeJSON(t,response,&candidate)
+	if candidate.ID!="candidate-1"||len(feedback.createdInput.ObservationIDs)!=1{
+		t.Fatalf("candidate=%+v input=%+v",candidate,feedback.createdInput)
+	}
+
+	response=doRequest(t,http.MethodPost,httpServer.URL+"/feedback/candidate-1/sanitize","control-secret",nil)
+	if response.StatusCode!=http.StatusOK{t.Fatalf("sanitize status=%d body=%s",response.StatusCode,readResponse(t,response))}
+	var sanitized FeedbackSanitizeDTO
+	decodeJSON(t,response,&sanitized)
+	if sanitizer.candidateID!="candidate-1"||feedback.onSanitized!="sanitized-1"||sanitized.Artifact==nil{
+		t.Fatalf("sanitize=%+v sanitizerCandidate=%s onSanitized=%s",sanitized,sanitizer.candidateID,feedback.onSanitized)
+	}
 }
