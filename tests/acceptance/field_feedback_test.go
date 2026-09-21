@@ -211,7 +211,20 @@ func newFeedbackAcceptanceFixture(t *testing.T, mode localconfig.FeedbackMode, l
 		t.Fatalf("test lost local-sensitive premise: %q", repeated.SummaryLocal)
 	}
 
-	candidate, err := box.Feedback.CreateCandidate(ctx, fieldfeedback.CandidateInput{
+	controlServer, err := control.NewServer(control.ServerConfig{
+		AuthToken: "field-product-path", OwnerPrincipalID: owner.PrincipalID(),
+		OwnerPublicKey: owner.PublicKey(), ChallengeTTL: time.Minute,
+	}, control.Dependencies{
+		Status: feedbackStatusProvider{box: box}, Tasks: box.Execution, Approvals: box.Approvals,
+		Feedback: box.Feedback, Sanitizer: box.Sanitizer, FieldObserver: box.FieldObserver, Experience: box.Experience,
+		Attempts: box.Execution, Operations: box.Operations, Shutdown: box,
+	})
+	if err != nil { t.Fatal(err) }
+	httpServer := httptest.NewServer(controlServer.Handler())
+	defer httpServer.Close()
+	client := control.NewClient(httpServer.URL, "field-product-path", httpServer.Client())
+
+	created, err := client.FeedbackCandidateCreate(ctx, control.FeedbackCandidateCreateRequest{
 		ObservationIDs: []domain.ID{repeated.ID}, GenericTaskClass: domain.GenericTaskDebugging,
 		Category: "RECOVERY_FRICTION", ExpectedBehavior: "recover automatically after a failed attempt",
 		ObservedBehavior: "repeated execution failure required another attempt",
@@ -220,25 +233,25 @@ func newFeedbackAcceptanceFixture(t *testing.T, mode localconfig.FeedbackMode, l
 		RuntimeVersion: "acceptance", ExecutorKind: "codex", ExecutorVersion: "acceptance",
 		Enforcement: domain.EnforcementEnforced,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil { t.Fatal(err) }
+	candidate, err := box.Feedback.Candidate(ctx, created.ID)
+	if err != nil { t.Fatal(err) }
+
+	sanitized, sanitizeErr := client.FeedbackSanitize(ctx, candidate.ID)
+	artifact, found, loadErr := box.Feedback.LatestSanitizedFeedbackForCandidate(ctx, candidate.ID)
+	if loadErr != nil { t.Fatal(loadErr) }
+	if !found || artifact.ID == "" {
+		t.Fatalf("product-path sanitization created no immutable artifact: dto=%+v err=%v", sanitized, sanitizeErr)
 	}
-	artifact, result, err := box.Sanitizer.Sanitize(ctx, candidate.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != domain.SanitizationPass || artifact.ID == "" {
-		t.Fatalf("sanitization result=%+v artifact=%+v", result, artifact)
-	}
-	err = box.Feedback.OnSanitized(ctx, artifact.ID)
 	if !createMaintenanceBudget {
-		if !errors.Is(err, fieldfeedback.ErrNoMaintenanceBudget) {
-			t.Fatalf("OnSanitized error=%v, want no-maintenance-budget", err)
+		if sanitizeErr == nil {
+			t.Fatal("product-path sanitization unexpectedly scheduled emission without maintenance budget")
 		}
 		return &feedbackAcceptanceFixture{ctx: ctx, box: box, clock: clk, policy: pol, sink: sink, owner: owner, candidate: candidate, artifact: artifact}
 	}
-	if err != nil {
-		t.Fatal(err)
+	if sanitizeErr != nil { t.Fatal(sanitizeErr) }
+	if sanitized.Outcome != domain.SanitizationPass || sanitized.Artifact == nil || sanitized.Artifact.ID != artifact.ID {
+		t.Fatalf("product-path sanitization=%+v artifact=%+v", sanitized, artifact)
 	}
 	if mode == localconfig.FeedbackModeLocalOnly {
 		return &feedbackAcceptanceFixture{
@@ -319,7 +332,7 @@ func (f *feedbackAcceptanceFixture) signedApprove(t *testing.T, approvalID domai
 		OwnerPublicKey: f.owner.PublicKey(), ChallengeTTL: time.Minute,
 	}, control.Dependencies{
 		Status: feedbackStatusProvider{box: f.box}, Tasks: f.box.Execution, Approvals: f.box.Approvals,
-		Feedback: f.box.Feedback, FieldObserver: f.box.FieldObserver, Experience: f.box.Experience,
+		Feedback: f.box.Feedback, Sanitizer: f.box.Sanitizer, FieldObserver: f.box.FieldObserver, Experience: f.box.Experience,
 		Attempts: f.box.Execution, Operations: f.box.Operations, Shutdown: f.box,
 	})
 	if err != nil {
