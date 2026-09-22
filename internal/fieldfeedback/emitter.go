@@ -129,9 +129,6 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 	if task, found, err := s.logicalEmitTask(ctx, logicalKey); err != nil {
 		return domain.Task{}, err
 	} else if found {
-		if err := s.linkEmission(ctx, artifact, task.ID); err != nil {
-			return domain.Task{}, err
-		}
 		return task, nil
 	}
 
