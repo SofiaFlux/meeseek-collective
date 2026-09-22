@@ -168,6 +168,19 @@ func TestGovernanceBindingTriggersAllowLifecycleButRejectHistoryRewrite(t *testi
 	); err == nil {
 		t.Fatal("approval decision rewrite succeeded")
 	}
+	for _, statement := range []string{
+		`INSERT INTO adaptation_grant_requests(grant_request_id,grant_digest,definition_json,approval_id,requested_by,created_at) VALUES ('grant-request-hardening','grant-digest-hardening','{}','approval-hardening','owner','2026-09-21T00:00:00Z')`,
+		`INSERT INTO adaptation_grants(grant_id,grant_request_id,adaptation_kind,scope_key,allowed_executors_json,min_verified_samples,max_acceptance_regression_bps,max_cost_regression_bps,owner_principal_id,expires_at,activated_at) VALUES ('grant-hardening','grant-request-hardening','EXECUTOR_PREFERENCE','repo.review','["codex"]',1,0,0,'owner','2026-09-22T00:00:00Z','2026-09-21T00:00:00Z')`,
+	} {
+		if _, err := store.DB().ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT OR REPLACE INTO adaptation_grants(grant_id,grant_request_id,adaptation_kind,scope_key,allowed_executors_json,min_verified_samples,max_acceptance_regression_bps,max_cost_regression_bps,owner_principal_id,expires_at,activated_at) VALUES ('grant-replaced','grant-request-hardening','EXECUTOR_PREFERENCE','repo.review','["other"]',1,0,0,'attacker','2026-09-23T00:00:00Z','2026-09-21T00:01:00Z')`,
+	); err == nil {
+		t.Fatal("INSERT OR REPLACE rewrote immutable adaptation grant by grant request")
+	}
 }
 
 func TestGovernanceStateSurvivesCloseAndReopen(t *testing.T) {

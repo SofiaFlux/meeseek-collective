@@ -129,6 +129,15 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 	if task, found, err := s.logicalEmitTask(ctx, logicalKey); err != nil {
 		return domain.Task{}, err
 	} else if found {
+		linked, err := s.taskHasEmission(ctx, task.ID)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		if !linked {
+			if err := s.linkEmission(ctx, artifact, task.ID); err != nil {
+				return domain.Task{}, err
+			}
+		}
 		return task, nil
 	}
 
@@ -147,7 +156,6 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 		AuthorityCeiling:     []string{capability},
 		ResourceEnvelopeID:   runtime.config.MaintenanceEnvelopeID,
 	})
-	reusedLogicalTask := false
 	if err != nil {
 		// The partial unique index is the concurrency/crash-safe logical idempotency gate.
 		existing, found, loadErr := s.logicalEmitTask(ctx, logicalKey)
@@ -158,10 +166,6 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 			return domain.Task{}, err
 		}
 		task = existing
-		reusedLogicalTask = true
-	}
-	if reusedLogicalTask {
-		return task, nil
 	}
 	if err := s.linkEmission(ctx, artifact, task.ID); err != nil {
 		return domain.Task{}, err
@@ -253,6 +257,17 @@ func (s *Feedback) logicalEmitTask(ctx context.Context, feedbackID domain.ID) (d
 	return task, err == nil, err
 }
 
+func (s *Feedback) taskHasEmission(ctx context.Context, taskID domain.ID) (bool, error) {
+	var one int
+	err := s.store.DB().QueryRowContext(ctx,
+		"SELECT 1 FROM feedback_emissions WHERE task_id = ?", taskID,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func emissionLogicalKey(provider, destination, fingerprint string) domain.ID {
 	return domain.ID("feedback:" + strings.TrimSpace(provider) + ":" + strings.TrimSpace(destination) + ":" + strings.TrimSpace(fingerprint))
 }
@@ -281,6 +296,16 @@ func (s *Feedback) linkEmission(ctx context.Context, artifact domain.SanitizedFe
 	if err := s.store.DB().QueryRowContext(ctx,
 		"SELECT task_id FROM feedback_emissions WHERE feedback_id = ?", artifact.ID,
 	).Scan(&linkedTask); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		linked, linkErr := s.taskHasEmission(ctx, taskID)
+		if linkErr != nil {
+			return linkErr
+		}
+		if linked {
+			return nil
+		}
 		return err
 	}
 	if linkedTask != taskID {

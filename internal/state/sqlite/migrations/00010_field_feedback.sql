@@ -296,7 +296,10 @@ END;
 -- +goose StatementBegin
 CREATE TRIGGER adaptation_grants_no_insert_replace
 BEFORE INSERT ON adaptation_grants
-WHEN EXISTS (SELECT 1 FROM adaptation_grants WHERE grant_id = NEW.grant_id)
+WHEN EXISTS (
+    SELECT 1 FROM adaptation_grants
+    WHERE grant_id = NEW.grant_id OR grant_request_id = NEW.grant_request_id
+)
 BEGIN
     SELECT RAISE(ABORT, 'adaptation_grants are immutable');
 END;
