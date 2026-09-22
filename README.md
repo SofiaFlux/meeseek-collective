@@ -2,6 +2,38 @@
 
 Meeseek Collective is an experimental local-first agent orchestration runtime. The current **Minimal Viable Collective (MVC)** is intentionally one Cube: one trusted Box daemon owns canonical state, policy, authority checks, scheduling semantics, external-operation commit boundaries, verification, memory, audit and resource accounting.
 
+> **Experimental status:** Meeseek Collective is local-first, single-Cube software under active development. It is not production-ready and must not be used for unmanaged consequential workloads. Run it only where you can review its authority, policy, evidence, and containment boundaries.
+
+## Prerequisites
+
+- Go 1.27
+- Linux and Docker only when running the optional OCI enforcement gate
+
+## Build and start locally
+
+Build the two local binaries:
+
+```bash
+mkdir -p ./bin
+go build -o ./bin/meeseek ./cmd/meeseek
+go build -o ./bin/meeseek-box ./cmd/meeseek-box
+```
+
+Initialize a local Collective once, start the Box in one terminal, then query it from another:
+
+```bash
+./bin/meeseek init
+./bin/meeseek-box
+./bin/meeseek status
+```
+
+| Command | Purpose |
+| --- | --- |
+| `./bin/meeseek init` | Create the local Collective home and initial state. |
+| `./bin/meeseek-box` | Start the single local Box daemon. |
+| `./bin/meeseek status` | Query the local Box status. |
+| `go test ./... -count=1` | Run the normal Go test suite. |
+
 ## Local bootstrap
 
 Build the two binaries explicitly:
@@ -92,3 +124,19 @@ python3 docs/superpowers/research/spikes/2026-09-14-sqlite-persistence-spike.py
 ```
 
 The Linux OCI gate additionally runs the bypass/capability acceptance profile against Docker. CI must not replace that check with a unit-test-only approximation.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, validation, and pull-request expectations.
+
+## Security
+
+Do not report suspected vulnerabilities in public Issues. See [SECURITY.md](SECURITY.md) for the private reporting route.
+
+## Support
+
+See [SUPPORT.md](SUPPORT.md) for reproducible-defect, security, and conduct-reporting routes.
+
+## License
+
+Meeseek Collective is licensed under the [Apache License 2.0](LICENSE).
