@@ -141,16 +141,16 @@ type ShutdownService interface {
 }
 
 type Dependencies struct {
-	Status     StatusProvider
-	Tasks      TaskService
-	Approvals  ApprovalService
-	Attempts   AttemptReader
-	Operations OperationReader
-	Feedback   FeedbackService
-	Sanitizer  FeedbackSanitizer
+	Status        StatusProvider
+	Tasks         TaskService
+	Approvals     ApprovalService
+	Attempts      AttemptReader
+	Operations    OperationReader
+	Feedback      FeedbackService
+	Sanitizer     FeedbackSanitizer
 	FieldObserver FieldObserver
-	Experience ExperienceService
-	Shutdown   ShutdownService
+	Experience    ExperienceService
+	Shutdown      ShutdownService
 }
 
 type ServerConfig struct {
@@ -158,6 +158,7 @@ type ServerConfig struct {
 	OwnerPrincipalID domain.ID
 	OwnerPublicKey   ed25519.PublicKey
 	ChallengeTTL     time.Duration
+	Now              func() time.Time
 }
 
 type challengeState struct {
@@ -188,6 +189,9 @@ func NewServer(config ServerConfig, deps Dependencies) (*Server, error) {
 	}
 	if config.ChallengeTTL <= 0 {
 		return nil, errors.New("positive approval challenge TTL is required")
+	}
+	if config.Now == nil {
+		config.Now = time.Now
 	}
 	if deps.Status == nil || deps.Tasks == nil || deps.Approvals == nil || deps.Attempts == nil || deps.Operations == nil || deps.Shutdown == nil {
 		return nil, errors.New("all control dependencies are required")
@@ -354,7 +358,7 @@ func (s *Server) handleApprovalChallenge(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if record.State != domain.ApprovalPending || !record.ExpiresAt.After(time.Now().UTC()) {
+	if record.State != domain.ApprovalPending || !record.ExpiresAt.After(s.config.Now().UTC()) {
 		writeError(w, http.StatusConflict, "approval request is not live and pending")
 		return
 	}
@@ -371,7 +375,7 @@ func (s *Server) handleApprovalChallenge(w http.ResponseWriter, r *http.Request)
 		value:   base64.RawURLEncoding.EncodeToString(raw[:]),
 		digest:  record.RequestDigest,
 		action:  action,
-		expires: time.Now().UTC().Add(s.config.ChallengeTTL),
+		expires: s.config.Now().UTC().Add(s.config.ChallengeTTL),
 	}
 	s.mu.Lock()
 	s.challenges[id] = state
@@ -407,7 +411,7 @@ func (s *Server) handleApprovalDecision(w http.ResponseWriter, r *http.Request, 
 
 	s.mu.Lock()
 	state, exists := s.challenges[id]
-	if !exists || time.Now().UTC().After(state.expires) ||
+	if !exists || s.config.Now().UTC().After(state.expires) ||
 		!constantTimeEqual(request.Challenge, state.value) ||
 		state.action != action {
 		s.mu.Unlock()
@@ -545,7 +549,6 @@ func approvalDTO(record domain.ApprovalRequestRecord) ApprovalDTO {
 		ApprovedBy: record.ApproverID, Status: string(record.State),
 	}
 }
-
 
 func approvalRequires(required []domain.ID, principal domain.ID) bool {
 	for _, candidate := range required {

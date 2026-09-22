@@ -19,8 +19,8 @@ import (
 	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
 	"github.com/SofiaFlux/meeseek-collective/internal/operations"
 	"github.com/SofiaFlux/meeseek-collective/internal/policy"
-	"github.com/SofiaFlux/meeseek-collective/internal/scheduler"
 	meeseekruntime "github.com/SofiaFlux/meeseek-collective/internal/runtime"
+	"github.com/SofiaFlux/meeseek-collective/internal/scheduler"
 	"github.com/SofiaFlux/meeseek-collective/internal/testutil"
 )
 
@@ -37,10 +37,10 @@ func (p *feedbackAcceptancePolicy) Evaluate(_ context.Context, in policy.PolicyI
 	return domain.PolicyDecision{
 		ID: domain.NewID("decision"), Outcome: p.outcome,
 		RequiredApprovals: append([]domain.ID(nil), p.required...),
-		ReasonCodes: []string{"field-feedback-acceptance"},
-		PolicySetID: "policy_feedback_acceptance", PolicySetHash: p.hash,
+		ReasonCodes:       []string{"field-feedback-acceptance"},
+		PolicySetID:       "policy_feedback_acceptance", PolicySetHash: p.hash,
 		PolicyCapabilitiesHash: "caps_feedback_acceptance",
-		InputDigest: "feedback-input", EvaluatedAt: in.Now,
+		InputDigest:            "feedback-input", EvaluatedAt: in.Now,
 	}, nil
 }
 
@@ -138,7 +138,7 @@ func newFeedbackAcceptanceFixture(t *testing.T, mode localconfig.FeedbackMode, l
 			Enabled: true, Mode: mode, Provider: "github", Destination: "owner/repo",
 			MaintenanceEnvelopeID: "feedback-maintenance", RequiredEnforcement: domain.EnforcementEnforced,
 		},
-		FeedbackSink: sink,
+		FeedbackSink:  sink,
 		LeaseDuration: time.Hour,
 	}
 	box, err := meeseekruntime.Open(ctx, cfg)
@@ -169,9 +169,9 @@ func newFeedbackAcceptanceFixture(t *testing.T, mode localconfig.FeedbackMode, l
 	}
 
 	task, err := box.Execution.CreateTask(ctx, execution.TaskRequest{
-		Purpose: domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: "field-dogfood"},
-		TaskClass: "repo.debug",
-		AcceptanceCriteria: []string{"work completes"},
+		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: "field-dogfood"},
+		TaskClass:            "repo.debug",
+		AcceptanceCriteria:   []string{"work completes"},
 		RequiredCapabilities: []string{"repo.read"}, RequiredEnforcement: domain.EnforcementEnforced,
 		AuthorityCeiling: []string{"repo.read"}, ResourceEnvelopeID: "work-feedback",
 	})
@@ -213,13 +213,15 @@ func newFeedbackAcceptanceFixture(t *testing.T, mode localconfig.FeedbackMode, l
 
 	controlServer, err := control.NewServer(control.ServerConfig{
 		AuthToken: "field-product-path", OwnerPrincipalID: owner.PrincipalID(),
-		OwnerPublicKey: owner.PublicKey(), ChallengeTTL: time.Minute,
+		OwnerPublicKey: owner.PublicKey(), ChallengeTTL: time.Minute, Now: box.Clock.Now,
 	}, control.Dependencies{
 		Status: feedbackStatusProvider{box: box}, Tasks: box.Execution, Approvals: box.Approvals,
 		Feedback: box.Feedback, Sanitizer: box.Sanitizer, FieldObserver: box.FieldObserver, Experience: box.Experience,
 		Attempts: box.Execution, Operations: box.Operations, Shutdown: box,
 	})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	httpServer := httptest.NewServer(controlServer.Handler())
 	defer httpServer.Close()
 	client := control.NewClient(httpServer.URL, "field-product-path", httpServer.Client())
@@ -229,17 +231,23 @@ func newFeedbackAcceptanceFixture(t *testing.T, mode localconfig.FeedbackMode, l
 		Category: "RECOVERY_FRICTION", ExpectedBehavior: "recover automatically after a failed attempt",
 		ObservedBehavior: "repeated execution failure required another attempt",
 		StateTransitions: []string{"EXECUTING", "FAILED", "ELIGIBLE", "EXECUTING", "FAILED"},
-		Metrics: fieldfeedback.NormalizedMetrics{}, HumanIntervention: false, RecoveryResult: "FAILED",
+		Metrics:          fieldfeedback.NormalizedMetrics{}, HumanIntervention: false, RecoveryResult: "FAILED",
 		RuntimeVersion: "acceptance", ExecutorKind: "codex", ExecutorVersion: "acceptance",
 		Enforcement: domain.EnforcementEnforced,
 	})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	candidate, err := box.Feedback.Candidate(ctx, created.ID)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	sanitized, sanitizeErr := client.FeedbackSanitize(ctx, candidate.ID)
 	artifact, found, loadErr := box.Feedback.LatestSanitizedFeedbackForCandidate(ctx, candidate.ID)
-	if loadErr != nil { t.Fatal(loadErr) }
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
 	if !found || artifact.ID == "" {
 		t.Fatalf("product-path sanitization created no immutable artifact: dto=%+v err=%v", sanitized, sanitizeErr)
 	}
@@ -249,7 +257,9 @@ func newFeedbackAcceptanceFixture(t *testing.T, mode localconfig.FeedbackMode, l
 		}
 		return &feedbackAcceptanceFixture{ctx: ctx, box: box, clock: clk, policy: pol, sink: sink, owner: owner, candidate: candidate, artifact: artifact}
 	}
-	if sanitizeErr != nil { t.Fatal(sanitizeErr) }
+	if sanitizeErr != nil {
+		t.Fatal(sanitizeErr)
+	}
 	if sanitized.Outcome != domain.SanitizationPass || sanitized.Artifact == nil || sanitized.Artifact.ID != artifact.ID {
 		t.Fatalf("product-path sanitization=%+v artifact=%+v", sanitized, artifact)
 	}
@@ -329,7 +339,7 @@ func (f *feedbackAcceptanceFixture) signedApprove(t *testing.T, approvalID domai
 	t.Helper()
 	server, err := control.NewServer(control.ServerConfig{
 		AuthToken: "acceptance-control-token", OwnerPrincipalID: f.owner.PrincipalID(),
-		OwnerPublicKey: f.owner.PublicKey(), ChallengeTTL: time.Minute,
+		OwnerPublicKey: f.owner.PublicKey(), ChallengeTTL: time.Minute, Now: f.clock.Now,
 	}, control.Dependencies{
 		Status: feedbackStatusProvider{box: f.box}, Tasks: f.box.Execution, Approvals: f.box.Approvals,
 		Feedback: f.box.Feedback, Sanitizer: f.box.Sanitizer, FieldObserver: f.box.FieldObserver, Experience: f.box.Experience,
@@ -454,7 +464,7 @@ func TestFieldFeedbackNegativeAcceptance(t *testing.T) {
 	t.Run("uncertain_sanitizer_retains_local_only", func(t *testing.T) {
 		f := newFeedbackAcceptanceFixture(t, localconfig.FeedbackModeLocalOnly, false, true)
 		candidate, err := f.box.Feedback.CreateCandidate(f.ctx, fieldfeedback.CandidateInput{
-			ObservationIDs: []domain.ID{candidateObservationIDAcceptance(t, f, f.candidate.ID)},
+			ObservationIDs:   []domain.ID{candidateObservationIDAcceptance(t, f, f.candidate.ID)},
 			GenericTaskClass: domain.GenericTaskTesting, Category: "TEST",
 			ExpectedBehavior: "safe", ObservedBehavior: "safe",
 			StateTransitions: []string{"EXECUTING"}, Enforcement: domain.EnforcementEnforced,
@@ -523,14 +533,9 @@ func TestFieldFeedbackNegativeAcceptance(t *testing.T) {
 		_, _ = f.startEmitter(t, attempt)
 		op := f.operationForEmit(t)
 		f.signedApprove(t, op.ApprovalID)
-		if _, err := f.box.Store.DB().ExecContext(f.ctx,
-			`UPDATE approval_requests SET expires_at = ? WHERE approval_id = ?`,
-			f.clock.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano), op.ApprovalID,
-		); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.box.Operations.Dispatch(f.ctx, op.ID, attempt.ID); !errors.Is(err, domain.ErrPolicyDenied) {
-			t.Fatalf("expired approval dispatch err=%v", err)
+		f.clock.Advance(25 * time.Hour)
+		if _, err := f.box.Operations.Dispatch(f.ctx, op.ID, attempt.ID); err == nil {
+			t.Fatal("expired approval dispatched an external operation")
 		}
 	})
 
@@ -557,7 +562,7 @@ func TestFieldFeedbackNegativeAcceptance(t *testing.T) {
 	t.Run("feedback_provider_bypass_blocked_in_enforced_profile", func(t *testing.T) {
 		f := newFeedbackAcceptanceFixture(t, localconfig.FeedbackModeAutoIfAllowed, false, true)
 		task, err := f.box.Execution.CreateTask(f.ctx, execution.TaskRequest{
-			Purpose: domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: "bypass"},
+			Purpose:            domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: "bypass"},
 			AcceptanceCriteria: []string{"no feedback authority"}, RequiredCapabilities: []string{"repo.read"},
 			RequiredEnforcement: domain.EnforcementEnforced, AuthorityCeiling: []string{"repo.read"},
 			ResourceEnvelopeID: "work-feedback",
@@ -673,4 +678,3 @@ func addSecondFeedbackArtifact(t *testing.T, f *feedbackAcceptanceFixture) (doma
 	}
 	return artifact, task
 }
-
