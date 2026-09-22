@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a reproducible, non-security defect.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for reproducible defects only. Do not include secrets,
+        credentials, private keys, raw databases, or personal data. For a
+        potential vulnerability, follow the repository security policy instead.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest safe sequence that reproduces the issue.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Meeseek revision
+      description: Provide a release version or commit identifier.
+      placeholder: "for example, v0.1.0 or abc1234"
+    validations:
+      required: true
+  - type: input
+    id: operating-system
+    attributes:
+      label: Operating system
+      description: Include the distribution and version where relevant.
+      placeholder: "for example, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Safe, redacted logs
+      description: Include only logs that have been redacted of sensitive and personal data.
+      render: shell
+  - type: checkboxes
+    id: public-safety
+    attributes:
+      label: Public-report safety
+      description: Confirm this is safe to publish in a public issue.
+      options:
+        - label: This is not a vulnerability and contains no secrets, credentials, private keys, raw databases, or personal data.
+          required: true
