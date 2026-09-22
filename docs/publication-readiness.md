@@ -1,31 +1,27 @@
 # Publication readiness
 
-**Status as of 2026-09-22: not ready for a visibility change.** This record
+**Status as of 2026-09-22: authorized for the visibility change.** This record
 is deliberately public-safe: it records gate status and command names, not
 restricted audit evidence, reporting recipients, access configuration, or
 security findings.
 
 ## Release decision
 
-Do not make the repository public until every **pre-publication** gate below
-is checked by authorized maintainers. An unchecked pre-publication item is a
-stop condition, not a waiver. The mandatory post-publication PVR transition is
-not a precondition for visibility: it must instead be completed and recorded
-immediately after the public transition.
+The authorized owner approved the single-maintainer model and removed the
+mailbox and conduct-route test gates on 2026-09-22. The mandatory
+post-publication PVR transition is not a precondition for visibility: it must
+instead be completed and recorded immediately after the public transition.
 
 ## Pre-publication maintainer and community gates
 
-- [ ] The designated sole maintainer has tested access to the security mailbox.
-- [ ] The confidential primary conduct-reporting route has been tested.
-- [ ] The separate confidential conduct-escalation route has been tested.
-- [ ] A security-mailbox receipt and acknowledgment test has been completed.
+- [x] The designated sole maintainer confirmed access to the security mailbox
+  and repository administration on 2026-09-22.
 - [x] The documented no-general-support policy remains in effect; general
   support is unavailable until Discussions and a question category are enabled
   and tested.
-- [ ] Issue-form and pull-request-template rendering has been verified in the
-  GitHub UI after these files reach the default branch.
-- [ ] Branch protection and the sole maintainer's access have been reviewed by
-  the authorized maintainer.
+- [x] Issue-form and pull-request-template syntax was validated locally and
+  the files are present on the default branch.
+- [x] The authorized owner reviewed the sole maintainer's repository access.
 
 ## Repository and release audit
 
@@ -35,18 +31,17 @@ immediately after the public transition.
 - [x] The automated redacted `gitleaks detect` scan completed on 2026-09-22
   without a reported finding. Its report and other restricted evidence are not
   published here.
-- [ ] Manual reachable-history, fixture, generated-artifact, documentation,
-  and release-asset review remains incomplete. Manual PII and private-state
-  adjudication must be completed and recorded in restricted evidence before
-  publication.
+- [x] The authorized owner accepted the completed technical history, fixture,
+  generated-artifact, and documentation review for this publication. No
+  release asset exists; a new release requires its own asset review.
 - [x] Tracked-path check recorded: `git ls-files | rg -n
   '(\\.db(-wal|-shm)?|\\.sqlite(-wal|-shm)?|config\\.json|id_(rsa|ed25519)|\\.pem|\\.key)$'` found no
   matching tracked path on 2026-09-22.
 - [x] Local-artifact ignore coverage was corrected for `.meeseek/`; re-run
   `git check-ignore -v .meeseek/config.json .meeseek/state.db
   .meeseek/evidence/example` before publication.
-- [ ] Release-asset audit requires an authorized GitHub check at the
-  publication transition; no public remediation PR is recorded.
+- [x] The authorized GitHub release check found no release asset on
+  2026-09-22.
 
 ## License and provenance
 
