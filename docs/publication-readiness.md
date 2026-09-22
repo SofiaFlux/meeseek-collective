@@ -50,12 +50,20 @@ immediately after the public transition.
 
 ## License and provenance
 
-- [ ] Dependency and copied-asset inventory is incomplete. `go list -m -json
-  all` was requested for the inventory, but every dependency license and every
-  copied/generated asset still requires provenance review.
-- [ ] `NOTICE` has not been added. It may be created only after the inventory
-  establishes the exact third-party attribution text required for this source
-  tree and release artifacts.
+- [x] Dependency inventory completed on 2026-09-22 from the actual build
+  graph (`go list -deps -json ./...`): 46 third-party modules were found.
+  Each had a reviewed root license. The resulting set is Apache-2.0, BSD, or
+  MIT; no copyleft dependency was identified in this source-build inventory.
+- [x] Tracked source, fixtures, generated artifacts, and documentation were
+  reviewed for copied third-party material. No additional attribution-bearing
+  copied asset was identified. Release assets remain subject to the separate
+  release-asset audit below.
+- [x] `NOTICE` records the two upstream Apache notices found in the used
+  dependency graph (`go.yaml.in/yaml/v2` and `go.yaml.in/yaml/v3`).
+- [ ] The repository copyright holder and the copyright notice to apply to
+  project-authored source have not been designated by an authorized owner.
+  This legal-ownership decision is a stop condition for publication; do not
+  infer it from Git commit metadata.
 
 ## Local validation
 
