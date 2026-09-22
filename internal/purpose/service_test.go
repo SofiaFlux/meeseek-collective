@@ -1,0 +1,102 @@
+package purpose
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/SofiaFlux/summa42/internal/domain"
+	"github.com/SofiaFlux/summa42/internal/testutil"
+)
+
+var purposeTestNow = time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+
+type fixedClock struct{ now time.Time }
+
+func (c fixedClock) Now() time.Time { return c.now }
+
+func newPurposeService(t *testing.T) (*Service, context.Context) {
+	t.Helper()
+	store := testutil.OpenStore(t)
+	return New(store, fixedClock{now: purposeTestNow}), context.Background()
+}
+
+func TestTaskPurposeRejectsUnknownReference(t *testing.T) {
+	svc, ctx := newPurposeService(t)
+	err := svc.ValidatePurpose(ctx, domain.PurposeRef{Kind: domain.PurposeMission, ID: "mission_missing"})
+	if !errors.Is(err, domain.ErrInvalidPurpose) {
+		t.Fatalf("got %v, want ErrInvalidPurpose", err)
+	}
+}
+
+func TestCreateMissionEnforcesSingleActiveMission(t *testing.T) {
+	svc, ctx := newPurposeService(t)
+	first, err := svc.CreateMission(ctx, "Build the MVC safely")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" {
+		t.Fatal("mission id is empty")
+	}
+	if _, err := svc.CreateMission(ctx, "Competing active mission"); err == nil {
+		t.Fatal("second active Mission must be rejected")
+	}
+}
+
+func TestGoalTracesToActiveMission(t *testing.T) {
+	svc, ctx := newPurposeService(t)
+	missionID, err := svc.CreateMission(ctx, "Build the MVC safely")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalID, err := svc.CreateGoal(ctx, domain.PurposeRef{Kind: domain.PurposeMission, ID: missionID}, "Implement durable purpose lineage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if goalID == "" {
+		t.Fatal("goal id is empty")
+	}
+	if err := svc.DeactivateMission(ctx, missionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateGoal(ctx, domain.PurposeRef{Kind: domain.PurposeMission, ID: missionID}, "Work under retired Mission"); !errors.Is(err, domain.ErrInvalidPurpose) {
+		t.Fatalf("goal under inactive Mission: got %v, want ErrInvalidPurpose", err)
+	}
+}
+
+func TestObligationSurvivesMissionDeactivation(t *testing.T) {
+	svc, ctx := newPurposeService(t)
+	missionID, err := svc.CreateMission(ctx, "Temporary Mission")
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligationID, err := svc.CreateObligation(ctx, "contract", "Pay already-incurred supplier invoice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeactivateMission(ctx, missionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ValidatePurpose(ctx, domain.PurposeRef{Kind: domain.PurposeObligation, ID: obligationID}); err != nil {
+		t.Fatalf("obligation became invalid after Mission deactivation: %v", err)
+	}
+}
+
+func TestValidatePurposeAcceptsApprovedSystemClassesAndRejectsUnknownKind(t *testing.T) {
+	svc, ctx := newPurposeService(t)
+	for _, kind := range []domain.PurposeKind{
+		domain.PurposeCollectiveMaintenance,
+		domain.PurposeGovernance,
+		domain.PurposeStrategicPulse,
+		domain.PurposeRecovery,
+		domain.PurposeOwnerDirective,
+	} {
+		if err := svc.ValidatePurpose(ctx, domain.PurposeRef{Kind: kind, ID: domain.ID("authority_ref")}); err != nil {
+			t.Fatalf("approved purpose kind %q rejected: %v", kind, err)
+		}
+	}
+	if err := svc.ValidatePurpose(ctx, domain.PurposeRef{Kind: domain.PurposeKind("INVENTED"), ID: "x"}); !errors.Is(err, domain.ErrInvalidPurpose) {
+		t.Fatalf("unknown purpose kind: got %v, want ErrInvalidPurpose", err)
+	}
+}

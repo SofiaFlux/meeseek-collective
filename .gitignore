@@ -1,0 +1,19 @@
+# Go build/test artifacts
+bin/
+coverage.out
+*.test
+
+# Local runtime state
+.meeseek/
+docs/publication-readiness-private.md
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
