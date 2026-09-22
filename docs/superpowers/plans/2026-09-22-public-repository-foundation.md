@@ -34,7 +34,6 @@ graph TD
 - Create: `CONTRIBUTING.md`
 - Create: `SECURITY.md`
 - Create: `SUPPORT.md`
-- Create: `NOTICE`
 - Create: `scripts/verify_docs.py`
 
 - [ ] **Step 1: Rewrite README as an experimental-MVC entry point**
@@ -55,14 +54,14 @@ graph TD
 
 - [ ] **Step 5: Add the local documentation verifier**
 
-  Create `scripts/verify_docs.py` using only the Python standard library. It must accept file paths, reject unmatched fenced-code delimiters and duplicate heading anchors in each Markdown file, extract Markdown links with the pattern `\[[^]]+\]\(([^)]+)\)`, ignore `http`, `https`, `mailto`, and fragment-only targets, and fail if each remaining path (resolved relative to the source file, before an optional `#fragment`) does not exist. For YAML files, inspect `contact_links` and fail unless every entry has non-empty `name`, `about`, and an absolute `https://` URL. Exit zero only when every supplied file passes and print one `valid: <path>` line per file.
+  Create `scripts/verify_docs.py` using only the Python standard library. It must accept file paths, reject unmatched fenced-code delimiters and duplicate heading anchors in each Markdown file, derive GitHub-style lowercase hyphenated anchors from headings, and extract Markdown links with the pattern `\[[^]]+\]\(([^)]+)\)`. Ignore `http`, `https`, and `mailto` links. For every local link, resolve the path relative to the source file (or use the source file for a fragment-only link), fail if that path does not exist, and fail if a `#fragment` is absent from the target Markdown file’s derived anchors. For YAML files, inspect `contact_links` and fail unless every entry has non-empty `name`, `about`, and an absolute `https://` URL. Exit zero only when every supplied file passes and print one `valid: <path>` line per file.
 
 - [ ] **Step 6: Verify root-document links and public claims**
 
   Run:
 
   ```bash
-  rg -n 'TODO|TBD|production-ready|SLA|INSERT CONTACT' README.md CONTRIBUTING.md SECURITY.md SUPPORT.md NOTICE
+  rg -n 'TODO|TBD|production-ready|SLA|INSERT CONTACT' README.md CONTRIBUTING.md SECURITY.md SUPPORT.md
   python3 scripts/verify_docs.py README.md CONTRIBUTING.md SECURITY.md SUPPORT.md
   ```
 
@@ -106,7 +105,7 @@ graph TD
   rg -n -i 'token|password|private key|database|credential' .github/ISSUE_TEMPLATE .github/pull_request_template.md
   ```
 
-  Expected: both YAML files parse; each `contact_links` record has non-empty `name`, `about`, and absolute `url`; each sensitive-data term is part of a prohibition or redaction instruction. After pushing, open both templates in the GitHub chooser; the rendered GitHub UI is the authoritative form-schema validation.
+  Expected: both YAML files parse; each `contact_links` record has non-empty `name`, `about`, and absolute `url`; each sensitive-data term is part of a prohibition or redaction instruction. After merging to the default branch, open the bug form from the repository’s Issue chooser and submit no report; open a draft pull request and verify the pull-request checklist is prefilled. These GitHub UI checks are the authoritative render validation; `config.yml` itself is only chooser configuration.
 
 - [ ] **Step 5: Commit**
 
@@ -121,6 +120,7 @@ graph TD
 
 - Create: `docs/publication-readiness.md`
 - Create: `docs/publication-readiness-private.md` (never commit)
+- Create: `NOTICE`
 - Modify: `.gitignore` only if the audit finds a missing local-artifact pattern
 
 - [ ] **Step 1: Create the dated readiness checklist**
