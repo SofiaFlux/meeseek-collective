@@ -15,7 +15,7 @@ immediately after the public transition.
 
 ## Pre-publication maintainer and community gates
 
-- [ ] Two maintainers have tested access to the designated security mailbox.
+- [ ] The designated sole maintainer has tested access to the security mailbox.
 - [ ] The confidential primary conduct-reporting route has been tested.
 - [ ] The separate confidential conduct-escalation route has been tested.
 - [ ] A security-mailbox receipt and acknowledgment test has been completed.
@@ -24,8 +24,8 @@ immediately after the public transition.
   and tested.
 - [ ] Issue-form and pull-request-template rendering has been verified in the
   GitHub UI after these files reach the default branch.
-- [ ] Branch protection and maintainer access have been reviewed by authorized
-  maintainers.
+- [ ] Branch protection and the sole maintainer's access have been reviewed by
+  the authorized maintainer.
 
 ## Repository and release audit
 
@@ -60,10 +60,8 @@ immediately after the public transition.
   release-asset audit below.
 - [x] `NOTICE` records the two upstream Apache notices found in the used
   dependency graph (`go.yaml.in/yaml/v2` and `go.yaml.in/yaml/v3`).
-- [ ] The repository copyright holder and the copyright notice to apply to
-  project-authored source have not been designated by an authorized owner.
-  This legal-ownership decision is a stop condition for publication; do not
-  infer it from Git commit metadata.
+- [x] The authorized owner designated the copyright notice for
+  project-authored source on 2026-09-22; it is recorded in `COPYRIGHT`.
 
 ## Local validation
 
