@@ -52,11 +52,14 @@ the GitHub API does not expose Private Vulnerability Reporting. The repository
 must remain private until every item below is complete and independently
 checked by a maintainer:
 
-1. Enable GitHub Private Vulnerability Reporting and verify that the Security
-   tab presents a private reporting flow. The SECURITY policy must name this
-   route as the only security-reporting channel. If the feature cannot be
-   enabled, do not make the repository public until a maintainer-owned private
-   email alias with at least two recipients is available and documented.
+1. Before publication, create and verify a maintainer-owned private email
+   alias with at least two recipients. Keep it active as the only documented
+   security-reporting route during the visibility change. After the repository
+   is public, enable GitHub Private Vulnerability Reporting, configure security
+   alert notifications for the designated triagers, and verify that an external
+   user can see its private reporting flow. Keep the email alias active until
+   that verification is complete; only then update SECURITY.md to make Private
+   Vulnerability Reporting the primary route and retain the email as fallback.
 2. Configure a confidential Code of Conduct contact that is distinct from
    Security Advisories, identify its recipients and a conflict-of-interest
    escalation path, and verify it can receive a private report. The public
