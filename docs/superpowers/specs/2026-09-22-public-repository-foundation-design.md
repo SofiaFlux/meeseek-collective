@@ -45,21 +45,16 @@ This change will not add release automation, a roadmap, a governance model,
 telemetry, badges whose status cannot be verified, or an implied support
 commitment. It will not alter runtime behavior or licensing terms.
 
-## Release-Blocking Operational Prerequisites
+## Pre-Publication Operational Blockers
 
 At design time the repository is private, GitHub Discussions are disabled, and
 the GitHub API does not expose Private Vulnerability Reporting. The repository
 must remain private until every item below is complete and independently
 checked by a maintainer:
 
-1. Before publication, create and verify a maintainer-owned private email
-   alias with at least two recipients. Keep it active as the only documented
-   security-reporting route during the visibility change. After the repository
-   is public, enable GitHub Private Vulnerability Reporting, configure security
-   alert notifications for the designated triagers, and verify that an external
-   user can see its private reporting flow. Keep the email alias active until
-   that verification is complete; only then update SECURITY.md to make Private
-   Vulnerability Reporting the primary route and retain the email as fallback.
+1. Create and verify a maintainer-owned private email alias with at least two
+   recipients. Keep it active as the only documented security-reporting route
+   during the visibility change.
 2. Configure a confidential Code of Conduct contact that is distinct from
    Security Advisories, identify its recipients and a conflict-of-interest
    escalation path, and verify it can receive a private report. The public
@@ -71,6 +66,17 @@ checked by a maintainer:
 4. Enable the Issue and pull-request templates and verify their rendered forms
    in GitHub. Public bug reports must not solicit credentials, bearer tokens,
    private keys, local database files, or unredacted evidence.
+
+## Post-Publication Disclosure Transition
+
+Immediately after the repository becomes public, enable GitHub Private
+Vulnerability Reporting, configure security-alert notifications for designated
+triagers, and verify that an external user can see the private reporting flow.
+Keep the private email alias active until this verification completes; only then
+update SECURITY.md to make Private Vulnerability Reporting the primary route
+and retain the email alias as fallback. This transition is mandatory but does
+not block changing visibility because GitHub makes the feature available only
+after the repository is public.
 
 ## Pre-Publication Audit
 
@@ -104,5 +110,6 @@ the default branch is insufficient.
    does not add extra license terms.
 5. Documentation links resolve locally, Markdown is structurally valid, and
    all GitHub templates render correctly.
-6. Public visibility is blocked until the operational prerequisites and
-   pre-publication audit have been completed and recorded.
+6. Public visibility is blocked until the pre-publication operational blockers
+   and audit have been completed and recorded; the mandatory disclosure
+   transition is completed and recorded immediately afterward.
