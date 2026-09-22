@@ -125,7 +125,8 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 		return domain.Task{}, ErrNoMaintenanceBudget
 	}
 
-	if task, found, err := s.logicalEmitTask(ctx, feedbackID); err != nil {
+	logicalKey := emissionLogicalKey(runtime.config.Provider, runtime.config.Destination, artifact.Fingerprint)
+	if task, found, err := s.logicalEmitTask(ctx, logicalKey); err != nil {
 		return domain.Task{}, err
 	} else if found {
 		if err := s.linkEmission(ctx, artifact, task.ID); err != nil {
@@ -138,7 +139,7 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 	task, err := runtime.execution.CreateTask(ctx, execution.TaskRequest{
 		Purpose: domain.PurposeRef{
 			Kind: domain.PurposeCollectiveMaintenance,
-			ID:   feedbackID,
+			ID:   logicalKey,
 		},
 		TaskClass: "collective.feedback.emit",
 		AcceptanceCriteria: []string{
@@ -151,7 +152,7 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 	})
 	if err != nil {
 		// The partial unique index is the concurrency/crash-safe logical idempotency gate.
-		existing, found, loadErr := s.logicalEmitTask(ctx, feedbackID)
+		existing, found, loadErr := s.logicalEmitTask(ctx, logicalKey)
 		if loadErr != nil {
 			return domain.Task{}, loadErr
 		}
@@ -248,6 +249,10 @@ func (s *Feedback) logicalEmitTask(ctx context.Context, feedbackID domain.ID) (d
 	}
 	task, err := s.emission.execution.Task(ctx, taskID)
 	return task, err == nil, err
+}
+
+func emissionLogicalKey(provider, destination, fingerprint string) domain.ID {
+	return domain.ID("feedback:" + strings.TrimSpace(provider) + ":" + strings.TrimSpace(destination) + ":" + strings.TrimSpace(fingerprint))
 }
 
 func (s *Feedback) linkEmission(ctx context.Context, artifact domain.SanitizedFeedback, taskID domain.ID) error {

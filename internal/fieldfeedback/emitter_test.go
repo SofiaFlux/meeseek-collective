@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
@@ -58,7 +59,7 @@ func TestEmitCreatesOneGovernedMaintenanceTask(t *testing.T) {
 	if task.ID != again.ID {
 		t.Fatalf("repeat emit minted tasks %s and %s", task.ID, again.ID)
 	}
-	if task.Purpose.Kind != domain.PurposeCollectiveMaintenance || task.Purpose.ID != artifact.ID {
+	if task.Purpose.Kind != domain.PurposeCollectiveMaintenance || !strings.Contains(string(task.Purpose.ID), artifact.Fingerprint) {
 		t.Fatalf("task purpose = %+v", task.Purpose)
 	}
 	if task.TaskClass != "collective.feedback.emit" {

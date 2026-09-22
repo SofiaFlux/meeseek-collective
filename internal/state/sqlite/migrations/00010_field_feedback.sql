@@ -250,7 +250,7 @@ CREATE TABLE experience_rule_outcomes (
 -- +goose StatementBegin
 CREATE TRIGGER sanitization_results_no_insert_replace
 BEFORE INSERT ON sanitization_results
-WHEN EXISTS (SELECT 1 FROM sanitization_results WHERE result_id = NEW.result_id)
+WHEN EXISTS (SELECT 1 FROM sanitization_results WHERE sanitization_id = NEW.sanitization_id)
 BEGIN
     SELECT RAISE(ABORT, 'sanitization_results are immutable');
 END;

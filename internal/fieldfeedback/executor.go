@@ -62,7 +62,7 @@ func (e *EmitExecutor) Start(ctx context.Context, envelope executors.AttemptEnve
 	op, err := e.operations.Prepare(ctx, operations.PrepareRequest{
 		AttemptID:         envelope.AttemptID,
 		Provider:          e.providerName,
-		TrustedSlotKey:    "feedback:" + string(artifact.ID),
+		TrustedSlotKey:    "feedback:" + e.providerName + ":" + destination + ":" + artifact.Fingerprint,
 		Intent:            intent,
 		Risk:              "LOW",
 		RequiredApprovals: append([]domain.ID(nil), requiredApprovers...),
