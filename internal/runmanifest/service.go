@@ -78,10 +78,10 @@ type Manifest struct {
 	Policy                PolicySnapshot       `json:"policy"`
 	TEB                   TEBSnapshot          `json:"teb"`
 	VisibleCapabilities   []CapabilitySnapshot `json:"visible_capabilities"`
-	InputEvidence         []EvidenceRef         `json:"input_evidence"`
+	InputEvidence         []EvidenceRef        `json:"input_evidence"`
 	ResourceEnvelopeID    domain.ID            `json:"resource_envelope_id"`
 	ContextProjectionHash string               `json:"context_projection_hash,omitempty"`
-	StartedAt             time.Time             `json:"started_at"`
+	StartedAt             time.Time            `json:"started_at"`
 }
 
 type Record struct {
@@ -150,22 +150,22 @@ func (s *Service) RecordAttemptStartInTx(ctx context.Context, tx *sql.Tx, attemp
 	sort.Strings(guarantees)
 
 	manifest := Manifest{
-		Version: manifestVersion,
-		TaskID: task.ID,
-		AttemptID: attempt.ID,
+		Version:         manifestVersion,
+		TaskID:          task.ID,
+		AttemptID:       attempt.ID,
 		FenceGeneration: attempt.FenceGeneration,
-		ExecutorKind: strings.TrimSpace(attempt.ExecutorKind),
-		Runtime: s.static.Build,
-		Policy: s.static.Policy,
+		ExecutorKind:    strings.TrimSpace(attempt.ExecutorKind),
+		Runtime:         s.static.Build,
+		Policy:          s.static.Policy,
 		TEB: TEBSnapshot{
-			Name: s.static.TEBProfile.Name,
-			Level: s.static.TEBProfile.Level,
+			Name:       s.static.TEBProfile.Name,
+			Level:      s.static.TEBProfile.Level,
 			Guarantees: guarantees,
 		},
 		VisibleCapabilities: capabilities,
-		InputEvidence: []EvidenceRef{},
-		ResourceEnvelopeID: task.ResourceEnvelopeID,
-		StartedAt: attempt.StartedAt.UTC(),
+		InputEvidence:       []EvidenceRef{},
+		ResourceEnvelopeID:  task.ResourceEnvelopeID,
+		StartedAt:           attempt.StartedAt.UTC(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
@@ -341,8 +341,8 @@ func loadCapabilitySnapshots(ctx context.Context, tx *sql.Tx, semanticNames []st
 		snapshot := CapabilitySnapshot{SemanticName: semanticName}
 		var (
 			capabilityID, semanticVersion, provider, accessContext, minEnforcement string
-			assessmentID, observedEnforcement, health, assessedAt sql.NullString
-			available sql.NullInt64
+			assessmentID, observedEnforcement, health, assessedAt                  sql.NullString
+			available                                                              sql.NullInt64
 		)
 		err := tx.QueryRowContext(ctx, `
 			SELECT d.capability_id, d.semantic_version, d.provider, d.access_context, d.minimum_enforcement,
@@ -351,7 +351,9 @@ func loadCapabilitySnapshots(ctx context.Context, tx *sql.Tx, semanticNames []st
 			LEFT JOIN capability_assessments a ON a.assessment_id = (
 				SELECT a2.assessment_id
 				FROM capability_assessments a2
-				WHERE a2.capability_id = d.capability_id
+					WHERE a2.capability_id = d.capability_id
+					  AND a2.provider = d.provider
+					  AND a2.access_context = d.access_context
 				ORDER BY a2.assessed_at DESC, a2.rowid DESC
 				LIMIT 1
 			)
@@ -393,9 +395,15 @@ func loadCapabilitySnapshots(ctx context.Context, tx *sql.Tx, semanticNames []st
 
 func validPolicySnapshot(snapshot PolicySnapshot) bool {
 	count := 0
-	if snapshot.PolicySetID != "" { count++ }
-	if snapshot.PolicySetHash != "" { count++ }
-	if snapshot.PolicyCapabilitiesHash != "" { count++ }
+	if snapshot.PolicySetID != "" {
+		count++
+	}
+	if snapshot.PolicySetHash != "" {
+		count++
+	}
+	if snapshot.PolicyCapabilitiesHash != "" {
+		count++
+	}
 	return count == 0 || count == 3
 }
 

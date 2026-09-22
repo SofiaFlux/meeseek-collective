@@ -248,6 +248,14 @@ CREATE TABLE experience_rule_outcomes (
 );
 
 -- +goose StatementBegin
+CREATE TRIGGER sanitization_results_no_insert_replace
+BEFORE INSERT ON sanitization_results
+WHEN EXISTS (SELECT 1 FROM sanitization_results WHERE result_id = NEW.result_id)
+BEGIN
+    SELECT RAISE(ABORT, 'sanitization_results are immutable');
+END;
+-- +goose StatementEnd
+-- +goose StatementBegin
 CREATE TRIGGER sanitization_results_no_update
 BEFORE UPDATE ON sanitization_results
 BEGIN
@@ -263,6 +271,14 @@ END;
 -- +goose StatementEnd
 
 -- +goose StatementBegin
+CREATE TRIGGER sanitized_feedback_no_insert_replace
+BEFORE INSERT ON sanitized_feedback
+WHEN EXISTS (SELECT 1 FROM sanitized_feedback WHERE feedback_id = NEW.feedback_id)
+BEGIN
+    SELECT RAISE(ABORT, 'sanitized_feedback is immutable');
+END;
+-- +goose StatementEnd
+-- +goose StatementBegin
 CREATE TRIGGER sanitized_feedback_no_update
 BEFORE UPDATE ON sanitized_feedback
 BEGIN
@@ -277,6 +293,14 @@ BEGIN
 END;
 -- +goose StatementEnd
 
+-- +goose StatementBegin
+CREATE TRIGGER adaptation_grants_no_insert_replace
+BEFORE INSERT ON adaptation_grants
+WHEN EXISTS (SELECT 1 FROM adaptation_grants WHERE grant_id = NEW.grant_id)
+BEGIN
+    SELECT RAISE(ABORT, 'adaptation_grants are immutable');
+END;
+-- +goose StatementEnd
 -- +goose StatementBegin
 CREATE TRIGGER adaptation_grants_no_update
 BEFORE UPDATE ON adaptation_grants
@@ -295,10 +319,13 @@ END;
 -- +goose Down
 DROP TRIGGER adaptation_grants_no_delete;
 DROP TRIGGER adaptation_grants_no_update;
+DROP TRIGGER adaptation_grants_no_insert_replace;
 DROP TRIGGER sanitized_feedback_no_delete;
 DROP TRIGGER sanitized_feedback_no_update;
+DROP TRIGGER sanitized_feedback_no_insert_replace;
 DROP TRIGGER sanitization_results_no_delete;
 DROP TRIGGER sanitization_results_no_update;
+DROP TRIGGER sanitization_results_no_insert_replace;
 DROP TABLE experience_rule_outcomes;
 DROP INDEX experience_outcomes_dedupe;
 DROP INDEX experience_outcomes_scope_time;
