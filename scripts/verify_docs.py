@@ -57,6 +57,7 @@ def markdown_anchors(path: Path) -> set[str]:
 def local_link_target(source: Path, destination: str) -> tuple[Path, str | None] | None:
     """Return a local target and optional fragment, ignoring external links."""
     destination = destination.strip()
+    destination = re.split(r"\s+(?=[\"'])", destination, maxsplit=1)[0]
     if re.match(r"(?:https?|mailto):", destination, flags=re.IGNORECASE):
         return None
     path_text, separator, fragment = destination.partition("#")
@@ -66,21 +67,32 @@ def local_link_target(source: Path, destination: str) -> tuple[Path, str | None]
 
 def validate_markdown(path: Path) -> None:
     anchors = markdown_anchors(path)
-    text = path.read_text(encoding="utf-8")
-    for destination in LINK_RE.findall(text):
-        resolved = local_link_target(path, destination)
-        if resolved is None:
+    fence: str | None = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            delimiter = fence_match.group(1)
+            if fence is None:
+                fence = delimiter
+            elif delimiter[0] == fence[0] and len(delimiter) >= len(fence) and not fence_match.group(2).strip():
+                fence = None
             continue
-        target, fragment = resolved
-        if not target.exists():
-            raise ValidationError(f"{path}: local link target does not exist: {destination}")
-        if fragment is None:
+        if fence is not None:
             continue
-        if target.suffix.lower() not in {".md", ".markdown"}:
-            raise ValidationError(f"{path}: fragment target is not Markdown: {destination}")
-        target_anchors = anchors if target.resolve() == path.resolve() else markdown_anchors(target)
-        if fragment not in target_anchors:
-            raise ValidationError(f"{path}: missing fragment #{fragment} in {target}")
+        for destination in LINK_RE.findall(line):
+            resolved = local_link_target(path, destination)
+            if resolved is None:
+                continue
+            target, fragment = resolved
+            if not target.exists():
+                raise ValidationError(f"{path}: local link target does not exist: {destination}")
+            if fragment is None:
+                continue
+            if target.suffix.lower() not in {".md", ".markdown"}:
+                raise ValidationError(f"{path}: fragment target is not Markdown: {destination}")
+            target_anchors = anchors if target.resolve() == path.resolve() else markdown_anchors(target)
+            if fragment not in target_anchors:
+                raise ValidationError(f"{path}: missing fragment #{fragment} in {target}")
 
 
 def unquote_yaml(value: str) -> str:
@@ -94,12 +106,16 @@ def contact_links(path: Path) -> list[dict[str, str]]:
     """Extract the simple contact_links mappings used by GitHub issue templates."""
     links: list[dict[str, str]] = []
     in_links = False
+    found_links = False
     current: dict[str, str] | None = None
     links_indent = 0
     for line in path.read_text(encoding="utf-8").splitlines():
         key_match = YAML_KEY_RE.match(line)
-        if key_match and key_match.group(2) == "contact_links":
+        if key_match and not key_match.group(1) and key_match.group(2) == "contact_links":
+            if key_match.group(3):
+                raise ValidationError(f"{path}: contact_links must be a list")
             in_links = True
+            found_links = True
             links_indent = len(key_match.group(1))
             current = None
             continue
@@ -118,10 +134,12 @@ def contact_links(path: Path) -> list[dict[str, str]]:
             if not stripped:
                 continue
         if current is None:
-            continue
+            raise ValidationError(f"{path}: contact_links must be a list")
         entry_match = YAML_KEY_RE.match(stripped)
         if entry_match:
             current[entry_match.group(2)] = unquote_yaml(entry_match.group(3))
+    if not found_links:
+        raise ValidationError(f"{path}: missing top-level contact_links list")
     if in_links and current is not None:
         links.append(current)
     return links

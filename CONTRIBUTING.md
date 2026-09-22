@@ -18,13 +18,25 @@ go build -o ./bin/meeseek-box ./cmd/meeseek-box
 For a local smoke path, initialize a disposable home, start the Box in one terminal, and query it from another:
 
 ```bash
-export MEESEEK_HOME="$(mktemp -d)"
+MEESEEK_HOME="$(mktemp -d)"
+export MEESEEK_HOME
+printf 'Reuse this MEESEEK_HOME in both terminals: %s\n' "$MEESEEK_HOME"
 ./bin/meeseek init
-./bin/meeseek-box
-./bin/meeseek status
 ```
 
-Keep that same `MEESEEK_HOME` value for all three commands in a local run.
+In terminal 1, export the printed path and start the Box:
+
+```bash
+export MEESEEK_HOME=/the/path/printed/above
+./bin/meeseek-box
+```
+
+In terminal 2, export that same path and query the Box:
+
+```bash
+export MEESEEK_HOME=/the/path/printed/above
+./bin/meeseek status
+```
 
 ## Focused changes and tests
 

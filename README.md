@@ -11,31 +11,6 @@ Meeseek Collective is an experimental local-first agent orchestration runtime. T
 
 ## Build and start locally
 
-Build the two local binaries:
-
-```bash
-mkdir -p ./bin
-go build -o ./bin/meeseek ./cmd/meeseek
-go build -o ./bin/meeseek-box ./cmd/meeseek-box
-```
-
-Initialize a local Collective once, start the Box in one terminal, then query it from another:
-
-```bash
-./bin/meeseek init
-./bin/meeseek-box
-./bin/meeseek status
-```
-
-| Command | Purpose |
-| --- | --- |
-| `./bin/meeseek init` | Create the local Collective home and initial state. |
-| `./bin/meeseek-box` | Start the single local Box daemon. |
-| `./bin/meeseek status` | Query the local Box status. |
-| `go test ./... -count=1` | Run the normal Go test suite. |
-
-## Local bootstrap
-
 Build the two binaries explicitly:
 
 ```bash
@@ -51,6 +26,13 @@ Initialize the local Collective once, start the Box in one terminal, then query 
 ./bin/meeseek-box
 ./bin/meeseek status
 ```
+
+| Command | Purpose |
+| --- | --- |
+| `./bin/meeseek init` | Create the local Collective home and initial state. |
+| `./bin/meeseek-box` | Start the single local Box daemon. |
+| `./bin/meeseek status` | Query the local Box status. |
+| `go test ./... -count=1` | Run the normal Go test suite. |
 
 `meeseek init` creates `~/.meeseek` by default, including the local SQLite database, evidence directory, local-development Owner/Cube keys and a `config.json` file with mode `0600`. The config contains a randomly generated 256-bit bearer token used only for the local control transport. Set `MEESEEK_HOME` to select another Collective home. `MEESEEK_CONTROL_ENDPOINT` and `MEESEEK_CONTROL_TOKEN` can override the automatically resolved endpoint/token.
 
