@@ -7,11 +7,13 @@ security findings.
 
 ## Release decision
 
-Do not make the repository public until every required gate below is checked
-by authorized maintainers. An unchecked item is a stop condition, not a
-waiver.
+Do not make the repository public until every **pre-publication** gate below
+is checked by authorized maintainers. An unchecked pre-publication item is a
+stop condition, not a waiver. The mandatory post-publication PVR transition is
+not a precondition for visibility: it must instead be completed and recorded
+immediately after the public transition.
 
-## Maintainer and community gates
+## Pre-publication maintainer and community gates
 
 - [ ] Two maintainers have tested access to the designated security mailbox.
 - [ ] The confidential primary conduct-reporting route has been tested.
@@ -30,8 +32,11 @@ waiver.
 - [x] Local object-integrity command recorded: `git fsck --no-reflogs
   --unreachable` completed successfully on 2026-09-22. Restricted evidence is
   retained outside this public record.
-- [ ] Full reachable-history, fixture, generated-artifact, documentation, and
-  release-asset review remains incomplete. The required scanner run and manual
+- [x] The automated redacted `gitleaks detect` scan completed on 2026-09-22
+  without a reported finding. Its report and other restricted evidence are not
+  published here.
+- [ ] Manual reachable-history, fixture, generated-artifact, documentation,
+  and release-asset review remains incomplete. Manual PII and private-state
   adjudication must be completed and recorded in restricted evidence before
   publication.
 - [x] Tracked-path check recorded: `git ls-files | rg -n
@@ -77,14 +82,15 @@ python3 docs/superpowers/research/spikes/2026-09-14-sqlite-persistence-spike.py
 - [ ] Docker was unavailable in the 2026-09-22 audit environment, so the OCI
   gate remains unchecked.
 
-## Publication-transition gates
+## Mandatory post-publication PVR transition
 
-- [ ] Before any visibility change: authorized maintainers must verify the
-  confidential reporting routes, repository access, templates, and the
-  documented support policy.
+The following actions are mandatory immediately after the public transition.
+They are intentionally separate from pre-publication gates so that the
+checklist does not require a public-only capability before visibility changes.
+
 - [ ] After a public transition: authorized triagers must configure their
-  notification settings, enable and test the platform vulnerability-reporting
-  path, and record acknowledgments in restricted evidence.
+  notification settings, enable and test Private Vulnerability Reporting
+  (PVR), and record acknowledgments in restricted evidence.
 - [ ] Update `SECURITY.md` only after the post-publication reporting-path test
   succeeds; until then, its current transition guidance remains authoritative.
 
