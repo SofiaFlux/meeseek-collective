@@ -4,6 +4,8 @@ coverage.out
 *.test
 
 # Local runtime state
+.meeseek/
+docs/publication-readiness-private.md
 *.db
 *.db-shm
 *.db-wal
