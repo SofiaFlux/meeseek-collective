@@ -147,6 +147,7 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 		AuthorityCeiling:     []string{capability},
 		ResourceEnvelopeID:   runtime.config.MaintenanceEnvelopeID,
 	})
+	reusedLogicalTask := false
 	if err != nil {
 		// The partial unique index is the concurrency/crash-safe logical idempotency gate.
 		existing, found, loadErr := s.logicalEmitTask(ctx, logicalKey)
@@ -157,6 +158,10 @@ func (s *Feedback) RequestEmit(ctx context.Context, feedbackID domain.ID) (domai
 			return domain.Task{}, err
 		}
 		task = existing
+		reusedLogicalTask = true
+	}
+	if reusedLogicalTask {
+		return task, nil
 	}
 	if err := s.linkEmission(ctx, artifact, task.ID); err != nil {
 		return domain.Task{}, err

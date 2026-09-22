@@ -4,7 +4,11 @@
 -- the exact authorization subject and digest binding must never be rewritten.
 -- +goose StatementBegin
 CREATE TRIGGER approval_requests_no_insert_replace
-BEFORE INSERT ON approval_requests WHEN EXISTS (SELECT 1 FROM approval_requests WHERE approval_id = NEW.approval_id)
+BEFORE INSERT ON approval_requests WHEN EXISTS (
+    SELECT 1 FROM approval_requests
+    WHERE approval_id = NEW.approval_id
+       OR (subject_kind = NEW.subject_kind AND subject_id = NEW.subject_id AND request_digest = NEW.request_digest)
+)
 BEGIN SELECT RAISE(ABORT, 'approval requests are durable governance history'); END;
 -- +goose StatementEnd
 -- +goose StatementBegin
@@ -75,7 +79,11 @@ END;
 -- Rule versions and verified outcomes are append-only evidence.
 -- +goose StatementBegin
 CREATE TRIGGER experience_rules_no_insert_replace
-BEFORE INSERT ON experience_rules WHEN EXISTS (SELECT 1 FROM experience_rules WHERE rule_id = NEW.rule_id)
+BEFORE INSERT ON experience_rules WHEN EXISTS (
+    SELECT 1 FROM experience_rules
+    WHERE rule_id = NEW.rule_id
+       OR (proposal_id = NEW.proposal_id AND version = NEW.version)
+)
 BEGIN SELECT RAISE(ABORT, 'experience rules are immutable'); END;
 -- +goose StatementEnd
 -- +goose StatementBegin
@@ -96,7 +104,17 @@ END;
 
 -- +goose StatementBegin
 CREATE TRIGGER experience_outcomes_no_insert_replace
-BEFORE INSERT ON experience_outcomes WHEN EXISTS (SELECT 1 FROM experience_outcomes WHERE outcome_id = NEW.outcome_id)
+BEFORE INSERT ON experience_outcomes WHEN EXISTS (
+    SELECT 1 FROM experience_outcomes
+    WHERE outcome_id = NEW.outcome_id
+       OR (
+           task_id = NEW.task_id
+           AND generic_task_class = NEW.generic_task_class
+           AND scope_key = NEW.scope_key
+           AND executor_kind = NEW.executor_kind
+           AND accepted = NEW.accepted
+       )
+)
 BEGIN SELECT RAISE(ABORT, 'experience outcomes are immutable'); END;
 -- +goose StatementEnd
 -- +goose StatementBegin
@@ -118,10 +136,15 @@ END;
 -- +goose Down
 DROP TRIGGER experience_outcomes_no_delete;
 DROP TRIGGER experience_outcomes_no_update;
+DROP TRIGGER experience_outcomes_no_insert_replace;
 DROP TRIGGER experience_rules_no_delete;
 DROP TRIGGER experience_rules_no_update;
+DROP TRIGGER experience_rules_no_insert_replace;
 DROP TRIGGER experience_proposals_binding_immutable;
+DROP TRIGGER experience_proposals_no_insert_replace;
 DROP TRIGGER approval_decisions_no_delete;
 DROP TRIGGER approval_decisions_no_update;
+DROP TRIGGER approval_decisions_no_insert_replace;
 DROP TRIGGER approval_requests_no_delete;
 DROP TRIGGER approval_requests_binding_immutable;
+DROP TRIGGER approval_requests_no_insert_replace;
