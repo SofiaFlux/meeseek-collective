@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SofiaFlux/meeseek-collective/internal/approvals"
 	"github.com/SofiaFlux/meeseek-collective/internal/clock"
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/execution"
@@ -21,12 +22,13 @@ import (
 )
 
 type PrepareRequest struct {
-	AttemptID      domain.ID
-	Provider       string
-	TrustedSlotKey string
-	Intent         IntentDescriptor
-	Risk           string
-	Attributes     map[string]any
+	AttemptID         domain.ID
+	Provider          string
+	TrustedSlotKey    string
+	Intent            IntentDescriptor
+	Risk              string
+	Attributes        map[string]any
+	RequiredApprovals []domain.ID
 }
 
 type EffectSlot struct {
@@ -49,11 +51,12 @@ type Service struct {
 	execution    *execution.Service
 	policy       policy.PolicyEngine
 	resources    *resources.Service
+	approvals    *approvals.Service
 	collectiveID domain.ID
 	providers    map[string]Provider
 }
 
-func New(store *state.Store, clk clock.Clock, executionSvc *execution.Service, policyEngine policy.PolicyEngine, resourceSvc *resources.Service, collectiveID domain.ID, providers ...Provider) *Service {
+func New(store *state.Store, clk clock.Clock, executionSvc *execution.Service, policyEngine policy.PolicyEngine, resourceSvc *resources.Service, approvalSvc *approvals.Service, collectiveID domain.ID, providers ...Provider) *Service {
 	registry := make(map[string]Provider, len(providers))
 	for _, provider := range providers {
 		if provider != nil && strings.TrimSpace(provider.Name()) != "" {
@@ -62,7 +65,7 @@ func New(store *state.Store, clk clock.Clock, executionSvc *execution.Service, p
 	}
 	return &Service{
 		store: store, clock: clk, execution: executionSvc, policy: policyEngine,
-		resources: resourceSvc, collectiveID: collectiveID, providers: registry,
+		resources: resourceSvc, approvals: approvalSvc, collectiveID: collectiveID, providers: registry,
 	}
 }
 
@@ -74,6 +77,7 @@ func (s *Service) Prepare(ctx context.Context, request PrepareRequest) (domain.E
 	if err != nil {
 		return domain.ExternalOperation{}, err
 	}
+	callerRequired := normalizeApprovalIDs(request.RequiredApprovals)
 	canonical, fingerprint, err := canonicalIntent(provider, request.Intent)
 	if err != nil {
 		return domain.ExternalOperation{}, err
@@ -100,8 +104,15 @@ func (s *Service) Prepare(ctx context.Context, request PrepareRequest) (domain.E
 	if err != nil {
 		return domain.ExternalOperation{}, err
 	}
-	if err := validatePolicyDecision(decision, now); err != nil {
+	if err := validateDecisionProvenance(decision, now); err != nil {
 		return domain.ExternalOperation{}, err
+	}
+	gate, err := evaluatePrepareOutcome(decision)
+	if err != nil {
+		return domain.ExternalOperation{}, err
+	}
+	if (gate.RequiresApproval || len(callerRequired) > 0) && len(requiredApproversFor(decision, callerRequired)) == 0 {
+		return domain.ExternalOperation{}, fmt.Errorf("%w: approval required but no required approver is defined", domain.ErrPolicyDenied)
 	}
 
 	var result domain.ExternalOperation
@@ -120,7 +131,10 @@ func (s *Service) Prepare(ctx context.Context, request PrepareRequest) (domain.E
 		if !hasString(current.AuthorityCeiling, provider.Capability()) || !enforcementSatisfies(provider.EnforcementLevel(), current.RequiredEnforcement) {
 			return domain.ErrPolicyDenied
 		}
-		if err := validatePolicyDecision(decision, now); err != nil {
+		if err := validateDecisionProvenance(decision, now); err != nil {
+			return err
+		}
+		if _, err := evaluatePrepareOutcome(decision); err != nil {
 			return err
 		}
 
@@ -141,8 +155,17 @@ func (s *Service) Prepare(ctx context.Context, request PrepareRequest) (domain.E
 				return nil
 			case domain.OperationPrepared:
 				if latest.AttemptID == request.AttemptID {
-					result = latest
-					return nil
+					matches, matchErr := s.preparedApprovalMatchesInTx(
+						ctx, tx, latest, decision, callerRequired, provider,
+						request.Intent.DescriptorType(), canonical,
+					)
+					if matchErr != nil {
+						return matchErr
+					}
+					if matches {
+						result = latest
+						return nil
+					}
 				}
 				if err := s.resources.ReleaseInTx(ctx, tx, latest.ReservationID); err != nil {
 					return err
@@ -173,24 +196,36 @@ func (s *Service) Prepare(ctx context.Context, request PrepareRequest) (domain.E
 			EffectSlotID: slot.ID, State: domain.OperationPrepared, IntentFingerprint: fingerprint,
 			IntentRevision: slot.IntentRevision, Provider: provider.Name(), ReservationID: reservation.ID, CreatedAt: now,
 		}
+		approvalID, callerJSON, err := s.prepareApprovalInTx(
+			ctx, tx, result, guarded.LeaseExpiresAt, decision, callerRequired,
+			provider, request.Intent.DescriptorType(), canonical,
+		)
+		if err != nil {
+			return err
+		}
+		result.ApprovalID = approvalID
+		var approvalValue any
+		if result.ApprovalID != "" {
+			approvalValue = result.ApprovalID
+		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO external_operations(
 				operation_id, task_id, attempt_id, effect_slot_id, operation_sequence, state,
 				intent_fingerprint, intent_revision, provider, adapter_version, reservation_id, risk,
 				prepare_policy_decision_id, prepare_policy_set_id, prepare_policy_set_hash,
-				prepare_policy_capabilities_hash, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				prepare_policy_capabilities_hash, approval_id, caller_required_approvers_json, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			result.ID, result.TaskID, result.AttemptID, result.EffectSlotID, sequence, result.State,
 			result.IntentFingerprint, result.IntentRevision, result.Provider, provider.AdapterVersion(), result.ReservationID,
 			strings.TrimSpace(request.Risk), decision.ID, decision.PolicySetID, decision.PolicySetHash,
-			decision.PolicyCapabilitiesHash, formatTime(now),
+			decision.PolicyCapabilitiesHash, approvalValue, callerJSON, formatTime(now),
 		)
 		if err != nil {
 			return err
 		}
 		return appendOperationEvent(ctx, tx, result.TaskID, result.AttemptID, "OPERATION_PREPARED", result.ID, now)
 	})
-	return result, err
+	return result, mapPolicyProfileError(err)
 }
 
 // ResolveEffectSlot resolves the durable identity for one trusted semantic effect.
@@ -288,15 +323,16 @@ func (s *Service) Dispatch(ctx context.Context, operationID, attemptID domain.ID
 	}
 	now := s.clock.Now().UTC()
 	authorityValid := hasString(control.AuthorityCeiling, provider.Capability()) && enforcementSatisfies(provider.EnforcementLevel(), control.RequiredEnforcement)
+	descriptorType := controlDescriptorType(ctx, s.store.DB(), op.EffectSlotID)
 	decision, evalErr := s.evaluatePolicy(ctx, policyContext{
 		Now: now, Risk: controlRisk(ctx, s.store.DB(), operationID), AuthorityValid: authorityValid,
 		TaskID: op.TaskID, AttemptID: attemptID, Provider: provider,
-		DescriptorType: controlDescriptorType(ctx, s.store.DB(), op.EffectSlotID), Phase: "DISPATCH",
+		DescriptorType: descriptorType, Phase: "DISPATCH",
 	})
 	if evalErr != nil {
 		return op, evalErr
 	}
-	if err := validatePolicyDecision(decision, now); err != nil || !authorityValid {
+	if err := validateDecisionProvenance(decision, now); err != nil || validateDispatchOutcome(decision) != nil || !authorityValid {
 		if cancelErr := s.cancelPrepared(ctx, op, attemptID); cancelErr != nil {
 			return op, cancelErr
 		}
@@ -324,7 +360,10 @@ func (s *Service) Dispatch(ctx context.Context, operationID, attemptID domain.ID
 		if !hasString(currentControl.AuthorityCeiling, provider.Capability()) || !enforcementSatisfies(provider.EnforcementLevel(), currentControl.RequiredEnforcement) {
 			return domain.ErrPolicyDenied
 		}
-		if err := validatePolicyDecision(decision, now); err != nil {
+		if err := validateDecisionProvenance(decision, now); err != nil {
+			return err
+		}
+		if err := validateDispatchOutcome(decision); err != nil {
 			return err
 		}
 		current, err := loadOperationTx(ctx, tx, operationID)
@@ -339,13 +378,15 @@ func (s *Service) Dispatch(ctx context.Context, operationID, attemptID domain.ID
 		var slotFingerprint string
 		var slotRevision int64
 		var canonical string
+		var callerRequiredJSON string
 		if err := tx.QueryRowContext(ctx, `
-			SELECT o.cancel_requested, r.state, s.intent_fingerprint, s.intent_revision, s.canonical_intent_json
+			SELECT o.cancel_requested, r.state, s.intent_fingerprint, s.intent_revision, s.canonical_intent_json,
+			       o.caller_required_approvers_json
 			FROM external_operations o
 			JOIN resource_reservations r ON r.reservation_id = o.reservation_id
 			JOIN effect_slots s ON s.effect_slot_id = o.effect_slot_id
 			WHERE o.operation_id = ?`, operationID,
-		).Scan(&cancelRequested, &reservationState, &slotFingerprint, &slotRevision, &canonical); err != nil {
+		).Scan(&cancelRequested, &reservationState, &slotFingerprint, &slotRevision, &canonical, &callerRequiredJSON); err != nil {
 			return err
 		}
 		if cancelRequested != 0 || reservationState != domain.ReservationHeld {
@@ -353,6 +394,15 @@ func (s *Service) Dispatch(ctx context.Context, operationID, attemptID domain.ID
 		}
 		if slotFingerprint != current.IntentFingerprint || slotRevision != current.IntentRevision {
 			return domain.ErrIntentConflict
+		}
+		callerRequired, err := decodeApprovalIDs(callerRequiredJSON)
+		if err != nil {
+			return fmt.Errorf("decode caller required approvals: %w", err)
+		}
+		if err := s.validateAndConsumeApprovalInTx(
+			ctx, tx, current, decision, callerRequired, provider, descriptorType, []byte(canonical),
+		); err != nil {
+			return err
 		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE external_operations
@@ -380,7 +430,7 @@ func (s *Service) Dispatch(ctx context.Context, operationID, attemptID domain.ID
 		return appendOperationEvent(ctx, tx, current.TaskID, current.AttemptID, "OPERATION_DISPATCH_COMMITTED", current.ID, now)
 	})
 	if err != nil {
-		return op, err
+		return op, mapPolicyProfileError(err)
 	}
 
 	outcome, dispatchErr := provider.Dispatch(ctx, dispatchRequest)
@@ -649,19 +699,6 @@ func (s *Service) evaluatePolicy(ctx context.Context, pc policyContext) (domain.
 	return decision, nil
 }
 
-func validatePolicyDecision(decision domain.PolicyDecision, now time.Time) error {
-	if decision.ID == "" || decision.PolicySetID == "" || strings.TrimSpace(decision.PolicySetHash) == "" || strings.TrimSpace(decision.PolicyCapabilitiesHash) == "" {
-		return fmt.Errorf("%w: incomplete policy-decision provenance", domain.ErrPolicyDenied)
-	}
-	if decision.EvaluatedAt.IsZero() || !decision.EvaluatedAt.Equal(now) {
-		return fmt.Errorf("%w: stale policy decision", domain.ErrPolicyDenied)
-	}
-	if decision.Outcome != domain.PolicyAllow {
-		return fmt.Errorf("%w: outcome=%s", domain.ErrPolicyDenied, decision.Outcome)
-	}
-	return nil
-}
-
 func canonicalIntent(provider Provider, descriptor IntentDescriptor) ([]byte, string, error) {
 	if descriptor == nil || strings.TrimSpace(descriptor.DescriptorType()) == "" {
 		return nil, "", errors.New("typed intent descriptor is required")
@@ -746,10 +783,11 @@ func loadOperationQuery(ctx context.Context, q operationQuery, operationID domai
 	var providerReference string
 	err := q.QueryRowContext(ctx, `
 		SELECT operation_id, task_id, attempt_id, effect_slot_id, state, intent_fingerprint, intent_revision,
-		       provider, COALESCE(provider_reference, ''), reservation_id, created_at, dispatched_at, settled_at
+		       provider, COALESCE(provider_reference, ''), reservation_id, COALESCE(approval_id, ''),
+		       created_at, dispatched_at, settled_at
 		FROM external_operations WHERE operation_id = ?`, operationID,
 	).Scan(&op.ID, &op.TaskID, &op.AttemptID, &op.EffectSlotID, &op.State, &op.IntentFingerprint, &op.IntentRevision,
-		&op.Provider, &providerReference, &op.ReservationID, &createdAt, &dispatched, &settled)
+		&op.Provider, &providerReference, &op.ReservationID, &op.ApprovalID, &createdAt, &dispatched, &settled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ExternalOperation{}, fmt.Errorf("operation %q not found", operationID)
 	}
@@ -854,7 +892,7 @@ func boolInt(value bool) int {
 func formatTime(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
 
 func (s *Service) configured() error {
-	if s == nil || s.store == nil || s.clock == nil || s.execution == nil || s.policy == nil || s.resources == nil || s.collectiveID == "" {
+	if s == nil || s.store == nil || s.clock == nil || s.execution == nil || s.policy == nil || s.resources == nil || s.approvals == nil || s.collectiveID == "" {
 		return errors.New("operations service is not configured")
 	}
 	return nil

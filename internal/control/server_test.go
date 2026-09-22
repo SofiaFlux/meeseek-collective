@@ -47,15 +47,46 @@ func (f *fakeTaskService) Task(context.Context, domain.ID) (domain.Task, error) 
 }
 
 type fakeApprovalService struct {
-	calls int
-	id    domain.ID
-	actor domain.ID
+	calls       int
+	rejectCalls int
+	id          domain.ID
+	actor       domain.ID
+	digest      string
+	record      domain.ApprovalRequestRecord
 }
 
-func (f *fakeApprovalService) Approve(_ context.Context, id, actor domain.ID) error {
+func (f *fakeApprovalService) Get(_ context.Context, id domain.ID) (domain.ApprovalRequestRecord, error) {
+	record := f.record
+	record.ID = id
+	return record, nil
+}
+
+func (f *fakeApprovalService) Pending(context.Context) ([]domain.ApprovalRequestRecord, error) {
+	if f.record.ID == "" {
+		return nil, nil
+	}
+	return []domain.ApprovalRequestRecord{f.record}, nil
+}
+
+func (f *fakeApprovalService) Approve(_ context.Context, id, actor domain.ID, digest string) error {
 	f.calls++
 	f.id = id
 	f.actor = actor
+	f.digest = digest
+	f.record.ID = id
+	f.record.State = domain.ApprovalApproved
+	f.record.ApproverID = actor
+	return nil
+}
+
+func (f *fakeApprovalService) Reject(_ context.Context, id, actor domain.ID, digest string) error {
+	f.rejectCalls++
+	f.id = id
+	f.actor = actor
+	f.digest = digest
+	f.record.ID = id
+	f.record.State = domain.ApprovalRejected
+	f.record.ApproverID = actor
 	return nil
 }
 
@@ -120,19 +151,19 @@ func TestApprovalRequiresOwnerSignatureOverChallengeAndDigest(t *testing.T) {
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 
-	response := doRequest(t, http.MethodPost, httpServer.URL+"/approvals/approval-1", "control-secret", bytes.NewBufferString(`{}`))
+	response := doRequest(t, http.MethodPost, httpServer.URL+"/approvals/approval-1/approve", "control-secret", bytes.NewBufferString(`{}`))
 	response.Body.Close()
 	if response.StatusCode == http.StatusOK || approvals.calls != 0 {
 		t.Fatalf("authenticated transport acted as Owner: status=%d calls=%d", response.StatusCode, approvals.calls)
 	}
 
-	challengeResponse := doRequest(t, http.MethodGet, httpServer.URL+"/approvals/approval-1/challenge", "control-secret", nil)
+	challengeResponse := doRequest(t, http.MethodGet, httpServer.URL+"/approvals/approval-1/challenge?action=APPROVE", "control-secret", nil)
 	if challengeResponse.StatusCode != http.StatusOK {
 		t.Fatalf("challenge status = %d", challengeResponse.StatusCode)
 	}
 	var challenge ApprovalChallengeDTO
 	decodeJSON(t, challengeResponse, &challenge)
-	if challenge.Challenge == "" || challenge.RequestDigest == "" {
+	if challenge.Challenge == "" || challenge.RequestDigest == "" || challenge.Action != "APPROVE" {
 		t.Fatalf("empty approval challenge: %+v", challenge)
 	}
 
@@ -140,21 +171,21 @@ func TestApprovalRequiresOwnerSignatureOverChallengeAndDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongSignature := base64.StdEncoding.EncodeToString(ed25519.Sign(wrongPrivate, ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest)))
+	wrongSignature := base64.StdEncoding.EncodeToString(ed25519.Sign(wrongPrivate, ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest, "APPROVE")))
 	response = postApproval(t, httpServer.URL, challenge, wrongSignature)
 	response.Body.Close()
 	if response.StatusCode != http.StatusForbidden || approvals.calls != 0 {
 		t.Fatalf("wrong Owner signature status=%d calls=%d", response.StatusCode, approvals.calls)
 	}
 
-	ownerSignature := base64.StdEncoding.EncodeToString(ed25519.Sign(testOwnerPrivateKey(t), ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest)))
+	ownerSignature := base64.StdEncoding.EncodeToString(ed25519.Sign(testOwnerPrivateKey(t), ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest, "APPROVE")))
 	response = postApproval(t, httpServer.URL, challenge, ownerSignature)
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("valid Owner approval status = %d, want 200", response.StatusCode)
 	}
-	if approvals.calls != 1 || approvals.id != "approval-1" || approvals.actor != "owner-test" {
-		t.Fatalf("approval call = calls:%d id:%s actor:%s", approvals.calls, approvals.id, approvals.actor)
+	if approvals.calls != 1 || approvals.id != "approval-1" || approvals.actor != "owner-test" || approvals.digest != challenge.RequestDigest {
+		t.Fatalf("approval call = calls:%d id:%s actor:%s digest:%s", approvals.calls, approvals.id, approvals.actor, approvals.digest)
 	}
 
 	response = postApproval(t, httpServer.URL, challenge, ownerSignature)
@@ -171,6 +202,7 @@ func TestControlRoutesUseCoreServiceInterfaces(t *testing.T) {
 
 	create := CreateTaskRequest{
 		Purpose:             domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: "owner-directive-1"},
+		TaskClass:           "repo.review",
 		AcceptanceCriteria:  []string{"result is verified"},
 		RequiredEnforcement: domain.EnforcementPartial,
 		ResourceEnvelopeID:  "resource-1",
@@ -186,8 +218,8 @@ func TestControlRoutesUseCoreServiceInterfaces(t *testing.T) {
 	}
 	var task TaskDTO
 	decodeJSON(t, response, &task)
-	if task.ID != "task-1" || tasks.created != 1 || tasks.last.Priority != 7 {
-		t.Fatalf("task route did not use task service: dto=%+v calls=%d request=%+v", task, tasks.created, tasks.last)
+	if task.ID != "task-1" || tasks.created != 1 || tasks.last.Priority != 7 || tasks.last.TaskClass != "repo.review" {
+		t.Fatalf("task route did not preserve TaskClass: dto=%+v calls=%d request=%+v", task, tasks.created, tasks.last)
 	}
 
 	response = doRequest(t, http.MethodGet, httpServer.URL+"/tasks/task-1", "control-secret", nil)
@@ -251,7 +283,12 @@ func newTestServer(t *testing.T) (*Server, *fakeStatusProvider, *fakeTaskService
 	ownerPrivate = private
 	status := &fakeStatusProvider{value: StatusDTO{CollectiveID: "collective-test", State: "DORMANT"}}
 	tasks := &fakeTaskService{task: domain.Task{ID: "task-1", State: domain.TaskEligible, Priority: 7}}
-	approvals := &fakeApprovalService{}
+	approvals := &fakeApprovalService{record: domain.ApprovalRequestRecord{
+		ID: "approval-1", SubjectKind: "EXTERNAL_OPERATION", SubjectID: "operation-1",
+		RequestDigest: "durable-digest-1", PolicyDecisionID: "decision-1",
+		RequiredApprovers: []domain.ID{"owner-test"}, RequestedBy: "cube-test",
+		State: domain.ApprovalPending, ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}}
 	attempts := &fakeAttemptReader{attempt: domain.Attempt{ID: "attempt-1", TaskID: "task-1", State: domain.AttemptRunning}}
 	operations := &fakeOperationReader{operation: domain.ExternalOperation{ID: "operation-1", TaskID: "task-1", AttemptID: "attempt-1", State: domain.OperationPrepared}}
 	shutdown := &fakeShutdownService{}
@@ -300,7 +337,7 @@ func postApproval(t *testing.T, baseURL string, challenge ApprovalChallengeDTO, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return doRequest(t, http.MethodPost, baseURL+"/approvals/approval-1", "control-secret", bytes.NewReader(payload))
+	return doRequest(t, http.MethodPost, baseURL+"/approvals/approval-1/approve", "control-secret", bytes.NewReader(payload))
 }
 
 func decodeJSON(t *testing.T, response *http.Response, target any) {
@@ -311,5 +348,76 @@ func decodeJSON(t *testing.T, response *http.Response, target any) {
 	}
 	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
 		t.Fatal(err)
+	}
+}
+
+
+func TestApprovalRejectAndReadRoutesUseDurableDigest(t *testing.T) {
+	server, _, _, approvals, _, _, _ := newTestServer(t)
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	response := doRequest(t, http.MethodGet, httpServer.URL+"/approvals", "control-secret", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /approvals = %d", response.StatusCode)
+	}
+	var pending []ApprovalDTO
+	decodeJSON(t, response, &pending)
+	if len(pending) != 1 || pending[0].RequestDigest != "durable-digest-1" {
+		t.Fatalf("pending approvals = %+v", pending)
+	}
+
+	response = doRequest(t, http.MethodGet, httpServer.URL+"/approvals/approval-1", "control-secret", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET approval = %d", response.StatusCode)
+	}
+	var got ApprovalDTO
+	decodeJSON(t, response, &got)
+	if got.RequestDigest != "durable-digest-1" || got.Status != "PENDING" {
+		t.Fatalf("approval = %+v", got)
+	}
+
+	challengeResponse := doRequest(t, http.MethodGet,
+		httpServer.URL+"/approvals/approval-1/challenge?action=REJECT", "control-secret", nil)
+	if challengeResponse.StatusCode != http.StatusOK {
+		t.Fatalf("reject challenge status = %d", challengeResponse.StatusCode)
+	}
+	var challenge ApprovalChallengeDTO
+	decodeJSON(t, challengeResponse, &challenge)
+	if challenge.Action != "REJECT" || challenge.RequestDigest != "durable-digest-1" {
+		t.Fatalf("reject challenge = %+v", challenge)
+	}
+
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(
+		testOwnerPrivateKey(t),
+		ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest, "REJECT"),
+	))
+	payload, err := json.Marshal(ApprovalRequest{Challenge: challenge.Challenge, Signature: signature})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = doRequest(t, http.MethodPost, httpServer.URL+"/approvals/approval-1/reject",
+		"control-secret", bytes.NewReader(payload))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("reject status = %d", response.StatusCode)
+	}
+	decodeJSON(t, response, &got)
+	if approvals.rejectCalls != 1 || got.Status != "REJECTED" || approvals.digest != "durable-digest-1" {
+		t.Fatalf("reject calls=%d digest=%s dto=%+v", approvals.rejectCalls, approvals.digest, got)
+	}
+}
+
+
+func TestOwnerCannotChallengeApprovalThatDoesNotRequireOwner(t *testing.T) {
+	server, _, _, approvals, _, _, _ := newTestServer(t)
+	approvals.record.RequiredApprovers = []domain.ID{"security-only"}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	response := doRequest(t, http.MethodGet,
+		httpServer.URL+"/approvals/approval-1/challenge?action=APPROVE", "control-secret", nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("challenge status = %d, want 403", response.StatusCode)
 	}
 }

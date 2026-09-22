@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/SofiaFlux/meeseek-collective/internal/localconfig"
 )
 
 type lifecycleControlServer struct {
@@ -74,4 +76,22 @@ func TestServeControlClosesServerWhenContextIsCancelled(t *testing.T) {
 	default:
 		t.Fatal("control server was not closed")
 	}
+}
+
+
+
+func TestBuildFeedbackSinkDoesNotRequireCredentialWhenDisabled(t *testing.T) {
+	t.Setenv("MEESEEK_FEEDBACK_GITHUB_TOKEN_FILE","")
+	cfg:=localconfig.Config{FieldFeedback:localconfig.FieldFeedbackConfig{Enabled:false,Mode:localconfig.FeedbackModeLocalOnly}}
+	sink,err:=buildFeedbackSink(cfg)
+	if err!=nil{t.Fatal(err)}
+	if sink!=nil{t.Fatal("disabled feedback unexpectedly created sink")}
+}
+
+func TestBuildFeedbackSinkFailsClosedWhenGitHubExportEnabledWithoutCredentialFile(t *testing.T) {
+	t.Setenv("MEESEEK_FEEDBACK_GITHUB_TOKEN_FILE","")
+	cfg:=localconfig.Config{FieldFeedback:localconfig.FieldFeedbackConfig{
+		Enabled:true,Mode:localconfig.FeedbackModeAutoIfAllowed,Provider:"github",Destination:"owner/repo",
+	}}
+	if _,err:=buildFeedbackSink(cfg);err==nil{t.Fatal("GitHub export started without credential file")}
 }

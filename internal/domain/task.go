@@ -38,6 +38,7 @@ type Task struct {
 	ID                   ID
 	ParentTaskID         ID
 	Purpose              PurposeRef
+	TaskClass            string
 	State                TaskState
 	CurrentAttemptID     ID
 	CurrentFence         int64

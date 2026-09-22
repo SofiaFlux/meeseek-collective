@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/clock"
@@ -32,6 +33,10 @@ type TaskCandidate struct {
 	DependencyUnlocks int
 }
 
+type ExecutorPreference interface {
+	PreferredExecutor(context.Context, domain.Task, []string) (string, bool, error)
+}
+
 type Service struct {
 	store         *state.Store
 	clock         clock.Clock
@@ -39,12 +44,17 @@ type Service struct {
 	execution     *execution.Service
 	resources     *resources.Service
 	leaseDuration time.Duration
+	preference    ExecutorPreference
 }
 
-func New(store *state.Store, clk clock.Clock, purposes *purpose.Service, executionSvc *execution.Service, resourceSvc *resources.Service, leaseDuration time.Duration) *Service {
+func New(store *state.Store, clk clock.Clock, purposes *purpose.Service, executionSvc *execution.Service, resourceSvc *resources.Service, leaseDuration time.Duration, preferences ...ExecutorPreference) *Service {
+	var preference ExecutorPreference
+	if len(preferences) > 0 {
+		preference = preferences[0]
+	}
 	return &Service{
 		store: store, clock: clk, purpose: purposes, execution: executionSvc,
-		resources: resourceSvc, leaseDuration: leaseDuration,
+		resources: resourceSvc, leaseDuration: leaseDuration, preference: preference,
 	}
 }
 
@@ -95,6 +105,46 @@ func (s *Service) Next(ctx context.Context, capacity CapacitySnapshot) (*TaskCan
 	return &candidates[0], nil
 }
 
+
+func (s *Service) ChooseExecutor(ctx context.Context, task domain.Task, eligibleExecutorKinds []string) (string, error) {
+	if err := s.configured(); err != nil {
+		return "", err
+	}
+	set := make(map[string]struct{}, len(eligibleExecutorKinds))
+	eligible := make([]string, 0, len(eligibleExecutorKinds))
+	for _, kind := range eligibleExecutorKinds {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			continue
+		}
+		if _, exists := set[kind]; exists {
+			continue
+		}
+		set[kind] = struct{}{}
+		eligible = append(eligible, kind)
+	}
+	if len(eligible) == 0 {
+		return "", errors.New("no eligible executor kinds")
+	}
+	sort.Strings(eligible)
+	baseline := eligible[0]
+	if s.preference == nil {
+		return baseline, nil
+	}
+	preferred, found, err := s.preference.PreferredExecutor(ctx, task, append([]string(nil), eligible...))
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return baseline, nil
+	}
+	preferred = strings.TrimSpace(preferred)
+	if _, ok := set[preferred]; !ok {
+		return "", fmt.Errorf("learned preference returned ineligible executor %q", preferred)
+	}
+	return preferred, nil
+}
+
 func (s *Service) Lease(ctx context.Context, taskID domain.ID, executorKind string) (domain.Attempt, error) {
 	if err := s.configured(); err != nil {
 		return domain.Attempt{}, err
@@ -104,7 +154,7 @@ func (s *Service) Lease(ctx context.Context, taskID domain.ID, executorKind stri
 
 func (s *Service) loadEligibleTasks(ctx context.Context) ([]domain.Task, error) {
 	rows, err := s.store.DB().QueryContext(ctx, `
-		SELECT task_id, COALESCE(parent_task_id, ''), purpose_kind, purpose_id, state,
+		SELECT task_id, COALESCE(parent_task_id, ''), purpose_kind, purpose_id, task_class, state,
 		       COALESCE(current_attempt_id, ''), current_fence, acceptance_criteria_json,
 		       required_capabilities_json, required_enforcement, authority_ceiling_json,
 		       resource_envelope_id, priority, earliest_start, deadline, created_at, updated_at
@@ -121,7 +171,7 @@ func (s *Service) loadEligibleTasks(ctx context.Context) ([]domain.Task, error) 
 		var earliest, deadline sql.NullString
 		var createdAt, updatedAt string
 		if err := rows.Scan(
-			&task.ID, &task.ParentTaskID, &task.Purpose.Kind, &task.Purpose.ID, &task.State,
+			&task.ID, &task.ParentTaskID, &task.Purpose.Kind, &task.Purpose.ID, &task.TaskClass, &task.State,
 			&task.CurrentAttemptID, &task.CurrentFence, &acceptanceJSON, &capabilitiesJSON,
 			&task.RequiredEnforcement, &authorityJSON, &task.ResourceEnvelopeID, &task.Priority,
 			&earliest, &deadline, &createdAt, &updatedAt,

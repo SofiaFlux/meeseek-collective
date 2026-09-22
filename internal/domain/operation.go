@@ -13,6 +13,7 @@ type ExternalOperation struct {
 	Provider          string
 	ProviderReference string
 	ReservationID     ID
+	ApprovalID        ID
 	CreatedAt         time.Time
 	DispatchedAt      time.Time
 	SettledAt         time.Time

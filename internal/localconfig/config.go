@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
@@ -16,17 +17,81 @@ import (
 
 const CurrentVersion = 1
 
+type FeedbackMode string
+
+const (
+	FeedbackModeLocalOnly       FeedbackMode = "LOCAL_ONLY"
+	FeedbackModeRequireApproval FeedbackMode = "REQUIRE_APPROVAL"
+	FeedbackModeAutoIfAllowed   FeedbackMode = "AUTO_IF_ALLOWED"
+)
+
+type FieldFeedbackConfig struct {
+	Enabled               bool                    `json:"enabled"`
+	Mode                  FeedbackMode            `json:"mode"`
+	Provider              string                  `json:"provider,omitempty"`
+	Destination           string                  `json:"destination,omitempty"`
+	MaintenanceEnvelopeID domain.ID               `json:"maintenance_envelope_id,omitempty"`
+	DenyPatterns          []string                `json:"deny_patterns,omitempty"`
+	RequiredEnforcement   domain.EnforcementLevel `json:"required_enforcement,omitempty"`
+}
+
+func (c FieldFeedbackConfig) withDefaults() FieldFeedbackConfig {
+	if c.Mode == "" {
+		c.Mode = FeedbackModeLocalOnly
+	}
+	if c.RequiredEnforcement == "" {
+		c.RequiredEnforcement = domain.EnforcementEnforced
+	}
+	return c
+}
+
+func (c FieldFeedbackConfig) Validate() error {
+	c = c.withDefaults()
+	c.Provider = strings.TrimSpace(c.Provider)
+	c.Destination = strings.TrimSpace(c.Destination)
+	switch c.Mode {
+	case FeedbackModeLocalOnly, FeedbackModeRequireApproval, FeedbackModeAutoIfAllowed:
+	default:
+		return fmt.Errorf("invalid field feedback mode %q", c.Mode)
+	}
+	switch c.RequiredEnforcement {
+	case domain.EnforcementEnforced, domain.EnforcementPartial, domain.EnforcementUnenforced:
+	default:
+		return fmt.Errorf("invalid field feedback enforcement %q", c.RequiredEnforcement)
+	}
+	for _, pattern := range c.DenyPatterns {
+		if strings.TrimSpace(pattern) == "" {
+			return errors.New("field feedback deny patterns must not be empty")
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("invalid field feedback deny pattern: %w", err)
+		}
+	}
+	if !c.Enabled || c.Mode == FeedbackModeLocalOnly {
+		return nil
+	}
+	if c.Provider == "" || c.Destination == "" || c.MaintenanceEnvelopeID == "" {
+		return errors.New("exporting field feedback requires provider, destination, and maintenance envelope")
+	}
+	providerToken := regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
+	if !providerToken.MatchString(c.Provider) {
+		return errors.New("field feedback provider must be a lowercase categorical token")
+	}
+	return nil
+}
+
 type Config struct {
-	Version                       int       `json:"version"`
-	CollectiveID                  domain.ID `json:"collective_id"`
-	OwnerPrincipalID              domain.ID `json:"owner_principal_id"`
-	CubePrincipalID               domain.ID `json:"cube_principal_id"`
-	ConstitutionalRootPrincipalID domain.ID `json:"constitutional_root_principal_id"`
-	ConstitutionHash              string    `json:"constitution_hash"`
-	ActivePolicySetID             domain.ID `json:"active_policy_set_id"`
-	DatabasePath                  string    `json:"database_path"`
-	EvidencePath                  string    `json:"evidence_path"`
-	ControlToken                  string    `json:"control_token"`
+	Version                       int                 `json:"version"`
+	CollectiveID                  domain.ID           `json:"collective_id"`
+	OwnerPrincipalID              domain.ID           `json:"owner_principal_id"`
+	CubePrincipalID               domain.ID           `json:"cube_principal_id"`
+	ConstitutionalRootPrincipalID domain.ID           `json:"constitutional_root_principal_id"`
+	ConstitutionHash              string              `json:"constitution_hash"`
+	ActivePolicySetID             domain.ID           `json:"active_policy_set_id"`
+	DatabasePath                  string              `json:"database_path"`
+	EvidencePath                  string              `json:"evidence_path"`
+	ControlToken                  string              `json:"control_token"`
+	FieldFeedback                 FieldFeedbackConfig `json:"field_feedback"`
 }
 
 func ResolveHome(explicit string) (string, error) {
@@ -76,6 +141,7 @@ func Load(home string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("decode local config trailer: %w", err)
 	}
+	cfg.FieldFeedback = cfg.FieldFeedback.withDefaults()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -87,6 +153,7 @@ func Write(home string, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	cfg.FieldFeedback = cfg.FieldFeedback.withDefaults()
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -149,6 +216,9 @@ func (c Config) Validate() error {
 	}
 	if len(strings.TrimSpace(c.ControlToken)) < 32 {
 		return errors.New("local config control token is missing or too short")
+	}
+	if err := c.FieldFeedback.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

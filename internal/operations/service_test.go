@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SofiaFlux/meeseek-collective/internal/approvals"
 	"github.com/SofiaFlux/meeseek-collective/internal/domain"
 	"github.com/SofiaFlux/meeseek-collective/internal/execution"
 	"github.com/SofiaFlux/meeseek-collective/internal/operations"
@@ -18,9 +19,11 @@ import (
 )
 
 type mutablePolicy struct {
-	mu      sync.Mutex
-	outcome domain.PolicyOutcome
-	hash    string
+	mu                sync.Mutex
+	outcome           domain.PolicyOutcome
+	hash              string
+	requiredApprovals []domain.ID
+	limits            map[string]any
 }
 
 func (p *mutablePolicy) Evaluate(_ context.Context, in policy.PolicyInput) (domain.PolicyDecision, error) {
@@ -29,6 +32,8 @@ func (p *mutablePolicy) Evaluate(_ context.Context, in policy.PolicyInput) (doma
 	return domain.PolicyDecision{
 		ID:                     domain.NewID("decision"),
 		Outcome:                p.outcome,
+		RequiredApprovals:      append([]domain.ID(nil), p.requiredApprovals...),
+		Limits:                 cloneAnyMap(p.limits),
 		ReasonCodes:            []string{"test"},
 		PolicySetID:            domain.ID("policy_test"),
 		PolicySetHash:          p.hash,
@@ -39,18 +44,36 @@ func (p *mutablePolicy) Evaluate(_ context.Context, in policy.PolicyInput) (doma
 }
 
 func (p *mutablePolicy) set(outcome domain.PolicyOutcome, hash string) {
+	p.setDecision(outcome, hash, nil, nil)
+}
+
+func (p *mutablePolicy) setDecision(outcome domain.PolicyOutcome, hash string, required []domain.ID, limits map[string]any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.outcome = outcome
 	p.hash = hash
+	p.requiredApprovals = append([]domain.ID(nil), required...)
+	p.limits = cloneAnyMap(limits)
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 type harness struct {
 	ctx      context.Context
 	store    *state.Store
 	exec     *execution.Service
-	ledger   *resources.Service
-	provider *fakeProvider
+	ledger    *resources.Service
+	approvals *approvals.Service
+	provider  *fakeProvider
 	policy   *mutablePolicy
 	svc      *operations.Service
 	taskID   domain.ID
@@ -65,10 +88,11 @@ func newHarness(t *testing.T) *harness {
 	purposes := purpose.New(store, clk)
 	execSvc := execution.New(store, clk, purposes)
 	ledger := resources.New(store, clk)
+	approvalSvc := approvals.New(store, clk)
 	provider := newFakeProvider("fake")
 	pol := &mutablePolicy{outcome: domain.PolicyAllow, hash: "policy-v1"}
 	collectiveID := domain.ID("collective_test")
-	svc := operations.New(store, clk, execSvc, pol, ledger, collectiveID, provider)
+	svc := operations.New(store, clk, execSvc, pol, ledger, approvalSvc, collectiveID, provider)
 
 	taskID := domain.NewID("task")
 	envelopeID := domain.NewID("envelope")
@@ -100,7 +124,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{ctx: ctx, store: store, exec: execSvc, ledger: ledger, provider: provider, policy: pol, svc: svc, taskID: taskID, attempt: attempt}
+	return &harness{ctx: ctx, store: store, exec: execSvc, ledger: ledger, approvals: approvalSvc, provider: provider, policy: pol, svc: svc, taskID: taskID, attempt: attempt}
 }
 
 func setActivePolicyHash(t *testing.T, h *harness, hash string) {
@@ -308,5 +332,171 @@ func TestRepeatedSettlementRejectsConflictingEconomicOutcome(t *testing.T) {
 	}
 	if providerReference == "conflicting-provider-reference" {
 		t.Fatal("provider reference was overwritten by conflicting settlement")
+	}
+}
+
+
+func TestRequireApprovalPreparesButCannotDispatch(t *testing.T) {
+	h := newHarness(t)
+	owner := domain.ID("owner-required")
+	h.policy.setDecision(domain.PolicyRequireApproval, "policy-v1", []domain.ID{owner}, nil)
+
+	op := preparePurchase(t, h, h.attempt.ID, "approval-required", 1)
+	if op.State != domain.OperationPrepared || op.ApprovalID == "" {
+		t.Fatalf("prepared operation = state:%s approval:%s", op.State, op.ApprovalID)
+	}
+
+	got, err := h.svc.Dispatch(h.ctx, op.ID, h.attempt.ID)
+	if !errors.Is(err, domain.ErrPolicyDenied) {
+		t.Fatalf("dispatch without approval error = %v, want policy denied", err)
+	}
+	if got.State != domain.OperationPrepared {
+		t.Fatalf("dispatch without approval state = %s, want PREPARED", got.State)
+	}
+	if count := h.provider.DispatchCount(); count != 0 {
+		t.Fatalf("provider dispatch count = %d, want 0", count)
+	}
+}
+
+func TestCallerRequiredApprovalTightensPolicyAllow(t *testing.T) {
+	h := newHarness(t)
+	owner := domain.ID("owner-tightening")
+
+	op, err := h.svc.Prepare(h.ctx, operations.PrepareRequest{
+		AttemptID: h.attempt.ID, Provider: h.provider.Name(), TrustedSlotKey: "caller-tightening",
+		Intent: testutil.PurchaseIntent{SKU: "sku-1", Quantity: 1}, Risk: "LOW",
+		RequiredApprovals: []domain.ID{owner},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.ApprovalID == "" {
+		t.Fatal("caller-required approval did not create durable approval request")
+	}
+	if _, err := h.svc.Dispatch(h.ctx, op.ID, h.attempt.ID); !errors.Is(err, domain.ErrPolicyDenied) {
+		t.Fatalf("dispatch without caller-required approval = %v", err)
+	}
+	if count := h.provider.DispatchCount(); count != 0 {
+		t.Fatalf("provider dispatch count = %d, want 0", count)
+	}
+}
+
+func TestApprovedExactIntentCanDispatch(t *testing.T) {
+	h := newHarness(t)
+	owner := domain.ID("owner-required")
+	h.policy.setDecision(domain.PolicyRequireApproval, "policy-v1", []domain.ID{owner}, nil)
+
+	op := preparePurchase(t, h, h.attempt.ID, "approved-exact", 1)
+	approval, err := h.approvals.Get(h.ctx, op.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.approvals.Approve(h.ctx, approval.ID, owner, approval.RequestDigest); err != nil {
+		t.Fatal(err)
+	}
+
+	settled, err := h.svc.Dispatch(h.ctx, op.ID, h.attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.State != domain.OperationConfirmedEffect {
+		t.Fatalf("settled state = %s, want CONFIRMED_EFFECT", settled.State)
+	}
+	if count := h.provider.DispatchCount(); count != 1 {
+		t.Fatalf("provider dispatch count = %d, want 1", count)
+	}
+	consumed, err := h.approvals.Get(h.ctx, approval.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed.State != domain.ApprovalConsumed {
+		t.Fatalf("approval state = %s, want CONSUMED", consumed.State)
+	}
+}
+
+func TestPolicyDenyAfterApprovalStillBlocksDispatch(t *testing.T) {
+	h := newHarness(t)
+	owner := domain.ID("owner-required")
+	h.policy.setDecision(domain.PolicyRequireApproval, "policy-v1", []domain.ID{owner}, nil)
+
+	op := preparePurchase(t, h, h.attempt.ID, "approved-then-denied", 1)
+	approval, err := h.approvals.Get(h.ctx, op.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.approvals.Approve(h.ctx, approval.ID, owner, approval.RequestDigest); err != nil {
+		t.Fatal(err)
+	}
+
+	h.policy.set(domain.PolicyDeny, "policy-v2")
+	setActivePolicyHash(t, h, "policy-v2")
+
+	got, err := h.svc.Dispatch(h.ctx, op.ID, h.attempt.ID)
+	if !errors.Is(err, domain.ErrPolicyDenied) {
+		t.Fatalf("dispatch after policy deny = %v", err)
+	}
+	if got.State != domain.OperationCancelled {
+		t.Fatalf("state after policy deny = %s, want CANCELLED", got.State)
+	}
+	if count := h.provider.DispatchCount(); count != 0 {
+		t.Fatalf("provider dispatch count = %d, want 0", count)
+	}
+}
+
+func TestApprovalForDifferentDigestCannotDispatch(t *testing.T) {
+	h := newHarness(t)
+	owner := domain.ID("owner-required")
+	h.policy.setDecision(domain.PolicyRequireApproval, "policy-v1", []domain.ID{owner}, nil)
+
+	op := preparePurchase(t, h, h.attempt.ID, "wrong-digest", 1)
+	exact, err := h.approvals.Get(h.ctx, op.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := h.approvals.Create(h.ctx, approvals.CreateRequest{
+		SubjectKind: "EXTERNAL_OPERATION", SubjectID: op.ID, RequestDigest: "different-digest",
+		PolicyDecisionID: "decision-other", RequiredApprovers: []domain.ID{owner},
+		RequestedBy: h.attempt.ID, ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.approvals.Approve(h.ctx, other.ID, owner, other.RequestDigest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.DB().ExecContext(h.ctx,
+		`UPDATE external_operations SET approval_id = ? WHERE operation_id = ?`, other.ID, op.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := h.svc.Dispatch(h.ctx, op.ID, h.attempt.ID); !errors.Is(err, domain.ErrPolicyDenied) {
+		t.Fatalf("dispatch with different approval digest = %v", err)
+	}
+	if count := h.provider.DispatchCount(); count != 0 {
+		t.Fatalf("provider dispatch count = %d, want 0", count)
+	}
+	stillPending, err := h.approvals.Get(h.ctx, exact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillPending.State != domain.ApprovalPending {
+		t.Fatalf("exact approval state = %s, want PENDING", stillPending.State)
+	}
+}
+
+func TestAllowWithUnknownLimitFailsClosed(t *testing.T) {
+	h := newHarness(t)
+	h.policy.setDecision(domain.PolicyAllowWithLimit, "policy-v1", nil, map[string]any{"requests": 1})
+
+	_, err := h.svc.Prepare(h.ctx, operations.PrepareRequest{
+		AttemptID: h.attempt.ID, Provider: h.provider.Name(), TrustedSlotKey: "limited",
+		Intent: testutil.PurchaseIntent{SKU: "sku-1", Quantity: 1}, Risk: "LOW",
+	})
+	if !errors.Is(err, domain.ErrPolicyDenied) {
+		t.Fatalf("ALLOW_WITH_LIMIT without enforcer = %v, want policy denied", err)
+	}
+	if count := h.provider.DispatchCount(); count != 0 {
+		t.Fatalf("provider dispatch count = %d, want 0", count)
 	}
 }

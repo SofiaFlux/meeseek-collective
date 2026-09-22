@@ -54,6 +54,47 @@ func seedActiveAttempt(t *testing.T, svc *Service, missionID domain.ID) (domain.
 	return task, attempt
 }
 
+
+
+type failingAttemptStartRecorder struct{}
+
+func (failingAttemptStartRecorder) RecordAttemptStartInTx(context.Context, *sql.Tx, domain.Attempt, domain.Task) error {
+	return errors.New("manifest write failed")
+}
+
+func TestStartAttemptRollsBackWhenRunManifestCannotBePersisted(t *testing.T) {
+	svc, _, ctx, missionID := newExecutionService(t)
+	svc.startRecorders = []AttemptStartRecorder{failingAttemptStartRecorder{}}
+	task, err := svc.CreateTask(ctx, baseTaskRequest(missionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.StartAttempt(ctx, task.ID, "test", time.Minute); err == nil {
+		t.Fatal("StartAttempt succeeded despite run manifest failure")
+	}
+	var attempts int
+	if err := svc.store.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM attempts WHERE task_id = ?", task.ID,
+	).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 {
+		t.Fatalf("attempt rows = %d, want 0 after rollback", attempts)
+	}
+	var state domain.TaskState
+	var currentAttempt sql.NullString
+	var fence int64
+	if err := svc.store.DB().QueryRowContext(ctx,
+		"SELECT state, current_attempt_id, current_fence FROM tasks WHERE task_id = ?", task.ID,
+	).Scan(&state, &currentAttempt, &fence); err != nil {
+		t.Fatal(err)
+	}
+	if state != domain.TaskEligible || currentAttempt.Valid || fence != 0 {
+		t.Fatalf("task mutated despite manifest rollback: state=%s current=%v fence=%d", state, currentAttempt, fence)
+	}
+}
+
 func TestGuardRejectsExpiredLeaseEvenWhenFenceMatches(t *testing.T) {
 	svc, fakeClock, ctx, missionID := newExecutionService(t)
 	task, attempt := seedActiveAttempt(t, svc, missionID)

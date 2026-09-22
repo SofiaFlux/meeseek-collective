@@ -1,0 +1,16 @@
+[
+  {"name":"windows_path","marker":"C:\\Users\\alice\\client-x\\repo\\secret.go"},
+  {"name":"unix_path","marker":"/home/alice/client-x/repo/secret.go"},
+  {"name":"github_url","marker":"https://github.com/private-org/private-repo/issues/42"},
+  {"name":"internal_url","marker":"https://build.internal.example.local/job/42"},
+  {"name":"ipv4","marker":"10.24.18.77"},
+  {"name":"internal_hostname","marker":"db01.corp.internal"},
+  {"name":"bearer_token","marker":"Bearer eyJhbGciOiJIUzI1NiJ9.secret.payload"},
+  {"name":"api_key","marker":"api_key=sk-live-super-secret-value"},
+  {"name":"email","marker":"alice@example.corp"},
+  {"name":"ticket_id","marker":"SENS-1234"},
+  {"name":"account_id","marker":"account_id=987654321"},
+  {"name":"diff_marker","marker":"diff --git a/internal/secret.go b/internal/secret.go"},
+  {"name":"code_marker","marker":"func proprietarySecretHandler() {"},
+  {"name":"configured_project_name","marker":"ACME-SECRET"}
+]

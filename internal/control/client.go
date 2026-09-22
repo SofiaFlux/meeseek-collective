@@ -19,7 +19,24 @@ type API interface {
 	Status(context.Context) (StatusDTO, error)
 	CreateTask(context.Context, CreateTaskRequest) (TaskDTO, error)
 	Task(context.Context, domain.ID) (TaskDTO, error)
+	Approvals(context.Context) ([]ApprovalDTO, error)
+	Approval(context.Context, domain.ID) (ApprovalDTO, error)
+	Feedback(context.Context) ([]FeedbackCandidateDTO, error)
+	FeedbackCandidateCreate(context.Context, FeedbackCandidateCreateRequest) (FeedbackCandidateDTO, error)
+	FeedbackSanitize(context.Context, domain.ID) (FeedbackSanitizeDTO, error)
+	FeedbackInspect(context.Context, domain.ID) (FeedbackInspectDTO, error)
+	FeedbackEmit(context.Context, domain.ID) (FeedbackEmitDTO, error)
+	FeedbackObserve(context.Context, FeedbackObserveRequest) (FeedbackObservationDTO, error)
+	FeedbackScan(context.Context) ([]FeedbackObservationDTO, error)
+	ExperienceGrantRequest(context.Context, ExperienceGrantCreateRequest) (ExperienceGrantRequestDTO, error)
+	ExperienceGrantActivate(context.Context, domain.ID) (AdaptationGrantDTO, error)
+	ExperienceProposalCreate(context.Context, ExperienceProposalCreateRequest) (ExperienceProposalDTO, error)
+	ExperienceOutcomeCreate(context.Context, ExperienceOutcomeCreateRequest) (ExperienceOutcomeDTO, error)
+	ExperienceEvaluate(context.Context, domain.ID) (ExperienceRuleDTO, error)
+	ExperienceRules(context.Context) ([]ExperienceRuleDTO, error)
+	ExperienceRule(context.Context, domain.ID) (ExperienceRuleDTO, error)
 	Approve(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
+	Reject(context.Context, domain.ID, identity.Signer) (ApprovalDTO, error)
 	Attempt(context.Context, domain.ID) (AttemptDTO, error)
 	Operation(context.Context, domain.ID) (OperationDTO, error)
 	Shutdown(context.Context) error
@@ -64,21 +81,132 @@ func (c *Client) Task(ctx context.Context, id domain.ID) (TaskDTO, error) {
 	return result, err
 }
 
+func (c *Client) Approvals(ctx context.Context) ([]ApprovalDTO, error) {
+	var result []ApprovalDTO
+	err := c.doJSON(ctx, http.MethodGet, "/approvals", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) Approval(ctx context.Context, id domain.ID) (ApprovalDTO, error) {
+	var result ApprovalDTO
+	err := c.doJSON(ctx, http.MethodGet, "/approvals/"+string(id), nil, &result, http.StatusOK)
+	return result, err
+}
+
+
+func (c *Client) Feedback(ctx context.Context) ([]FeedbackCandidateDTO, error) {
+	var result []FeedbackCandidateDTO
+	err := c.doJSON(ctx, http.MethodGet, "/feedback", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) FeedbackCandidateCreate(ctx context.Context, request FeedbackCandidateCreateRequest) (FeedbackCandidateDTO, error) {
+	var result FeedbackCandidateDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/candidates", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) FeedbackSanitize(ctx context.Context, id domain.ID) (FeedbackSanitizeDTO, error) {
+	var result FeedbackSanitizeDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/"+string(id)+"/sanitize", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) FeedbackInspect(ctx context.Context, id domain.ID) (FeedbackInspectDTO, error) {
+	var result FeedbackInspectDTO
+	err := c.doJSON(ctx, http.MethodGet, "/feedback/"+string(id), nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) FeedbackEmit(ctx context.Context, id domain.ID) (FeedbackEmitDTO, error) {
+	var result FeedbackEmitDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/"+string(id)+"/emit", nil, &result, http.StatusAccepted)
+	return result, err
+}
+
+func (c *Client) FeedbackObserve(ctx context.Context, request FeedbackObserveRequest) (FeedbackObservationDTO, error) {
+	var result FeedbackObservationDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/observations", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) FeedbackScan(ctx context.Context) ([]FeedbackObservationDTO, error) {
+	var result []FeedbackObservationDTO
+	err := c.doJSON(ctx, http.MethodPost, "/feedback/scan", nil, &result, http.StatusOK)
+	return result, err
+}
+
+
+func (c *Client) ExperienceGrantRequest(ctx context.Context, request ExperienceGrantCreateRequest) (ExperienceGrantRequestDTO, error) {
+	var result ExperienceGrantRequestDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/grants/requests", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) ExperienceGrantActivate(ctx context.Context, id domain.ID) (AdaptationGrantDTO, error) {
+	var result AdaptationGrantDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/grants/"+string(id)+"/activate", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) ExperienceProposalCreate(ctx context.Context, request ExperienceProposalCreateRequest) (ExperienceProposalDTO, error) {
+	var result ExperienceProposalDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/proposals", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) ExperienceOutcomeCreate(ctx context.Context, request ExperienceOutcomeCreateRequest) (ExperienceOutcomeDTO, error) {
+	var result ExperienceOutcomeDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/outcomes", request, &result, http.StatusAccepted)
+	return result, err
+}
+
+func (c *Client) ExperienceEvaluate(ctx context.Context, id domain.ID) (ExperienceRuleDTO, error) {
+	var result ExperienceRuleDTO
+	err := c.doJSON(ctx, http.MethodPost, "/experience/proposals/"+string(id)+"/evaluate", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) ExperienceRules(ctx context.Context) ([]ExperienceRuleDTO, error) {
+	var result []ExperienceRuleDTO
+	err := c.doJSON(ctx, http.MethodGet, "/experience", nil, &result, http.StatusOK)
+	return result, err
+}
+
+func (c *Client) ExperienceRule(ctx context.Context, id domain.ID) (ExperienceRuleDTO, error) {
+	var result ExperienceRuleDTO
+	err := c.doJSON(ctx, http.MethodGet, "/experience/"+string(id), nil, &result, http.StatusOK)
+	return result, err
+}
+
 func (c *Client) Approve(ctx context.Context, id domain.ID, signer identity.Signer) (ApprovalDTO, error) {
+	return c.decideApproval(ctx, id, signer, "APPROVE")
+}
+
+func (c *Client) Reject(ctx context.Context, id domain.ID, signer identity.Signer) (ApprovalDTO, error) {
+	return c.decideApproval(ctx, id, signer, "REJECT")
+}
+
+func (c *Client) decideApproval(ctx context.Context, id domain.ID, signer identity.Signer, action string) (ApprovalDTO, error) {
 	if signer == nil {
 		return ApprovalDTO{}, errors.New("Owner signer is required")
 	}
 	var challenge ApprovalChallengeDTO
-	if err := c.doJSON(ctx, http.MethodGet, "/approvals/"+string(id)+"/challenge", nil, &challenge, http.StatusOK); err != nil {
+	path := "/approvals/" + string(id) + "/challenge?action=" + action
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &challenge, http.StatusOK); err != nil {
 		return ApprovalDTO{}, err
 	}
-	signature, err := signer.Sign(ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest))
+	if challenge.Action != action {
+		return ApprovalDTO{}, errors.New("approval challenge action mismatch")
+	}
+	signature, err := signer.Sign(ApprovalSigningMessage(challenge.Challenge, challenge.RequestDigest, challenge.Action))
 	if err != nil {
 		return ApprovalDTO{}, fmt.Errorf("sign approval challenge: %w", err)
 	}
 	request := ApprovalRequest{Challenge: challenge.Challenge, Signature: base64.StdEncoding.EncodeToString(signature)}
 	var result ApprovalDTO
-	err = c.doJSON(ctx, http.MethodPost, "/approvals/"+string(id), request, &result, http.StatusOK)
+	endpoint := "/approvals/" + string(id) + "/" + strings.ToLower(action)
+	err = c.doJSON(ctx, http.MethodPost, endpoint, request, &result, http.StatusOK)
 	return result, err
 }
 

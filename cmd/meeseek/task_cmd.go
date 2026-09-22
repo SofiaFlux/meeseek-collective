@@ -18,6 +18,7 @@ func newTaskCommand(api control.API, jsonOutput *bool) *cobra.Command {
 func newTaskCreateCommand(api control.API, jsonOutput *bool) *cobra.Command {
 	var purposeKind string
 	var purposeID string
+	var taskClass string
 	var acceptance []string
 	var capabilities []string
 	var authority []string
@@ -32,6 +33,7 @@ func newTaskCreateCommand(api control.API, jsonOutput *bool) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			request := control.CreateTaskRequest{
 				Purpose:              domain.PurposeRef{Kind: domain.PurposeKind(purposeKind), ID: domain.ID(purposeID)},
+				TaskClass:            taskClass,
 				AcceptanceCriteria:   append([]string(nil), acceptance...),
 				RequiredCapabilities: append([]string(nil), capabilities...),
 				RequiredEnforcement:  domain.EnforcementLevel(enforcement),
@@ -52,6 +54,7 @@ func newTaskCreateCommand(api control.API, jsonOutput *bool) *cobra.Command {
 	}
 	command.Flags().StringVar(&purposeKind, "purpose-kind", "", "purpose kind")
 	command.Flags().StringVar(&purposeID, "purpose-id", "", "purpose id")
+	command.Flags().StringVar(&taskClass, "task-class", "", "local TaskClass used for scoped scheduling/experience")
 	command.Flags().StringSliceVar(&acceptance, "acceptance", nil, "acceptance criterion (repeat or comma-separate)")
 	command.Flags().StringSliceVar(&capabilities, "capability", nil, "required capability")
 	command.Flags().StringSliceVar(&authority, "authority", nil, "authority ceiling capability")
