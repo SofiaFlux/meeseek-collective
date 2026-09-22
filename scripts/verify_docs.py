@@ -6,10 +6,10 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 
-FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^]]+\]\(([^)]+)\)")
 YAML_KEY_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$")
@@ -37,7 +37,7 @@ def markdown_anchors(path: Path) -> set[str]:
             delimiter = fence_match.group(1)
             if fence is None:
                 fence = delimiter
-            elif delimiter[0] == fence[0] and len(delimiter) >= len(fence):
+            elif delimiter == fence and not fence_match.group(2).strip():
                 fence = None
             continue
         if fence is not None:
@@ -132,7 +132,8 @@ def validate_yaml(path: Path) -> None:
         for field in ("name", "about"):
             if not link.get(field, "").strip():
                 raise ValidationError(f"{path}: contact_links entry {index} has empty {field}")
-        if not re.match(r"https://", link.get("url", "")):
+        parsed_url = urlparse(link.get("url", ""))
+        if parsed_url.scheme != "https" or not parsed_url.netloc:
             raise ValidationError(f"{path}: contact_links entry {index} needs an absolute https:// URL")
 
 
