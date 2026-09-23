@@ -69,6 +69,8 @@ type EvidenceRef struct {
 type Manifest struct {
 	Version               int                  `json:"version"`
 	TaskID                domain.ID            `json:"task_id"`
+	TaskObjective         string               `json:"task_objective"`
+	TaskPayloadHash       string               `json:"task_payload_hash"`
 	AttemptID             domain.ID            `json:"attempt_id"`
 	FenceGeneration       int64                `json:"fence_generation"`
 	ExecutorKind          string               `json:"executor_kind"`
@@ -148,10 +150,13 @@ func (s *Service) RecordAttemptStartInTx(ctx context.Context, tx *sql.Tx, attemp
 		}
 	}
 	sort.Strings(guarantees)
+	payloadDigest := sha256.Sum256(task.PayloadJSON)
 
 	manifest := Manifest{
 		Version:         manifestVersion,
 		TaskID:          task.ID,
+		TaskObjective:   task.Objective,
+		TaskPayloadHash: hex.EncodeToString(payloadDigest[:]),
 		AttemptID:       attempt.ID,
 		FenceGeneration: attempt.FenceGeneration,
 		ExecutorKind:    strings.TrimSpace(attempt.ExecutorKind),

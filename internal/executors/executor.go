@@ -2,6 +2,7 @@ package executors
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/SofiaFlux/summa42/internal/domain"
@@ -15,6 +16,7 @@ type AttemptEnvelope struct {
 	TaskID              domain.ID
 	AttemptID           domain.ID
 	Objective           string
+	PayloadJSON         json.RawMessage
 	AcceptanceCriteria  []string
 	Workspace           string
 	VisibleCapabilities []string
