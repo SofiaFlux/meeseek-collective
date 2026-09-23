@@ -73,6 +73,7 @@ func TestDecideRejectsInvalidAssessments(t *testing.T) {
 		{name: "ready with next work", assessment: Assessment{Verdict: Ready, EvidenceIDs: []string{"evidence-1"}, Next: &WorkProposal{Kind: "extra"}}},
 		{name: "continue without next work", assessment: Assessment{Verdict: Continue, EvidenceIDs: []string{"evidence-1"}}},
 		{name: "continue without kind", assessment: Assessment{Verdict: Continue, EvidenceIDs: []string{"evidence-1"}, Next: &WorkProposal{}}},
+		{name: "continue with blank kind", assessment: Assessment{Verdict: Continue, EvidenceIDs: []string{"evidence-1"}, Next: &WorkProposal{Kind: " \t "}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

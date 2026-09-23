@@ -80,7 +80,7 @@ func Decide(input Input) (Decision, error) {
 	case Unknown:
 		return Decision{Outcome: OutcomeBlocked, Reason: assessment.Reason}, nil
 	case Continue:
-		if assessment.Next == nil || assessment.Next.Kind == "" {
+		if assessment.Next == nil || strings.TrimSpace(assessment.Next.Kind) == "" {
 			return Decision{}, fmt.Errorf("continue assessment must include a next work kind")
 		}
 		if !isSubset(assessment.Next.AuthorityCeiling, input.Grant.Capabilities) {
