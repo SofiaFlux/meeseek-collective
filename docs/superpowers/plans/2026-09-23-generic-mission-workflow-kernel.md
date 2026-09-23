@@ -69,7 +69,7 @@ type Decision struct { Outcome Outcome; Reason string; Next *WorkProposal }
 func Decide(Input) (Decision, error)
 ```
 
-   `Decide` rejects missing evidence, invalid verdicts and a `Ready` assessment carrying a next-work proposal. `Unknown` always returns `OutcomeBlocked` with its reason. `Ready` returns `OutcomeReady` only after the evidence check. `Continue` requires a nonempty next-work kind and uses the safety checks from Task 2 before returning `OutcomeContinue`. Return a defensive copy of the proposal slices so callers cannot mutate an accepted decision after validation.
+   `Decide` rejects missing evidence, invalid verdicts and a `Ready` assessment carrying a next-work proposal. `Unknown` always returns `OutcomeBlocked` with its reason. `Ready` returns `OutcomeReady` only after the evidence check. In this first commit, `Continue` requires a nonempty next-work kind; Task 2 adds the mandatory authority, budget and progress checks before this package may be integrated with any runner. Return a defensive copy of the proposal slices so callers cannot mutate an accepted decision after validation.
 
 - [ ] **Step 4: Run the green test.** Same `go test` command; expect PASS.
 - [ ] **Step 5: Commit.** `git add internal/workflow/decision.go internal/workflow/decision_test.go && git commit -m "feat: add generic workflow decision contract"`.
