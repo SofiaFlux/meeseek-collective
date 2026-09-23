@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/SofiaFlux/summa42/internal/adomcp"
+	"github.com/SofiaFlux/summa42/internal/capabilities"
 	"github.com/SofiaFlux/summa42/internal/control"
 	"github.com/SofiaFlux/summa42/internal/domain"
 	"github.com/SofiaFlux/summa42/internal/feedbackgithub"
@@ -120,20 +122,32 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	adoProvider, err := buildADOProviderFromEnv()
+	if err != nil {
+		return err
+	}
+	var capabilityProviders []capabilities.Provider
+	if adoProvider != nil {
+		capabilityProviders = append(capabilityProviders, adoProvider)
+	}
 
 	box, err := summa42runtime.Open(ctx, summa42runtime.Config{
-		StatePath:        cfg.DatabasePath,
-		EvidencePath:     cfg.EvidencePath,
-		CollectiveID:     cfg.CollectiveID,
-		OwnerPrincipalID: cfg.OwnerPrincipalID,
-		FieldFeedback:    cfg.FieldFeedback,
-		FeedbackSink:     feedbackSink,
-		PolicyEngine:     material.policyEngine,
+		StatePath:           cfg.DatabasePath,
+		EvidencePath:        cfg.EvidencePath,
+		CollectiveID:        cfg.CollectiveID,
+		OwnerPrincipalID:    cfg.OwnerPrincipalID,
+		FieldFeedback:       cfg.FieldFeedback,
+		FeedbackSink:        feedbackSink,
+		PolicyEngine:        material.policyEngine,
+		CapabilityProviders: capabilityProviders,
 	})
 	if err != nil {
 		return fmt.Errorf("open Box runtime: %w", err)
 	}
 	defer box.Close()
+	if err := assessConfiguredProviders(ctx, box.Capabilities, adoProvider); err != nil {
+		return fmt.Errorf("assess configured ADO capability provider: %w", err)
+	}
 
 	server, err := control.NewServer(control.ServerConfig{
 		AuthToken:        cfg.ControlToken,
@@ -173,6 +187,33 @@ func run(ctx context.Context) error {
 		}
 	}()
 	return serveControl(serveCtx, listener, server)
+}
+
+func buildADOProviderFromEnv() (*adomcp.Provider, error) {
+	command := strings.TrimSpace(os.Getenv("SUMMA42_ADO_MCP_COMMAND"))
+	organization := strings.TrimSpace(os.Getenv("SUMMA42_ADO_ORGANIZATION"))
+	if command == "" && organization == "" {
+		return nil, nil
+	}
+	if command == "" || organization == "" {
+		return nil, errors.New("ADO MCP requires both SUMMA42_ADO_MCP_COMMAND and SUMMA42_ADO_ORGANIZATION")
+	}
+	return adomcp.New(adomcp.Config{Command: command, Organization: organization})
+}
+
+type capabilityAssessor interface {
+	AssessProvider(context.Context, string) ([]capabilities.Assessment, error)
+}
+
+func assessConfiguredProviders(ctx context.Context, assessor capabilityAssessor, provider *adomcp.Provider) error {
+	if provider == nil {
+		return nil
+	}
+	if assessor == nil {
+		return errors.New("capability assessor is required")
+	}
+	_, err := assessor.AssessProvider(ctx, provider.Name())
+	return err
 }
 
 func buildFeedbackSink(cfg localconfig.Config) (fieldfeedback.Sink, error) {

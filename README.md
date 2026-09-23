@@ -46,6 +46,14 @@ Initialize the local Collective once, start the Box in one terminal, then query 
 
 The Box never loads the Owner private key during normal startup. The CLI uses it only for explicit Owner actions such as approvals and Mission creation. Only one Mission can be active; replacing or adjusting one is not yet exposed by the MVC CLI.
 
+### Optional Azure DevOps MCP reads
+
+The Box has **no ambient Copilot or MCP discovery**. To enable its narrowly scoped Azure DevOps read provider, install and authenticate Microsoft's local Azure DevOps MCP server separately, then set both `SUMMA42_ADO_MCP_COMMAND` (path to an executable that starts that server with the organization as its sole argument) and `SUMMA42_ADO_ORGANIZATION` before starting `summa42-box`. A small wrapper executable can be used if the installation needs fixed flags. Do not put credentials in the repository or `config.json`.
+
+At startup, the Box checks the configured server for `core_list_projects` and `wit_work_item` and records durable capability assessments. It exposes only `ado.projects.list` and `ado.work_item.read`; the latter accepts only documented read actions (`get`, `get_batch`, `list_comments`, `my`, `list_revisions`, `list_for_iteration`, `get_type`). A Task that needs one must declare that semantic name in both `RequiredCapabilities` and `AuthorityCeiling`, with a compatible enforcement level. A discovered server tool never grants Task authority by itself. This local-process integration is rated `PARTIAL`, not `ENFORCED`.
+
+This is a **capability primitive**, not automatic Mission execution: the current Box still does not start a scheduler/executor worker or hand an MCP session to Codex. A Task declaration alone will not call ADO. External writes remain outside this provider and must use the protected External Operation path.
+
 ## What is authoritative
 
 SQLite is the sole MVC source of truth and must live on a **local filesystem**. It runs in WAL mode with `synchronous=FULL`, foreign keys enabled and a busy timeout. The database is not supported on NFS/SMB or as shared multi-Cube state.

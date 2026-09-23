@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SofiaFlux/summa42/internal/adomcp"
+	"github.com/SofiaFlux/summa42/internal/capabilities"
 	"github.com/SofiaFlux/summa42/internal/localconfig"
 )
 
@@ -78,20 +80,67 @@ func TestServeControlClosesServerWhenContextIsCancelled(t *testing.T) {
 	}
 }
 
-
-
 func TestBuildFeedbackSinkDoesNotRequireCredentialWhenDisabled(t *testing.T) {
-	t.Setenv("SUMMA42_FEEDBACK_GITHUB_TOKEN_FILE","")
-	cfg:=localconfig.Config{FieldFeedback:localconfig.FieldFeedbackConfig{Enabled:false,Mode:localconfig.FeedbackModeLocalOnly}}
-	sink,err:=buildFeedbackSink(cfg)
-	if err!=nil{t.Fatal(err)}
-	if sink!=nil{t.Fatal("disabled feedback unexpectedly created sink")}
+	t.Setenv("SUMMA42_FEEDBACK_GITHUB_TOKEN_FILE", "")
+	cfg := localconfig.Config{FieldFeedback: localconfig.FieldFeedbackConfig{Enabled: false, Mode: localconfig.FeedbackModeLocalOnly}}
+	sink, err := buildFeedbackSink(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sink != nil {
+		t.Fatal("disabled feedback unexpectedly created sink")
+	}
 }
 
 func TestBuildFeedbackSinkFailsClosedWhenGitHubExportEnabledWithoutCredentialFile(t *testing.T) {
-	t.Setenv("SUMMA42_FEEDBACK_GITHUB_TOKEN_FILE","")
-	cfg:=localconfig.Config{FieldFeedback:localconfig.FieldFeedbackConfig{
-		Enabled:true,Mode:localconfig.FeedbackModeAutoIfAllowed,Provider:"github",Destination:"owner/repo",
+	t.Setenv("SUMMA42_FEEDBACK_GITHUB_TOKEN_FILE", "")
+	cfg := localconfig.Config{FieldFeedback: localconfig.FieldFeedbackConfig{
+		Enabled: true, Mode: localconfig.FeedbackModeAutoIfAllowed, Provider: "github", Destination: "owner/repo",
 	}}
-	if _,err:=buildFeedbackSink(cfg);err==nil{t.Fatal("GitHub export started without credential file")}
+	if _, err := buildFeedbackSink(cfg); err == nil {
+		t.Fatal("GitHub export started without credential file")
+	}
+}
+
+func TestBuildADOProviderIsOptInAndRequiresCompleteConfig(t *testing.T) {
+	t.Setenv("SUMMA42_ADO_MCP_COMMAND", "")
+	t.Setenv("SUMMA42_ADO_ORGANIZATION", "")
+	provider, err := buildADOProviderFromEnv()
+	if err != nil || provider != nil {
+		t.Fatalf("disabled ADO provider = %v, %v", provider, err)
+	}
+	t.Setenv("SUMMA42_ADO_MCP_COMMAND", "npx")
+	if _, err := buildADOProviderFromEnv(); err == nil {
+		t.Fatal("accepted missing ADO organization")
+	}
+	t.Setenv("SUMMA42_ADO_ORGANIZATION", "Contoso")
+	provider, err = buildADOProviderFromEnv()
+	if err != nil || provider == nil || provider.Name() != "ado-mcp" {
+		t.Fatalf("configured ADO provider = %v, %v", provider, err)
+	}
+}
+
+type fakeCapabilityAssessor struct{ names []string }
+
+func (a *fakeCapabilityAssessor) AssessProvider(_ context.Context, name string) ([]capabilities.Assessment, error) {
+	a.names = append(a.names, name)
+	return nil, nil
+}
+
+func TestAssessConfiguredProviders(t *testing.T) {
+	provider, err := adomcp.New(adomcp.Config{Command: "npx", Organization: "Contoso"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessor := &fakeCapabilityAssessor{}
+	if err := assessConfiguredProviders(t.Context(), assessor, provider); err != nil {
+		t.Fatal(err)
+	}
+	if len(assessor.names) != 1 || assessor.names[0] != "ado-mcp" {
+		t.Fatalf("assessed providers: %v", assessor.names)
+	}
+	assessor.names = nil
+	if err := assessConfiguredProviders(t.Context(), assessor, nil); err != nil || len(assessor.names) != 0 {
+		t.Fatalf("assessed disabled provider: %v, %v", assessor.names, err)
+	}
 }
