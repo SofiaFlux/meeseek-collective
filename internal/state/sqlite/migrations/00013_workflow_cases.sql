@@ -22,6 +22,20 @@ CREATE TABLE workflow_cases (
 
 CREATE INDEX workflow_cases_state_updated_at ON workflow_cases(state, updated_at);
 
+CREATE TABLE workflow_assessments (
+    assessment_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL REFERENCES workflow_cases(case_id),
+    work_id TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (case_id, work_id)
+);
+
+CREATE INDEX workflow_assessments_case_created_at ON workflow_assessments(case_id, created_at);
+
 -- +goose Down
+DROP INDEX workflow_assessments_case_created_at;
+DROP TABLE workflow_assessments;
 DROP INDEX workflow_cases_state_updated_at;
 DROP TABLE workflow_cases;
