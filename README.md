@@ -2,6 +2,10 @@
 
 Summa42 is an experimental local-first agent orchestration runtime. The current **Minimal Viable Collective (MVC)** is intentionally one Cube: one trusted Box daemon owns canonical state, policy, authority checks, scheduling semantics, external-operation commit boundaries, verification, memory, audit and resource accounting.
 
+Read [the Vision](docs/VISION.md) for the durable Collective this MVC is meant
+to validate, and the [design specification](docs/superpowers/specs/2026-09-14-summa42-design.md)
+for the detailed technical model.
+
 > **Experimental status:** Summa42 is local-first, single-Cube software under active development. It is not production-ready and must not be used for unmanaged consequential workloads. Run it only where you can review its authority, policy, evidence, and containment boundaries.
 
 ## Prerequisites
