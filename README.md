@@ -77,6 +77,8 @@ Every execution path must describe what it can actually enforce:
 
 The native local Box defaults to `UNENFORCED` containment. The Codex adapter defaults to `PARTIAL` and may advertise `ENFORCED` only when its model-egress assessment proves the required mediated egress guarantees.
 
+The CONNECT egress proxy accepts exact allowlisted hosts. For DNS names it checks every returned address against non-public ranges, then dials a validated IP directly so DNS cannot change the target between the check and connection. A trusted private endpoint must be allowlisted by its exact IP literal.
+
 ## Attempt run provenance
 
 Every Attempt leased through the Box runtime gets one immutable, hash-bound Run Manifest in the same SQLite transaction that creates the lease. The manifest is descriptive only: copying it does not recreate authority, extend a lease, mint a capability session or change canonical Task/Attempt state.

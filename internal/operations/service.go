@@ -323,9 +323,16 @@ func (s *Service) Dispatch(ctx context.Context, operationID, attemptID domain.ID
 	}
 	now := s.clock.Now().UTC()
 	authorityValid := hasString(control.AuthorityCeiling, provider.Capability()) && enforcementSatisfies(provider.EnforcementLevel(), control.RequiredEnforcement)
-	descriptorType := controlDescriptorType(ctx, s.store.DB(), op.EffectSlotID)
+	descriptorType, err := controlDescriptorType(ctx, s.store.DB(), op.EffectSlotID)
+	if err != nil {
+		return op, err
+	}
+	risk, err := controlRisk(ctx, s.store.DB(), operationID)
+	if err != nil {
+		return op, err
+	}
 	decision, evalErr := s.evaluatePolicy(ctx, policyContext{
-		Now: now, Risk: controlRisk(ctx, s.store.DB(), operationID), AuthorityValid: authorityValid,
+		Now: now, Risk: risk, AuthorityValid: authorityValid,
 		TaskID: op.TaskID, AttemptID: attemptID, Provider: provider,
 		DescriptorType: descriptorType, Phase: "DISPATCH",
 	})
@@ -844,16 +851,20 @@ func appendOperationEvent(ctx context.Context, tx *sql.Tx, taskID, attemptID dom
 	return err
 }
 
-func controlRisk(ctx context.Context, q operationQuery, operationID domain.ID) string {
+func controlRisk(ctx context.Context, q operationQuery, operationID domain.ID) (string, error) {
 	var risk string
-	_ = q.QueryRowContext(ctx, `SELECT risk FROM external_operations WHERE operation_id = ?`, operationID).Scan(&risk)
-	return risk
+	if err := q.QueryRowContext(ctx, `SELECT risk FROM external_operations WHERE operation_id = ?`, operationID).Scan(&risk); err != nil {
+		return "", fmt.Errorf("load operation risk for %q: %w", operationID, err)
+	}
+	return risk, nil
 }
 
-func controlDescriptorType(ctx context.Context, q operationQuery, slotID domain.ID) string {
+func controlDescriptorType(ctx context.Context, q operationQuery, slotID domain.ID) (string, error) {
 	var descriptorType string
-	_ = q.QueryRowContext(ctx, `SELECT descriptor_type FROM effect_slots WHERE effect_slot_id = ?`, slotID).Scan(&descriptorType)
-	return descriptorType
+	if err := q.QueryRowContext(ctx, `SELECT descriptor_type FROM effect_slots WHERE effect_slot_id = ?`, slotID).Scan(&descriptorType); err != nil {
+		return "", fmt.Errorf("load descriptor type for effect slot %q: %w", slotID, err)
+	}
+	return descriptorType, nil
 }
 
 func hasString(values []string, target string) bool {

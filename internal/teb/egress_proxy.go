@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,70 @@ import (
 
 type EgressPolicy struct {
 	AllowedHosts map[string]struct{}
+}
+
+var errEgressDenied = errors.New("target not allowed")
+
+var nonPublicRanges = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+}
+
+func publicEgressIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if !ip.IsValid() || ip.Zone() != "" || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	if ip.Is6() && !netip.MustParsePrefix("2000::/3").Contains(ip) {
+		return false
+	}
+	for _, blocked := range nonPublicRanges {
+		if blocked.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+type lookupIPs func(context.Context, string) ([]netip.Addr, error)
+type dialTarget func(context.Context, string, string) (net.Conn, error)
+
+func dialAllowedTarget(ctx context.Context, policy EgressPolicy, target string, lookup lookupIPs, dial dialTarget) (net.Conn, error) {
+	if !policy.AllowConnect(target) {
+		return nil, errEgressDenied
+	}
+	host, port, _ := net.SplitHostPort(target)
+	if literal, err := netip.ParseAddr(host); err == nil {
+		if literal.Zone() != "" {
+			return nil, errEgressDenied
+		}
+		return dial(ctx, "tcp", net.JoinHostPort(literal.Unmap().String(), port))
+	}
+	ips, err := lookup(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, errors.New("DNS returned no IP addresses")
+	}
+	for _, ip := range ips {
+		if !publicEgressIP(ip) {
+			return nil, errEgressDenied
+		}
+	}
+	return dial(ctx, "tcp", net.JoinHostPort(ips[0].Unmap().String(), port))
 }
 
 func (p EgressPolicy) AllowConnect(hostport string) bool {
@@ -112,13 +177,15 @@ func handleConnect(w http.ResponseWriter, r *http.Request, policy EgressPolicy) 
 		return
 	}
 	target := strings.TrimSpace(r.Host)
-	if !policy.AllowConnect(target) {
-		http.Error(w, "target not allowed", http.StatusForbidden)
-		return
-	}
-
-	upstream, err := (&net.Dialer{}).DialContext(r.Context(), "tcp", target)
+	upstream, err := dialAllowedTarget(r.Context(), policy, target,
+		func(ctx context.Context, host string) ([]netip.Addr, error) {
+			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		}, (&net.Dialer{}).DialContext)
 	if err != nil {
+		if errors.Is(err, errEgressDenied) {
+			http.Error(w, "target not allowed", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 		return
 	}

@@ -111,7 +111,7 @@ func TestConnectProxyAllowsOnlyAllowlistedTargets(t *testing.T) {
 	defer disallowed.Close()
 
 	proxy := teb.NewConnectProxy()
-	endpoint, err := proxy.Start(context.Background(), teb.EgressPolicy{AllowedHosts: map[string]struct{}{"localhost": {}}})
+	endpoint, err := proxy.Start(context.Background(), teb.EgressPolicy{AllowedHosts: map[string]struct{}{"127.0.0.1": {}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,12 +121,28 @@ func TestConnectProxyAllowsOnlyAllowlistedTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := connectRoundTrip(endpoint.Address, net.JoinHostPort("localhost", allowedPort)); err != nil {
+	if err := connectRoundTrip(endpoint.Address, net.JoinHostPort("127.0.0.1", allowedPort)); err != nil {
 		t.Fatalf("allowlisted CONNECT failed: %v", err)
 	}
 
-	if err := connectExpectStatus(endpoint.Address, disallowedAddr, http.StatusForbidden); err != nil {
+	_, disallowedPort, err := net.SplitHostPort(disallowedAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connectExpectStatus(endpoint.Address, net.JoinHostPort("localhost", disallowedPort), http.StatusForbidden); err != nil {
 		t.Fatalf("disallowed CONNECT was not denied: %v", err)
+	}
+}
+
+func TestConnectProxyRejectsAllowedHostnameResolvingToLoopback(t *testing.T) {
+	proxy := teb.NewConnectProxy()
+	endpoint, err := proxy.Start(context.Background(), teb.EgressPolicy{AllowedHosts: map[string]struct{}{"localhost": {}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	if err := connectExpectStatus(endpoint.Address, "localhost:80", http.StatusForbidden); err != nil {
+		t.Fatal(err)
 	}
 }
 

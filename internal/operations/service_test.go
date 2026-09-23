@@ -68,16 +68,16 @@ func cloneAnyMap(in map[string]any) map[string]any {
 }
 
 type harness struct {
-	ctx      context.Context
-	store    *state.Store
-	exec     *execution.Service
+	ctx       context.Context
+	store     *state.Store
+	exec      *execution.Service
 	ledger    *resources.Service
 	approvals *approvals.Service
 	provider  *fakeProvider
-	policy   *mutablePolicy
-	svc      *operations.Service
-	taskID   domain.ID
-	attempt  domain.Attempt
+	policy    *mutablePolicy
+	svc       *operations.Service
+	taskID    domain.ID
+	attempt   domain.Attempt
 }
 
 func newHarness(t *testing.T) *harness {
@@ -209,6 +209,27 @@ func TestDispatchRejectsDecisionWhosePolicyProfileIsNotActive(t *testing.T) {
 	}
 }
 
+func TestDispatchDoesNotCommitWhenDescriptorLookupFails(t *testing.T) {
+	h := newHarness(t)
+	op := preparePurchase(t, h, h.attempt.ID, "purchase-primary", 1)
+	if _, err := h.store.DB().ExecContext(h.ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.DB().ExecContext(h.ctx, `DELETE FROM effect_slots WHERE effect_slot_id = ?`, op.EffectSlotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.Dispatch(h.ctx, op.ID, h.attempt.ID); err == nil {
+		t.Fatal("dispatch accepted a missing effect slot")
+	}
+	var stateValue domain.OperationState
+	if err := h.store.DB().QueryRowContext(h.ctx, `SELECT state FROM external_operations WHERE operation_id = ?`, op.ID).Scan(&stateValue); err != nil {
+		t.Fatal(err)
+	}
+	if stateValue != domain.OperationPrepared || h.provider.DispatchCount() != 0 {
+		t.Fatalf("missing policy input crossed dispatch boundary: state=%s provider calls=%d", stateValue, h.provider.DispatchCount())
+	}
+}
+
 func TestChangedIntentDoesNotMintSecondEffectSlot(t *testing.T) {
 	h := newHarness(t)
 	first := preparePurchase(t, h, h.attempt.ID, "purchase-primary", 1)
@@ -334,7 +355,6 @@ func TestRepeatedSettlementRejectsConflictingEconomicOutcome(t *testing.T) {
 		t.Fatal("provider reference was overwritten by conflicting settlement")
 	}
 }
-
 
 func TestRequireApprovalPreparesButCannotDispatch(t *testing.T) {
 	h := newHarness(t)
