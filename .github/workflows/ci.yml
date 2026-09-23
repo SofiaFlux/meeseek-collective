@@ -29,29 +29,29 @@ jobs:
           }
           trap cleanup EXIT
 
-          go build -o "$tmp/meeseek" ./cmd/meeseek
-          go build -o "$tmp/meeseek-box" ./cmd/meeseek-box
-          export MEESEEK_HOME="$tmp/home"
-          export MEESEEK_CONTROL_ENDPOINT="$tmp/control.sock"
+          go build -o "$tmp/summa42" ./cmd/summa42
+          go build -o "$tmp/summa42-box" ./cmd/summa42-box
+          export SUMMA42_HOME="$tmp/home"
+          export SUMMA42_CONTROL_ENDPOINT="$tmp/control.sock"
 
-          "$tmp/meeseek" init
-          "$tmp/meeseek-box" &
+          "$tmp/summa42" init
+          "$tmp/summa42-box" &
           pid=$!
 
           for _ in {1..100}; do
-            [[ -S "$MEESEEK_CONTROL_ENDPOINT" ]] && break
+            [[ -S "$SUMMA42_CONTROL_ENDPOINT" ]] && break
             kill -0 "$pid" 2>/dev/null
             sleep 0.1
           done
-          [[ -S "$MEESEEK_CONTROL_ENDPOINT" ]]
-          "$tmp/meeseek" status | grep -E '^Collective .+: DORMANT$'
+          [[ -S "$SUMMA42_CONTROL_ENDPOINT" ]]
+          "$tmp/summa42" status | grep -E '^Collective .+: DORMANT$'
 
           kill -TERM "$pid"
           wait "$pid"
           pid=""
       - run: go test -race ./... -count=1
       - run: go vet ./...
-      - run: go build ./cmd/meeseek ./cmd/meeseek-box
+      - run: go build ./cmd/summa42 ./cmd/summa42-box
       - run: python3 docs/superpowers/research/spikes/2026-09-14-sqlite-persistence-spike.py
 
   oci-acceptance:

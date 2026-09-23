@@ -2,10 +2,10 @@ blank_issues_enabled: false
 contact_links:
   - name: Report a security concern
     about: Follow the private security reporting policy for potential vulnerabilities.
-    url: https://github.com/SofiaFlux/meeseek-collective/blob/main/SECURITY.md
+    url: https://github.com/SofiaFlux/summa42/blob/main/SECURITY.md
   - name: Get support
     about: Read the support policy and available support options.
-    url: https://github.com/SofiaFlux/meeseek-collective/blob/main/SUPPORT.md
+    url: https://github.com/SofiaFlux/summa42/blob/main/SUPPORT.md
   - name: Report a conduct concern
     about: Read the Code of Conduct and its confidential reporting route.
-    url: https://github.com/SofiaFlux/meeseek-collective/blob/main/CODE_OF_CONDUCT.md
+    url: https://github.com/SofiaFlux/summa42/blob/main/CODE_OF_CONDUCT.md
