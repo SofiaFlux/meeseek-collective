@@ -83,6 +83,98 @@ func TestDecideRejectsInvalidAssessments(t *testing.T) {
 	}
 }
 
+func TestDecideRejectsAuthorityGrowth(t *testing.T) {
+	tests := []struct {
+		name     string
+		proposal WorkProposal
+	}{
+		{
+			name: "ceiling exceeds grant",
+			proposal: WorkProposal{
+				Kind: "second-step", AuthorityCeiling: []string{"admin"},
+			},
+		},
+		{
+			name: "required capability exceeds child ceiling",
+			proposal: WorkProposal{
+				Kind: "second-step", RequiredCapabilities: []string{"write"}, AuthorityCeiling: []string{"read"},
+			},
+		},
+		{
+			name: "action exceeds grant",
+			proposal: WorkProposal{
+				Kind: "second-step", ProposedActions: []string{"delete"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := testInput(Assessment{
+				Verdict: Continue, EvidenceIDs: []string{"evidence-1"}, Next: &tt.proposal,
+			})
+			if decision, err := Decide(input); err == nil {
+				t.Fatalf("Decide() = %#v, nil error; want authority validation error", decision)
+			}
+		})
+	}
+}
+
+func TestDecideBlocksExhaustion(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*Input)
+		want  string
+	}{
+		{
+			name: "step limit",
+			setup: func(input *Input) {
+				input.CompletedSteps = input.Limits.MaxSteps
+			},
+			want: "maximum steps exhausted",
+		},
+		{
+			name: "remaining budget",
+			setup: func(input *Input) {
+				input.Limits.RemainingBudget = 0
+			},
+			want: "remaining budget exhausted",
+		},
+		{
+			name: "no progress",
+			setup: func(input *Input) {
+				input.ProgressSignature = "same-state"
+				input.PreviousProgressSignature = "same-state"
+			},
+			want: "no progress detected",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := testInput(Assessment{
+				Verdict:     Continue,
+				EvidenceIDs: []string{"evidence-1"},
+				Next: &WorkProposal{
+					Kind: "second-step", RequiredCapabilities: []string{"read"}, AuthorityCeiling: []string{"read"},
+				},
+			})
+			tt.setup(&input)
+			decision, err := Decide(input)
+			if err != nil {
+				t.Fatalf("Decide() error = %v", err)
+			}
+			if decision.Outcome != OutcomeBlocked {
+				t.Errorf("Decide() outcome = %q, want %q", decision.Outcome, OutcomeBlocked)
+			}
+			if decision.Next != nil {
+				t.Errorf("Decide() next = %#v, want nil", decision.Next)
+			}
+			if decision.Reason != tt.want {
+				t.Errorf("Decide() reason = %q, want %q", decision.Reason, tt.want)
+			}
+		})
+	}
+}
+
 func testInput(assessment Assessment) Input {
 	return Input{
 		Assessment:     assessment,
