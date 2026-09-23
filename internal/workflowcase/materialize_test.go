@@ -102,3 +102,32 @@ func TestMaterializeRejectsInvalidTemplateAndWork(t *testing.T) {
 		})
 	}
 }
+
+func TestMaterializeRejectsCaseAdvancedAfterSnapshotBeforeInsert(t *testing.T) {
+	svc, purposes, missionID, ctx := setupEnsure(t)
+	c, err := svc.Ensure(ctx, sampleObservation(missionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executionSvc := execution.New(svc.store, svc.clock, purposes)
+	template := execution.TaskRequest{Objective: "Review", AcceptanceCriteria: []string{"record result"}, ResourceEnvelopeID: "envelope"}
+
+	// c is the same snapshot MaterializeTask receives from Get. Advance the
+	// durable case before the insertion stage to exercise that exact window.
+	_, err = svc.Assess(ctx, AssessmentRequest{CaseID: c.ID, WorkID: c.CurrentWorkID,
+		Assessment:      workflow.Assessment{Verdict: workflow.Ready, EvidenceIDs: []string{"reviewed"}},
+		RemainingBudget: 4, ProgressSignature: "reviewed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.materializeCurrentCase(ctx, executionSvc, c, template); err == nil {
+		t.Fatal("stale snapshot created an eligible Task")
+	}
+	var count int
+	if err := svc.store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM tasks WHERE idempotency_key = ?", c.CurrentWorkID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("stale work created %d Task rows, want zero", count)
+	}
+}

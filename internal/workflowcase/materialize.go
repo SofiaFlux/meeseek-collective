@@ -2,6 +2,7 @@ package workflowcase
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +24,10 @@ func (s *Service) MaterializeTask(ctx context.Context, executionSvc *execution.S
 	if c.State != Active || c.CurrentWorkID != workID || strings.TrimSpace(string(workID)) == "" {
 		return domain.Task{}, errors.New("work is not the active work for this case")
 	}
+	return s.materializeCurrentCase(ctx, executionSvc, c, template)
+}
+
+func (s *Service) materializeCurrentCase(ctx context.Context, executionSvc *execution.Service, c Case, template execution.TaskRequest) (domain.Task, error) {
 	if strings.TrimSpace(template.Objective) == "" ||
 		!hasNonblankCriterion(template.AcceptanceCriteria) ||
 		strings.TrimSpace(string(template.ResourceEnvelopeID)) == "" {
@@ -33,7 +38,16 @@ func (s *Service) MaterializeTask(ctx context.Context, executionSvc *execution.S
 	template.RequiredCapabilities = append([]string(nil), c.NextWork.RequiredCapabilities...)
 	template.AuthorityCeiling = append([]string(nil), c.NextWork.AuthorityCeiling...)
 	template.IdempotencyKey = string(c.CurrentWorkID)
-	task, err := executionSvc.CreateTask(ctx, template)
+	task, err := executionSvc.CreateTaskWithGuard(ctx, template, func(ctx context.Context, tx *sql.Tx) error {
+		var active int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM workflow_cases
+			WHERE case_id = ? AND mission_id = ? AND state = ? AND current_work_id = ?`,
+			c.ID, c.MissionID, Active, c.CurrentWorkID).Scan(&active)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("work is not the active work for this case")
+		}
+		return err
+	})
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("materialize workflow work: %w", err)
 	}

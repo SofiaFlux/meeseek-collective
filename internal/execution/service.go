@@ -65,6 +65,14 @@ func New(store *state.Store, clk clock.Clock, purposes *purpose.Service, recorde
 }
 
 func (s *Service) CreateTask(ctx context.Context, request TaskRequest) (domain.Task, error) {
+	return s.CreateTaskWithGuard(ctx, request, nil)
+}
+
+// TaskGuard checks an external precondition in the same transaction that
+// inserts or replays a Task. A guard should only read through tx.
+type TaskGuard func(context.Context, *sql.Tx) error
+
+func (s *Service) CreateTaskWithGuard(ctx context.Context, request TaskRequest, guard TaskGuard) (domain.Task, error) {
 	if err := s.configured(); err != nil {
 		return domain.Task{}, err
 	}
@@ -72,7 +80,7 @@ func (s *Service) CreateTask(ctx context.Context, request TaskRequest) (domain.T
 	if err != nil {
 		return domain.Task{}, err
 	}
-	return s.insertTask(ctx, "", normalized)
+	return s.insertTask(ctx, "", normalized, guard)
 }
 
 func (s *Service) CreateChildTask(ctx context.Context, parentTaskID domain.ID, request TaskRequest) (domain.Task, error) {
@@ -154,7 +162,7 @@ func (s *Service) CreateChildTask(ctx context.Context, parentTaskID domain.ID, r
 		return domain.Task{}, err
 	}
 
-	return s.insertTask(ctx, parent.ID, request)
+	return s.insertTask(ctx, parent.ID, request, nil)
 }
 
 func (s *Service) StartAttempt(ctx context.Context, taskID domain.ID, executorKind string, leaseDuration time.Duration) (domain.Attempt, error) {
@@ -433,7 +441,7 @@ func (s *Service) ChallengeTask(ctx context.Context, taskID domain.ID, scope dom
 	})
 }
 
-func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request TaskRequest) (domain.Task, error) {
+func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request TaskRequest, guard TaskGuard) (domain.Task, error) {
 	var err error
 	request, err = normalizeTaskIntent(request)
 	if err != nil {
@@ -486,6 +494,11 @@ func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request Ta
 	}
 
 	err = s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		if guard != nil {
+			if err := guard(ctx, tx); err != nil {
+				return err
+			}
+		}
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO tasks(
 				task_id, parent_task_id, purpose_kind, purpose_id, task_class, objective, payload_json,
