@@ -1,7 +1,9 @@
 package workflow
 
 import (
-	"os"
+	"go/parser"
+	"go/token"
+	"path"
 	"strings"
 	"testing"
 )
@@ -39,6 +41,9 @@ func TestReviewThenPublishThenVerify(t *testing.T) {
 	}
 	if len(first.Next.RequiredCapabilities) != 1 || first.Next.RequiredCapabilities[0] != "ado.write" {
 		t.Fatalf("Decide(review) next capabilities = %#v, want only ado.write", first.Next.RequiredCapabilities)
+	}
+	if len(first.Next.AuthorityCeiling) != 1 || first.Next.AuthorityCeiling[0] != "ado.write" {
+		t.Fatalf("Decide(review) next authority ceiling = %#v, want only ado.write", first.Next.AuthorityCeiling)
 	}
 	if len(first.Next.ProposedActions) != 1 || first.Next.ProposedActions[0] != "ado.pr.comment" {
 		t.Fatalf("Decide(review) next actions = %#v, want only ado.pr.comment", first.Next.ProposedActions)
@@ -98,6 +103,9 @@ func TestDocumentReviewThenArchiveThenVerify(t *testing.T) {
 	if len(first.Next.RequiredCapabilities) != 1 || first.Next.RequiredCapabilities[0] != "archive.write" {
 		t.Fatalf("Decide(document review) next capabilities = %#v, want only archive.write", first.Next.RequiredCapabilities)
 	}
+	if len(first.Next.AuthorityCeiling) != 1 || first.Next.AuthorityCeiling[0] != "archive.write" {
+		t.Fatalf("Decide(document review) next authority ceiling = %#v, want only archive.write", first.Next.AuthorityCeiling)
+	}
 	if len(first.Next.ProposedActions) != 1 || first.Next.ProposedActions[0] != "report.archive" {
 		t.Fatalf("Decide(document review) next actions = %#v, want only report.archive", first.Next.ProposedActions)
 	}
@@ -122,12 +130,27 @@ func TestDocumentReviewThenArchiveThenVerify(t *testing.T) {
 	}
 }
 
-func TestDecisionKernelHasNoRecipeSpecificADOHandling(t *testing.T) {
-	source, err := os.ReadFile("decision.go")
+func TestDecisionKernelImportsNoRecipeOrIOPackages(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "decision.go", nil, parser.ImportsOnly)
 	if err != nil {
-		t.Fatalf("read decision.go: %v", err)
+		t.Fatalf("parse decision.go imports: %v", err)
 	}
-	if strings.Contains(strings.ToLower(string(source)), "ado") {
-		t.Fatal("decision.go contains ADO-specific handling")
+
+	ioPackages := map[string]struct{}{
+		"bufio": {}, "database/sql": {}, "io": {}, "net": {}, "net/http": {}, "os": {},
+	}
+	for _, imported := range file.Imports {
+		importPath := strings.Trim(imported.Path.Value, "\"")
+		lowerPath := strings.ToLower(importPath)
+		base := path.Base(lowerPath)
+		if strings.Contains(lowerPath, "ado") || strings.Contains(lowerPath, "copilot") {
+			t.Errorf("decision.go imports recipe-specific package %q", importPath)
+		}
+		if _, ok := ioPackages[lowerPath]; ok {
+			t.Errorf("decision.go imports I/O package %q", importPath)
+		}
+		if base == "sql" || base == "http" || base == "net" {
+			t.Errorf("decision.go imports I/O package %q", importPath)
+		}
 	}
 }
