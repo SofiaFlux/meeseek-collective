@@ -57,6 +57,24 @@ func New(store *state.Store, clk clock.Clock, purposes *purpose.Service) *Servic
 	return &Service{store: store, clock: clk, purposes: purposes}
 }
 
+func (s *Service) Get(ctx context.Context, caseID domain.ID) (Case, error) {
+	if s == nil || s.store == nil {
+		return Case{}, errors.New("workflow case service is not configured")
+	}
+	if strings.TrimSpace(string(caseID)) == "" {
+		return Case{}, errors.New("case ID is required")
+	}
+	row := s.store.DB().QueryRowContext(ctx, `SELECT case_id, mission_id, source, object_id, revision_id,
+		observation_evidence_id, state, current_work_id, next_work_json, grant_json,
+		completed_steps, max_steps, remaining_budget, progress_signature, initial_request_json
+		FROM workflow_cases WHERE case_id = ?`, caseID)
+	c, _, err := scanCase(row)
+	if err != nil {
+		return Case{}, fmt.Errorf("get workflow case: %w", err)
+	}
+	return c, nil
+}
+
 func (s *Service) Ensure(ctx context.Context, observation Observation) (Case, error) {
 	if s == nil || s.store == nil || s.clock == nil || s.purposes == nil {
 		return Case{}, errors.New("workflow case service is not configured")
