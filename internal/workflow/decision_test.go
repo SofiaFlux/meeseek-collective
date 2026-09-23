@@ -67,6 +67,8 @@ func TestDecideRejectsInvalidAssessments(t *testing.T) {
 		assessment Assessment
 	}{
 		{name: "missing evidence", assessment: Assessment{Verdict: Ready}},
+		{name: "empty evidence ID", assessment: Assessment{Verdict: Ready, EvidenceIDs: []string{""}}},
+		{name: "whitespace evidence ID among valid IDs", assessment: Assessment{Verdict: Ready, EvidenceIDs: []string{"evidence-1", " \t "}}},
 		{name: "invalid verdict", assessment: Assessment{Verdict: "MAYBE", EvidenceIDs: []string{"evidence-1"}}},
 		{name: "ready with next work", assessment: Assessment{Verdict: Ready, EvidenceIDs: []string{"evidence-1"}, Next: &WorkProposal{Kind: "extra"}}},
 		{name: "continue without next work", assessment: Assessment{Verdict: Continue, EvidenceIDs: []string{"evidence-1"}}},

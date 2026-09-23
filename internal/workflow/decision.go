@@ -1,6 +1,9 @@
 package workflow
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type Verdict string
 
@@ -61,6 +64,11 @@ func Decide(input Input) (Decision, error) {
 	assessment := input.Assessment
 	if len(assessment.EvidenceIDs) == 0 {
 		return Decision{}, fmt.Errorf("assessment must include evidence")
+	}
+	for _, id := range assessment.EvidenceIDs {
+		if strings.TrimSpace(id) == "" {
+			return Decision{}, fmt.Errorf("assessment evidence ID must not be blank")
+		}
 	}
 
 	switch assessment.Verdict {
