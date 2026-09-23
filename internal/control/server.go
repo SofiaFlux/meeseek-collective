@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +41,22 @@ type CreateTaskRequest struct {
 	Priority             int                     `json:"priority"`
 	EarliestStart        time.Time               `json:"earliest_start,omitempty"`
 	Deadline             time.Time               `json:"deadline,omitempty"`
+}
+
+type CreateMissionRequest struct {
+	Statement string `json:"statement"`
+	Challenge string `json:"challenge,omitempty"`
+	Signature string `json:"signature,omitempty"`
+}
+
+type MissionChallengeDTO struct {
+	Challenge     string `json:"challenge"`
+	RequestDigest string `json:"request_digest"`
+}
+
+type MissionDTO struct {
+	ID        domain.ID `json:"id"`
+	Statement string    `json:"statement"`
 }
 
 type TaskDTO struct {
@@ -121,6 +140,11 @@ type TaskService interface {
 	Task(context.Context, domain.ID) (domain.Task, error)
 }
 
+type MissionService interface {
+	CreateMission(context.Context, string) (domain.ID, error)
+	ActiveMission(context.Context) (domain.ID, string, error)
+}
+
 type ApprovalService interface {
 	Get(context.Context, domain.ID) (domain.ApprovalRequestRecord, error)
 	Pending(context.Context) ([]domain.ApprovalRequestRecord, error)
@@ -143,6 +167,7 @@ type ShutdownService interface {
 type Dependencies struct {
 	Status        StatusProvider
 	Tasks         TaskService
+	Missions      MissionService
 	Approvals     ApprovalService
 	Attempts      AttemptReader
 	Operations    OperationReader
@@ -193,13 +218,16 @@ func NewServer(config ServerConfig, deps Dependencies) (*Server, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	if deps.Status == nil || deps.Tasks == nil || deps.Approvals == nil || deps.Attempts == nil || deps.Operations == nil || deps.Shutdown == nil {
+	if deps.Status == nil || deps.Tasks == nil || deps.Missions == nil || deps.Approvals == nil || deps.Attempts == nil || deps.Operations == nil || deps.Shutdown == nil {
 		return nil, errors.New("all control dependencies are required")
 	}
 
 	s := &Server{config: config, deps: deps, challenges: make(map[domain.ID]challengeState)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.HandleFunc("POST /missions/challenge", s.handleMissionChallenge)
+	mux.HandleFunc("POST /missions", s.handleCreateMission)
+	mux.HandleFunc("GET /missions/active", s.handleActiveMission)
 	mux.HandleFunc("POST /tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /tasks/{id}", s.handleTask)
 	mux.HandleFunc("GET /approvals", s.handleApprovals)
@@ -274,6 +302,93 @@ func ApprovalSigningMessage(challenge, requestDigest, action string) []byte {
 			"request-digest:" + requestDigest + "\n" +
 			"action:" + action + "\n",
 	)
+}
+
+func MissionSigningMessage(challenge, requestDigest string) []byte {
+	return []byte("summa42-owner-mission-create-v1\nchallenge:" + challenge + "\nrequest-digest:" + requestDigest + "\n")
+}
+
+func missionDigest(statement string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(statement)))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Server) handleMissionChallenge(w http.ResponseWriter, r *http.Request) {
+	var request CreateMissionRequest
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	statement := strings.TrimSpace(request.Statement)
+	if statement == "" || len(statement) > 4096 || request.Challenge != "" || request.Signature != "" {
+		writeError(w, http.StatusBadRequest, "valid Mission statement is required")
+		return
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		writeError(w, http.StatusInternalServerError, "generate Mission challenge")
+		return
+	}
+	challenge := base64.RawURLEncoding.EncodeToString(raw[:])
+	digest := missionDigest(statement)
+	s.mu.Lock()
+	for key, state := range s.challenges {
+		if state.action == "CREATE_MISSION" || s.config.Now().UTC().After(state.expires) {
+			delete(s.challenges, key)
+		}
+	}
+	s.challenges[domain.ID("mission:"+challenge)] = challengeState{value: challenge, digest: digest, action: "CREATE_MISSION", expires: s.config.Now().UTC().Add(s.config.ChallengeTTL)}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, MissionChallengeDTO{Challenge: challenge, RequestDigest: digest})
+}
+
+func (s *Server) handleCreateMission(w http.ResponseWriter, r *http.Request) {
+	var request CreateMissionRequest
+	if err := decodeBody(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	statement := strings.TrimSpace(request.Statement)
+	if statement == "" || len(statement) > 4096 {
+		writeError(w, http.StatusBadRequest, "valid Mission statement is required")
+		return
+	}
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(request.Signature))
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		writeError(w, http.StatusForbidden, "invalid Owner signature")
+		return
+	}
+	s.mu.Lock()
+	key := domain.ID("mission:" + request.Challenge)
+	state, exists := s.challenges[key]
+	if !exists || s.config.Now().UTC().After(state.expires) || state.action != "CREATE_MISSION" ||
+		!constantTimeEqual(state.digest, missionDigest(statement)) ||
+		!ed25519.Verify(s.config.OwnerPublicKey, MissionSigningMessage(state.value, state.digest), signature) {
+		s.mu.Unlock()
+		writeError(w, http.StatusForbidden, "invalid Mission challenge or Owner signature")
+		return
+	}
+	delete(s.challenges, key)
+	s.mu.Unlock()
+	id, err := s.deps.Missions.CreateMission(r.Context(), statement)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, MissionDTO{ID: id, Statement: statement})
+}
+
+func (s *Server) handleActiveMission(w http.ResponseWriter, r *http.Request) {
+	id, statement, err := s.deps.Missions.ActiveMission(r.Context())
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "no active Mission")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, MissionDTO{ID: id, Statement: statement})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/SofiaFlux/summa42/internal/control"
+	"github.com/SofiaFlux/summa42/internal/domain"
 	"github.com/SofiaFlux/summa42/internal/feedbackgithub"
 	"github.com/SofiaFlux/summa42/internal/fieldfeedback"
-	"github.com/SofiaFlux/summa42/internal/domain"
 	"github.com/SofiaFlux/summa42/internal/localconfig"
 	"github.com/SofiaFlux/summa42/internal/policy"
 	summa42runtime "github.com/SofiaFlux/summa42/internal/runtime"
@@ -122,13 +122,13 @@ func run(ctx context.Context) error {
 	}
 
 	box, err := summa42runtime.Open(ctx, summa42runtime.Config{
-		StatePath:    cfg.DatabasePath,
-		EvidencePath: cfg.EvidencePath,
-		CollectiveID: cfg.CollectiveID,
+		StatePath:        cfg.DatabasePath,
+		EvidencePath:     cfg.EvidencePath,
+		CollectiveID:     cfg.CollectiveID,
 		OwnerPrincipalID: cfg.OwnerPrincipalID,
-		FieldFeedback: cfg.FieldFeedback,
-		FeedbackSink: feedbackSink,
-		PolicyEngine: material.policyEngine,
+		FieldFeedback:    cfg.FieldFeedback,
+		FeedbackSink:     feedbackSink,
+		PolicyEngine:     material.policyEngine,
 	})
 	if err != nil {
 		return fmt.Errorf("open Box runtime: %w", err)
@@ -141,16 +141,17 @@ func run(ctx context.Context) error {
 		OwnerPublicKey:   material.ownerPublicKey,
 		ChallengeTTL:     2 * time.Minute,
 	}, control.Dependencies{
-		Status:     boxStatusProvider{box: box},
-		Tasks:      box.Execution,
-		Approvals:  box.Approvals,
-		Feedback:   box.Feedback,
-		Sanitizer:  box.Sanitizer,
+		Status:        boxStatusProvider{box: box},
+		Tasks:         box.Execution,
+		Missions:      box.Purpose,
+		Approvals:     box.Approvals,
+		Feedback:      box.Feedback,
+		Sanitizer:     box.Sanitizer,
 		FieldObserver: box.FieldObserver,
-		Experience: box.Experience,
-		Attempts:   box.Execution,
-		Operations: box.Operations,
-		Shutdown:   box,
+		Experience:    box.Experience,
+		Attempts:      box.Execution,
+		Operations:    box.Operations,
+		Shutdown:      box,
 	})
 	if err != nil {
 		return fmt.Errorf("create control server: %w", err)
@@ -174,7 +175,6 @@ func run(ctx context.Context) error {
 	return serveControl(serveCtx, listener, server)
 }
 
-
 func buildFeedbackSink(cfg localconfig.Config) (fieldfeedback.Sink, error) {
 	if !cfg.FieldFeedback.Enabled || cfg.FieldFeedback.Mode == localconfig.FeedbackModeLocalOnly {
 		return nil, nil
@@ -187,8 +187,8 @@ func buildFeedbackSink(cfg localconfig.Config) (fieldfeedback.Sink, error) {
 		}
 		apiBaseURL := strings.TrimSpace(os.Getenv("SUMMA42_FEEDBACK_GITHUB_API_BASE_URL"))
 		sink, err := feedbackgithub.NewSink(feedbackgithub.Config{
-			APIBaseURL: apiBaseURL,
-			Repository: cfg.FieldFeedback.Destination,
+			APIBaseURL:       apiBaseURL,
+			Repository:       cfg.FieldFeedback.Destination,
 			CredentialSource: feedbackgithub.FileCredentialSource{Path: tokenFile},
 		})
 		if err != nil {
@@ -208,11 +208,11 @@ func loadStartupMaterial(ctx context.Context, cfg localconfig.Config) (startupMa
 	defer store.DB().Close()
 
 	var (
-		policySetID       domain.ID
-		moduleName        string
-		module            []byte
-		policyHash        string
-		capabilitiesHash  string
+		policySetID      domain.ID
+		moduleName       string
+		module           []byte
+		policyHash       string
+		capabilitiesHash string
 	)
 	if err := store.DB().QueryRowContext(ctx,
 		"SELECT policy_set_id, module_name, module, policy_hash, capabilities_hash FROM policy_sets WHERE active = 1",

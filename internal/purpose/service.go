@@ -41,6 +41,21 @@ func (s *Service) CreateMission(ctx context.Context, statement string) (domain.I
 	return id, nil
 }
 
+func (s *Service) ActiveMission(ctx context.Context) (domain.ID, string, error) {
+	if err := s.configured(); err != nil {
+		return "", "", err
+	}
+	var id domain.ID
+	var statement string
+	err := s.store.DB().QueryRowContext(ctx,
+		`SELECT mission_id, statement FROM missions WHERE active = 1`,
+	).Scan(&id, &statement)
+	if err != nil {
+		return "", "", fmt.Errorf("read active Mission: %w", err)
+	}
+	return id, statement, nil
+}
+
 func (s *Service) DeactivateMission(ctx context.Context, missionID domain.ID) error {
 	if err := s.configured(); err != nil {
 		return err

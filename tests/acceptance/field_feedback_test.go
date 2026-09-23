@@ -215,7 +215,7 @@ func newFeedbackAcceptanceFixture(t *testing.T, mode localconfig.FeedbackMode, l
 		AuthToken: "field-product-path", OwnerPrincipalID: owner.PrincipalID(),
 		OwnerPublicKey: owner.PublicKey(), ChallengeTTL: time.Minute, Now: box.Clock.Now,
 	}, control.Dependencies{
-		Status: feedbackStatusProvider{box: box}, Tasks: box.Execution, Approvals: box.Approvals,
+		Status: feedbackStatusProvider{box: box}, Tasks: box.Execution, Missions: box.Purpose, Approvals: box.Approvals,
 		Feedback: box.Feedback, Sanitizer: box.Sanitizer, FieldObserver: box.FieldObserver, Experience: box.Experience,
 		Attempts: box.Execution, Operations: box.Operations, Shutdown: box,
 	})
@@ -341,7 +341,7 @@ func (f *feedbackAcceptanceFixture) signedApprove(t *testing.T, approvalID domai
 		AuthToken: "acceptance-control-token", OwnerPrincipalID: f.owner.PrincipalID(),
 		OwnerPublicKey: f.owner.PublicKey(), ChallengeTTL: time.Minute, Now: f.clock.Now,
 	}, control.Dependencies{
-		Status: feedbackStatusProvider{box: f.box}, Tasks: f.box.Execution, Approvals: f.box.Approvals,
+		Status: feedbackStatusProvider{box: f.box}, Tasks: f.box.Execution, Missions: f.box.Purpose, Approvals: f.box.Approvals,
 		Feedback: f.box.Feedback, Sanitizer: f.box.Sanitizer, FieldObserver: f.box.FieldObserver, Experience: f.box.Experience,
 		Attempts: f.box.Execution, Operations: f.box.Operations, Shutdown: f.box,
 	})

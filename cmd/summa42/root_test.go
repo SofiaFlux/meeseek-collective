@@ -14,28 +14,36 @@ import (
 )
 
 type fakeControlAPI struct {
-	status       control.StatusDTO
-	task         control.TaskDTO
-	attempt      control.AttemptDTO
-	operation    control.OperationDTO
-	created      control.CreateTaskRequest
-	approveCalls int
-	rejectCalls  int
-	feedbackEmitCalls int
-	feedbackObserveCalls int
-	feedbackScanCalls int
-	feedbackCandidateCalls int
-	feedbackSanitizeCalls int
+	status                  control.StatusDTO
+	task                    control.TaskDTO
+	attempt                 control.AttemptDTO
+	operation               control.OperationDTO
+	created                 control.CreateTaskRequest
+	missionStatement        string
+	approveCalls            int
+	rejectCalls             int
+	feedbackEmitCalls       int
+	feedbackObserveCalls    int
+	feedbackScanCalls       int
+	feedbackCandidateCalls  int
+	feedbackSanitizeCalls   int
 	experienceProposalCalls int
-	experienceOutcomeCalls int
+	experienceOutcomeCalls  int
 	experienceEvaluateCalls int
-	shutdowns    int
+	shutdowns               int
 }
 
 func (f *fakeControlAPI) Status(context.Context) (control.StatusDTO, error) { return f.status, nil }
 func (f *fakeControlAPI) CreateTask(_ context.Context, request control.CreateTaskRequest) (control.TaskDTO, error) {
 	f.created = request
 	return f.task, nil
+}
+func (f *fakeControlAPI) CreateMission(_ context.Context, statement string, signer identity.Signer) (control.MissionDTO, error) {
+	f.missionStatement = statement
+	return control.MissionDTO{ID: "mission-1", Statement: statement}, nil
+}
+func (f *fakeControlAPI) ActiveMission(context.Context) (control.MissionDTO, error) {
+	return control.MissionDTO{ID: "mission-1", Statement: f.missionStatement}, nil
 }
 func (f *fakeControlAPI) Task(context.Context, domain.ID) (control.TaskDTO, error) {
 	return f.task, nil
@@ -45,64 +53,64 @@ func (f *fakeControlAPI) Approval(context.Context, domain.ID) (control.ApprovalD
 	return control.ApprovalDTO{ApprovalID: "approval-1", Status: "PENDING"}, nil
 }
 func (f *fakeControlAPI) Feedback(context.Context) ([]control.FeedbackCandidateDTO, error) {
-	return []control.FeedbackCandidateDTO{{ID:"feedback-1",State:domain.FeedbackStateSanitized,Category:"TEST"}}, nil
+	return []control.FeedbackCandidateDTO{{ID: "feedback-1", State: domain.FeedbackStateSanitized, Category: "TEST"}}, nil
 }
 func (f *fakeControlAPI) FeedbackCandidateCreate(_ context.Context, request control.FeedbackCandidateCreateRequest) (control.FeedbackCandidateDTO, error) {
 	f.feedbackCandidateCalls++
 	return control.FeedbackCandidateDTO{
-		ID:"feedback-created",State:domain.FeedbackStateCandidate,GenericTaskClass:request.GenericTaskClass,
-		Category:request.Category,ExpectedBehavior:request.ExpectedBehavior,ObservedBehavior:request.ObservedBehavior,
-		Enforcement:request.Enforcement,
-	},nil
+		ID: "feedback-created", State: domain.FeedbackStateCandidate, GenericTaskClass: request.GenericTaskClass,
+		Category: request.Category, ExpectedBehavior: request.ExpectedBehavior, ObservedBehavior: request.ObservedBehavior,
+		Enforcement: request.Enforcement,
+	}, nil
 }
 func (f *fakeControlAPI) FeedbackSanitize(context.Context, domain.ID) (control.FeedbackSanitizeDTO, error) {
 	f.feedbackSanitizeCalls++
-	artifact:=control.SanitizedFeedbackDTO{ID:"sanitized-created",CandidateID:"feedback-created",ContentJSON:`{"category":"TEST"}`}
-	return control.FeedbackSanitizeDTO{CandidateID:"feedback-created",Outcome:domain.SanitizationPass,Artifact:&artifact},nil
+	artifact := control.SanitizedFeedbackDTO{ID: "sanitized-created", CandidateID: "feedback-created", ContentJSON: `{"category":"TEST"}`}
+	return control.FeedbackSanitizeDTO{CandidateID: "feedback-created", Outcome: domain.SanitizationPass, Artifact: &artifact}, nil
 }
 func (f *fakeControlAPI) FeedbackInspect(context.Context, domain.ID) (control.FeedbackInspectDTO, error) {
-	local := control.FeedbackCandidateDTO{ID:"feedback-1",State:domain.FeedbackStateSanitized,Category:"TEST",ObservedBehavior:"local-only"}
-	exported := control.SanitizedFeedbackDTO{ID:"sanitized-1",CandidateID:"feedback-1",ContentJSON:"{\"category\":\"TEST\"}",Fingerprint:"fp"}
-	return control.FeedbackInspectDTO{LocalCandidate:&local,ExportArtifact:&exported}, nil
+	local := control.FeedbackCandidateDTO{ID: "feedback-1", State: domain.FeedbackStateSanitized, Category: "TEST", ObservedBehavior: "local-only"}
+	exported := control.SanitizedFeedbackDTO{ID: "sanitized-1", CandidateID: "feedback-1", ContentJSON: "{\"category\":\"TEST\"}", Fingerprint: "fp"}
+	return control.FeedbackInspectDTO{LocalCandidate: &local, ExportArtifact: &exported}, nil
 }
 func (f *fakeControlAPI) FeedbackEmit(context.Context, domain.ID) (control.FeedbackEmitDTO, error) {
 	f.feedbackEmitCalls++
-	return control.FeedbackEmitDTO{CandidateID:"feedback-1",ArtifactID:"sanitized-1",TaskID:"task-feedback",Status:"GOVERNED_WORK_SCHEDULED"}, nil
+	return control.FeedbackEmitDTO{CandidateID: "feedback-1", ArtifactID: "sanitized-1", TaskID: "task-feedback", Status: "GOVERNED_WORK_SCHEDULED"}, nil
 }
 func (f *fakeControlAPI) FeedbackObserve(_ context.Context, _ control.FeedbackObserveRequest) (control.FeedbackObservationDTO, error) {
 	f.feedbackObserveCalls++
-	return control.FeedbackObservationDTO{ID:"obs-1",Category:"TEST",SourceKind:"OPERATOR"}, nil
+	return control.FeedbackObservationDTO{ID: "obs-1", Category: "TEST", SourceKind: "OPERATOR"}, nil
 }
 func (f *fakeControlAPI) FeedbackScan(context.Context) ([]control.FeedbackObservationDTO, error) {
 	f.feedbackScanCalls++
-	return []control.FeedbackObservationDTO{{ID:"obs-2",Category:"RECOVERY_FRICTION",SourceKind:"ATTEMPT_FAILURES"}}, nil
+	return []control.FeedbackObservationDTO{{ID: "obs-2", Category: "RECOVERY_FRICTION", SourceKind: "ATTEMPT_FAILURES"}}, nil
 }
-func (f *fakeControlAPI) ExperienceGrantRequest(context.Context, control.ExperienceGrantCreateRequest) (control.ExperienceGrantRequestDTO,error) {
-	return control.ExperienceGrantRequestDTO{RequestID:"grant-request-1",Digest:"digest",ApprovalID:"approval-1"},nil
+func (f *fakeControlAPI) ExperienceGrantRequest(context.Context, control.ExperienceGrantCreateRequest) (control.ExperienceGrantRequestDTO, error) {
+	return control.ExperienceGrantRequestDTO{RequestID: "grant-request-1", Digest: "digest", ApprovalID: "approval-1"}, nil
 }
-func (f *fakeControlAPI) ExperienceGrantActivate(context.Context, domain.ID) (control.AdaptationGrantDTO,error) {
-	return control.AdaptationGrantDTO{ID:"grant-1",RequestID:"grant-request-1",Kind:"EXECUTOR_PREFERENCE",ScopeKey:"repo.review"},nil
+func (f *fakeControlAPI) ExperienceGrantActivate(context.Context, domain.ID) (control.AdaptationGrantDTO, error) {
+	return control.AdaptationGrantDTO{ID: "grant-1", RequestID: "grant-request-1", Kind: "EXECUTOR_PREFERENCE", ScopeKey: "repo.review"}, nil
 }
-func (f *fakeControlAPI) ExperienceProposalCreate(_ context.Context, request control.ExperienceProposalCreateRequest) (control.ExperienceProposalDTO,error) {
+func (f *fakeControlAPI) ExperienceProposalCreate(_ context.Context, request control.ExperienceProposalCreateRequest) (control.ExperienceProposalDTO, error) {
 	f.experienceProposalCalls++
 	return control.ExperienceProposalDTO{
-		ID:"proposal-1",GrantID:request.GrantID,ScopeKey:"repo.review",GenericTaskClass:domain.GenericTaskReview,
-		PreferredExecutor:request.PreferredExecutor,State:domain.ExperienceCandidate,EvidenceObservationIDs:request.EvidenceObservationIDs,
-	},nil
+		ID: "proposal-1", GrantID: request.GrantID, ScopeKey: "repo.review", GenericTaskClass: domain.GenericTaskReview,
+		PreferredExecutor: request.PreferredExecutor, State: domain.ExperienceCandidate, EvidenceObservationIDs: request.EvidenceObservationIDs,
+	}, nil
 }
-func (f *fakeControlAPI) ExperienceOutcomeCreate(_ context.Context, request control.ExperienceOutcomeCreateRequest) (control.ExperienceOutcomeDTO,error) {
+func (f *fakeControlAPI) ExperienceOutcomeCreate(_ context.Context, request control.ExperienceOutcomeCreateRequest) (control.ExperienceOutcomeDTO, error) {
 	f.experienceOutcomeCalls++
-	return control.ExperienceOutcomeDTO{TaskID:request.TaskID,Status:"VERIFIED_OUTCOME_RECORDED"},nil
+	return control.ExperienceOutcomeDTO{TaskID: request.TaskID, Status: "VERIFIED_OUTCOME_RECORDED"}, nil
 }
-func (f *fakeControlAPI) ExperienceEvaluate(context.Context, domain.ID) (control.ExperienceRuleDTO,error) {
+func (f *fakeControlAPI) ExperienceEvaluate(context.Context, domain.ID) (control.ExperienceRuleDTO, error) {
 	f.experienceEvaluateCalls++
-	return control.ExperienceRuleDTO{ID:"rule-1",ProposalID:"proposal-1",ScopeKey:"repo.review",GenericTaskClass:domain.GenericTaskReview,PreferredExecutor:"codex",State:domain.ExperienceActive,VerifiedSamples:3},nil
+	return control.ExperienceRuleDTO{ID: "rule-1", ProposalID: "proposal-1", ScopeKey: "repo.review", GenericTaskClass: domain.GenericTaskReview, PreferredExecutor: "codex", State: domain.ExperienceActive, VerifiedSamples: 3}, nil
 }
-func (f *fakeControlAPI) ExperienceRules(context.Context) ([]control.ExperienceRuleDTO,error) {
-	return []control.ExperienceRuleDTO{{ID:"rule-1",ScopeKey:"repo.review",PreferredExecutor:"codex",State:domain.ExperienceActive}},nil
+func (f *fakeControlAPI) ExperienceRules(context.Context) ([]control.ExperienceRuleDTO, error) {
+	return []control.ExperienceRuleDTO{{ID: "rule-1", ScopeKey: "repo.review", PreferredExecutor: "codex", State: domain.ExperienceActive}}, nil
 }
-func (f *fakeControlAPI) ExperienceRule(context.Context, domain.ID) (control.ExperienceRuleDTO,error) {
-	return control.ExperienceRuleDTO{ID:"rule-1",ScopeKey:"repo.review",PreferredExecutor:"codex",State:domain.ExperienceActive},nil
+func (f *fakeControlAPI) ExperienceRule(context.Context, domain.ID) (control.ExperienceRuleDTO, error) {
+	return control.ExperienceRuleDTO{ID: "rule-1", ScopeKey: "repo.review", PreferredExecutor: "codex", State: domain.ExperienceActive}, nil
 }
 func (f *fakeControlAPI) Approve(_ context.Context, _ domain.ID, signer identity.Signer) (control.ApprovalDTO, error) {
 	f.approveCalls++
@@ -129,7 +137,7 @@ func TestRootWiresControlCommandsAndStableJSONOutput(t *testing.T) {
 	}
 
 	root := newRootCommandWithClient(api)
-	if findCommand(t, root, "status") == nil || findCommand(t, root, "task", "create") == nil || findCommand(t, root, "task", "show") == nil || findCommand(t, root, "approve") == nil || findCommand(t, root, "reject") == nil || findCommand(t, root, "approvals") == nil || findCommand(t, root, "feedback") == nil || findCommand(t, root, "experience") == nil || findCommand(t, root, "inspect", "attempt") == nil || findCommand(t, root, "inspect", "operation") == nil {
+	if findCommand(t, root, "status") == nil || findCommand(t, root, "mission", "create") == nil || findCommand(t, root, "task", "create") == nil || findCommand(t, root, "task", "show") == nil || findCommand(t, root, "approve") == nil || findCommand(t, root, "reject") == nil || findCommand(t, root, "approvals") == nil || findCommand(t, root, "feedback") == nil || findCommand(t, root, "experience") == nil || findCommand(t, root, "inspect", "attempt") == nil || findCommand(t, root, "inspect", "operation") == nil {
 		t.Fatal("expected control commands are not all registered")
 	}
 
@@ -150,6 +158,22 @@ func TestRootWiresControlCommandsAndStableJSONOutput(t *testing.T) {
 	output = executeCommand(t, newRootCommandWithClient(api), "--json", "inspect", "operation", "operation-1")
 	if !strings.Contains(output, `"id":"operation-1"`) {
 		t.Fatalf("operation JSON = %s", output)
+	}
+}
+
+func TestMissionCreateUsesOwnerKeyAndReturnsID(t *testing.T) {
+	api := &fakeControlAPI{}
+	keyPath := filepath.Join(t.TempDir(), "owner.pem")
+	if _, err := identity.NewLocalEd25519(keyPath, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	output := executeCommand(t, newRootCommandWithClient(api), "--json", "mission", "create", "Maintain this repository safely", "--owner-key", keyPath)
+	if api.missionStatement != "Maintain this repository safely" || !strings.Contains(output, `"id":"mission-1"`) {
+		t.Fatalf("mission statement=%q output=%s", api.missionStatement, output)
+	}
+	output = executeCommand(t, newRootCommandWithClient(api), "--json", "mission", "show")
+	if !strings.Contains(output, `"id":"mission-1"`) || !strings.Contains(output, `"statement":"Maintain this repository safely"`) {
+		t.Fatalf("mission show output=%s", output)
 	}
 }
 

@@ -18,6 +18,8 @@ import (
 type API interface {
 	Status(context.Context) (StatusDTO, error)
 	CreateTask(context.Context, CreateTaskRequest) (TaskDTO, error)
+	CreateMission(context.Context, string, identity.Signer) (MissionDTO, error)
+	ActiveMission(context.Context) (MissionDTO, error)
 	Task(context.Context, domain.ID) (TaskDTO, error)
 	Approvals(context.Context) ([]ApprovalDTO, error)
 	Approval(context.Context, domain.ID) (ApprovalDTO, error)
@@ -75,6 +77,34 @@ func (c *Client) CreateTask(ctx context.Context, request CreateTaskRequest) (Tas
 	return result, err
 }
 
+func (c *Client) CreateMission(ctx context.Context, statement string, signer identity.Signer) (MissionDTO, error) {
+	if signer == nil {
+		return MissionDTO{}, errors.New("Owner signer is required")
+	}
+	statement = strings.TrimSpace(statement)
+	var challenge MissionChallengeDTO
+	if err := c.doJSON(ctx, http.MethodPost, "/missions/challenge", CreateMissionRequest{Statement: statement}, &challenge, http.StatusOK); err != nil {
+		return MissionDTO{}, err
+	}
+	if challenge.RequestDigest != missionDigest(statement) || challenge.Challenge == "" {
+		return MissionDTO{}, errors.New("Mission challenge does not match statement")
+	}
+	signature, err := signer.Sign(MissionSigningMessage(challenge.Challenge, challenge.RequestDigest))
+	if err != nil {
+		return MissionDTO{}, fmt.Errorf("sign Mission challenge: %w", err)
+	}
+	request := CreateMissionRequest{Statement: statement, Challenge: challenge.Challenge, Signature: base64.StdEncoding.EncodeToString(signature)}
+	var result MissionDTO
+	err = c.doJSON(ctx, http.MethodPost, "/missions", request, &result, http.StatusCreated)
+	return result, err
+}
+
+func (c *Client) ActiveMission(ctx context.Context) (MissionDTO, error) {
+	var result MissionDTO
+	err := c.doJSON(ctx, http.MethodGet, "/missions/active", nil, &result, http.StatusOK)
+	return result, err
+}
+
 func (c *Client) Task(ctx context.Context, id domain.ID) (TaskDTO, error) {
 	var result TaskDTO
 	err := c.doJSON(ctx, http.MethodGet, "/tasks/"+string(id), nil, &result, http.StatusOK)
@@ -92,7 +122,6 @@ func (c *Client) Approval(ctx context.Context, id domain.ID) (ApprovalDTO, error
 	err := c.doJSON(ctx, http.MethodGet, "/approvals/"+string(id), nil, &result, http.StatusOK)
 	return result, err
 }
-
 
 func (c *Client) Feedback(ctx context.Context) ([]FeedbackCandidateDTO, error) {
 	var result []FeedbackCandidateDTO
@@ -135,7 +164,6 @@ func (c *Client) FeedbackScan(ctx context.Context) ([]FeedbackObservationDTO, er
 	err := c.doJSON(ctx, http.MethodPost, "/feedback/scan", nil, &result, http.StatusOK)
 	return result, err
 }
-
 
 func (c *Client) ExperienceGrantRequest(ctx context.Context, request ExperienceGrantCreateRequest) (ExperienceGrantRequestDTO, error) {
 	var result ExperienceGrantRequestDTO

@@ -62,7 +62,7 @@ func newExperienceAcceptanceFixture(t *testing.T, withGrant bool) *experienceAcc
 		AuthToken:"experience-product-path",OwnerPrincipalID:owner.PrincipalID(),
 		OwnerPublicKey:owner.PublicKey(),ChallengeTTL:time.Minute,
 	},control.Dependencies{
-		Status:feedbackStatusProvider{box:box},Tasks:box.Execution,Approvals:box.Approvals,
+		Status:feedbackStatusProvider{box:box},Tasks:box.Execution,Missions:box.Purpose,Approvals:box.Approvals,
 		Feedback:box.Feedback,Sanitizer:box.Sanitizer,FieldObserver:box.FieldObserver,Experience:box.Experience,
 		Attempts:box.Execution,Operations:box.Operations,Shutdown:box,
 	})
@@ -333,4 +333,3 @@ func createPreferenceGuardTask(t *testing.T, f *experienceAcceptanceFixture, nam
 	}
 	return task
 }
-

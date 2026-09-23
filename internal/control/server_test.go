@@ -16,8 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SofiaFlux/summa42/internal/clock"
 	"github.com/SofiaFlux/summa42/internal/domain"
 	"github.com/SofiaFlux/summa42/internal/execution"
+	"github.com/SofiaFlux/summa42/internal/identity"
+	"github.com/SofiaFlux/summa42/internal/purpose"
+	state "github.com/SofiaFlux/summa42/internal/state/sqlite"
 )
 
 type fakeStatusProvider struct {
@@ -34,6 +38,20 @@ type fakeTaskService struct {
 	created int
 	last    execution.TaskRequest
 	task    domain.Task
+}
+
+type fakeMissionService struct {
+	statement string
+	calls     int
+}
+
+func (f *fakeMissionService) CreateMission(_ context.Context, statement string) (domain.ID, error) {
+	f.calls++
+	f.statement = statement
+	return "mission-1", nil
+}
+func (f *fakeMissionService) ActiveMission(context.Context) (domain.ID, string, error) {
+	return "mission-1", f.statement, nil
 }
 
 func (f *fakeTaskService) CreateTask(_ context.Context, request execution.TaskRequest) (domain.Task, error) {
@@ -143,6 +161,142 @@ func TestControlAPIRequiresBearerAuthAndStatusIsReadOnly(t *testing.T) {
 	}
 	if status.calls != 1 {
 		t.Fatalf("status provider calls = %d, want exactly one read", status.calls)
+	}
+}
+
+func TestMissionCreationRequiresOwnerSignatureBoundToStatement(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServer(t)
+	missions := &fakeMissionService{}
+	server.deps.Missions = missions
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	statement := "Maintain this repository safely"
+	challengeBody, _ := json.Marshal(CreateMissionRequest{Statement: statement})
+	response := doRequest(t, http.MethodPost, httpServer.URL+"/missions/challenge", "control-secret", bytes.NewReader(challengeBody))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("mission challenge status = %d", response.StatusCode)
+	}
+	var challenge MissionChallengeDTO
+	decodeJSON(t, response, &challenge)
+	if challenge.Challenge == "" || challenge.RequestDigest == "" {
+		t.Fatalf("empty challenge: %+v", challenge)
+	}
+
+	request := CreateMissionRequest{Statement: statement, Challenge: challenge.Challenge}
+	requestBody, _ := json.Marshal(request)
+	response = doRequest(t, http.MethodPost, httpServer.URL+"/missions", "control-secret", bytes.NewReader(requestBody))
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || missions.calls != 0 {
+		t.Fatalf("bearer token created mission: status=%d calls=%d", response.StatusCode, missions.calls)
+	}
+
+	request.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(testOwnerPrivateKey(t), MissionSigningMessage(challenge.Challenge, challenge.RequestDigest)))
+	request.Statement = "Different mission"
+	requestBody, _ = json.Marshal(request)
+	response = doRequest(t, http.MethodPost, httpServer.URL+"/missions", "control-secret", bytes.NewReader(requestBody))
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || missions.calls != 0 {
+		t.Fatalf("changed statement accepted: status=%d calls=%d", response.StatusCode, missions.calls)
+	}
+
+	request.Statement = statement
+	requestBody, _ = json.Marshal(request)
+	response = doRequest(t, http.MethodPost, httpServer.URL+"/missions", "control-secret", bytes.NewReader(requestBody))
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("signed mission status = %d", response.StatusCode)
+	}
+	var mission MissionDTO
+	decodeJSON(t, response, &mission)
+	if mission.ID != "mission-1" || mission.Statement != statement || missions.calls != 1 {
+		t.Fatalf("mission=%+v calls=%d", mission, missions.calls)
+	}
+	response = doRequest(t, http.MethodGet, httpServer.URL+"/missions/active", "control-secret", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("active Mission status = %d", response.StatusCode)
+	}
+	decodeJSON(t, response, &mission)
+	if mission.ID != "mission-1" || mission.Statement != statement {
+		t.Fatalf("active Mission = %+v", mission)
+	}
+	response = doRequest(t, http.MethodPost, httpServer.URL+"/missions", "control-secret", bytes.NewReader(requestBody))
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || missions.calls != 1 {
+		t.Fatalf("signature replay accepted: status=%d calls=%d", response.StatusCode, missions.calls)
+	}
+}
+
+func TestClientCreatesMissionThroughSignedControlFlow(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServer(t)
+	signer, err := identity.NewLocalEd25519(filepath.Join(t.TempDir(), "owner.key"), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.config.OwnerPublicKey = signer.PublicKey()
+	missions := &fakeMissionService{}
+	server.deps.Missions = missions
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	client := NewClient(httpServer.URL, "control-secret", httpServer.Client())
+	mission, err := client.CreateMission(context.Background(), "  Maintain the project  ", signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mission.ID != "mission-1" || missions.statement != "Maintain the project" || missions.calls != 1 {
+		t.Fatalf("mission=%+v service=%+v", mission, missions)
+	}
+}
+
+func TestSignedMissionBecomesValidDurableTaskPurpose(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.DB().Close()
+	service := purpose.New(store, clock.System{})
+	server, _, _, _, _, _, _ := newTestServer(t)
+	signer, err := identity.NewLocalEd25519(filepath.Join(t.TempDir(), "owner.key"), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.config.OwnerPublicKey = signer.PublicKey()
+	server.deps.Missions = service
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	client := NewClient(httpServer.URL, "control-secret", httpServer.Client())
+	mission, err := client.CreateMission(ctx, "Maintain the repository", signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := client.ActiveMission(ctx)
+	if err != nil || active != mission {
+		t.Fatalf("active Mission = %+v, err=%v; created %+v", active, err, mission)
+	}
+	if err := service.ValidatePurpose(ctx, domain.PurposeRef{Kind: domain.PurposeMission, ID: mission.ID}); err != nil {
+		t.Fatalf("created Mission cannot be used as task purpose: %v", err)
+	}
+	if _, err := client.CreateMission(ctx, "Competing Mission", signer); err == nil {
+		t.Fatal("second active Mission was accepted")
+	}
+}
+
+func TestMissionChallengeKeepsOnlyNewestPendingRequest(t *testing.T) {
+	server, _, _, _, _, _, _ := newTestServer(t)
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	for i := 0; i < 3; i++ {
+		body, _ := json.Marshal(CreateMissionRequest{Statement: "Mission"})
+		response := doRequest(t, http.MethodPost, httpServer.URL+"/missions/challenge", "control-secret", bytes.NewReader(body))
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("challenge status = %d", response.StatusCode)
+		}
+		response.Body.Close()
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.challenges) != 1 {
+		t.Fatalf("pending challenges = %d, want 1", len(server.challenges))
 	}
 }
 
@@ -298,7 +452,7 @@ func newTestServer(t *testing.T) (*Server, *fakeStatusProvider, *fakeTaskService
 		OwnerPublicKey:   public,
 		ChallengeTTL:     time.Minute,
 	}, Dependencies{
-		Status: status, Tasks: tasks, Approvals: approvals, Attempts: attempts, Operations: operations, Shutdown: shutdown,
+		Status: status, Tasks: tasks, Missions: &fakeMissionService{}, Approvals: approvals, Attempts: attempts, Operations: operations, Shutdown: shutdown,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +504,6 @@ func decodeJSON(t *testing.T, response *http.Response, target any) {
 		t.Fatal(err)
 	}
 }
-
 
 func TestApprovalRejectAndReadRoutesUseDurableDigest(t *testing.T) {
 	server, _, _, approvals, _, _, _ := newTestServer(t)
@@ -406,7 +559,6 @@ func TestApprovalRejectAndReadRoutesUseDurableDigest(t *testing.T) {
 		t.Fatalf("reject calls=%d digest=%s dto=%+v", approvals.rejectCalls, approvals.digest, got)
 	}
 }
-
 
 func TestOwnerCannotChallengeApprovalThatDoesNotRequireOwner(t *testing.T) {
 	server, _, _, approvals, _, _, _ := newTestServer(t)

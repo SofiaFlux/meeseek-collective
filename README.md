@@ -29,6 +29,8 @@ Initialize the local Collective once, start the Box in one terminal, then query 
 ./bin/summa42 init
 ./bin/summa42-box
 ./bin/summa42 status
+./bin/summa42 mission create "Maintain this repository safely"
+./bin/summa42 mission show
 ```
 
 | Command | Purpose |
@@ -36,11 +38,13 @@ Initialize the local Collective once, start the Box in one terminal, then query 
 | `./bin/summa42 init` | Create the local Collective home and initial state. |
 | `./bin/summa42-box` | Start the single local Box daemon. |
 | `./bin/summa42 status` | Query the local Box status. |
+| `./bin/summa42 mission create "..."` | Set the first active Mission with an Owner signature; prints its ID for Mission-rooted Tasks. |
+| `./bin/summa42 mission show` | Show the active Mission and its ID. |
 | `go test ./... -count=1` | Run the normal Go test suite. |
 
 `summa42 init` creates `~/.summa42` by default, including the local SQLite database, evidence directory, local-development Owner/Cube keys and a `config.json` file with mode `0600`. The config contains a randomly generated 256-bit bearer token used only for the local control transport. Set `SUMMA42_HOME` to select another Collective home. `SUMMA42_CONTROL_ENDPOINT` and `SUMMA42_CONTROL_TOKEN` can override the automatically resolved endpoint/token.
 
-The Box never loads the Owner private key during normal startup. Owner signing material is used by the CLI only when an explicit approval operation is requested.
+The Box never loads the Owner private key during normal startup. The CLI uses it only for explicit Owner actions such as approvals and Mission creation. Only one Mission can be active; replacing or adjusting one is not yet exposed by the MVC CLI.
 
 ## What is authoritative
 

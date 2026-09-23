@@ -44,6 +44,21 @@ func TestCreateMissionEnforcesSingleActiveMission(t *testing.T) {
 	}
 }
 
+func TestActiveMissionReturnsPersistedStatement(t *testing.T) {
+	svc, ctx := newPurposeService(t)
+	if _, _, err := svc.ActiveMission(ctx); err == nil {
+		t.Fatal("missionless Collective reported an active Mission")
+	}
+	id, err := svc.CreateMission(ctx, "Maintain the MVC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotID, statement, err := svc.ActiveMission(ctx)
+	if err != nil || gotID != id || statement != "Maintain the MVC" {
+		t.Fatalf("active Mission = %q %q, err=%v", gotID, statement, err)
+	}
+}
+
 func TestGoalTracesToActiveMission(t *testing.T) {
 	svc, ctx := newPurposeService(t)
 	missionID, err := svc.CreateMission(ctx, "Build the MVC safely")
