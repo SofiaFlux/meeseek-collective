@@ -2,8 +2,11 @@ package execution
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/SofiaFlux/summa42/internal/domain"
 )
 
 func TestTaskIntentRoundTrips(t *testing.T) {
@@ -64,6 +67,37 @@ func TestTaskIntentRoundTrips(t *testing.T) {
 	}
 	if string(stored.PayloadJSON) != `{"sequence":9007199254740993}` {
 		t.Fatalf("payload number lost precision: %s", stored.PayloadJSON)
+	}
+}
+
+func TestCreateTaskReplaysAfterPurposeDeactivation(t *testing.T) {
+	svc, _, ctx, missionID := newExecutionService(t)
+	req := baseTaskRequest(missionID)
+	req.IdempotencyKey = "work-before-deactivation"
+	first, err := svc.CreateTask(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.purpose.DeactivateMission(ctx, missionID); err != nil {
+		t.Fatal(err)
+	}
+
+	replayed, err := svc.CreateTask(ctx, req)
+	if err != nil {
+		t.Fatalf("replay of persisted Task: %v", err)
+	}
+	if replayed.ID != first.ID {
+		t.Fatalf("replay created %s, want %s", replayed.ID, first.ID)
+	}
+	drift := req
+	drift.Objective = "different objective"
+	if _, err := svc.CreateTask(ctx, drift); err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Fatalf("drift error = %v, want conflict", err)
+	}
+	newRequest := req
+	newRequest.IdempotencyKey = "another-work"
+	if _, err := svc.CreateTask(ctx, newRequest); !errors.Is(err, domain.ErrInvalidPurpose) {
+		t.Fatalf("new Task error = %v, want ErrInvalidPurpose", err)
 	}
 }
 

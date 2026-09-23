@@ -486,9 +486,6 @@ func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request Ta
 	}
 
 	err = s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		if err := s.purpose.ValidatePurposeTx(ctx, tx, task.Purpose); err != nil {
-			return err
-		}
 		result, err := tx.ExecContext(ctx, `
 			INSERT INTO tasks(
 				task_id, parent_task_id, purpose_kind, purpose_id, task_class, objective, payload_json,
@@ -512,7 +509,7 @@ func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request Ta
 			return err
 		}
 		if inserted == 1 {
-			return nil
+			return s.purpose.ValidatePurposeTx(ctx, tx, task.Purpose)
 		}
 		var existingID domain.ID
 		var existingHash string
