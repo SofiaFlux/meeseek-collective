@@ -8,5 +8,6 @@
 - [x] Obtain review of the written design from the user.
 - [x] Create the first implementation plan after design approval: [generic workflow kernel](../plans/2026-09-23-generic-mission-workflow-kernel.md).
 - [x] Implement and verify the generic workflow kernel slice in bounded steps; see the [kernel implementation plan](../plans/2026-09-23-generic-mission-workflow-kernel.md).
-- [ ] Implement durable case/assessment storage and Task scheduling, then the ADO observation and protected-effect adapters as follow-on work described in the kernel plan's scope boundary and [self-review](../plans/2026-09-23-generic-mission-workflow-kernel.md#self-review-against-the-approved-design).
-- [ ] Run live ADO integration and smoke checks on the user's test machine after the follow-on storage and adapter work is complete.
+- [x] Implement the durable case/assessment ledger; see the [durable workflow cases plan](../plans/2026-09-23-durable-workflow-cases.md).
+- [ ] Implement Task scheduling and the ADO observation and protected-effect adapters as follow-on work described in the kernel plan's scope boundary and [self-review](../plans/2026-09-23-generic-mission-workflow-kernel.md#self-review-against-the-approved-design).
+- [ ] Run live ADO integration and smoke checks on the user's test machine after the follow-on scheduling and adapter work is complete.
