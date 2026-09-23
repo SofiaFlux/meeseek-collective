@@ -2,10 +2,13 @@ package execution
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +22,9 @@ import (
 type TaskRequest struct {
 	Purpose              domain.PurposeRef
 	TaskClass            string
+	Objective            string
+	PayloadJSON          json.RawMessage
+	IdempotencyKey       string
 	AcceptanceCriteria   []string
 	RequiredCapabilities []string
 	RequiredEnforcement  domain.EnforcementLevel
@@ -42,9 +48,9 @@ type AttemptStartRecorder interface {
 }
 
 type Service struct {
-	store         *state.Store
-	clock         clock.Clock
-	purpose       *purpose.Service
+	store          *state.Store
+	clock          clock.Clock
+	purpose        *purpose.Service
 	startRecorders []AttemptStartRecorder
 }
 
@@ -428,12 +434,32 @@ func (s *Service) ChallengeTask(ctx context.Context, taskID domain.ID, scope dom
 }
 
 func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request TaskRequest) (domain.Task, error) {
+	var err error
+	request, err = normalizeTaskIntent(request)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	var requestHash string
+	if request.IdempotencyKey != "" {
+		encoded, err := json.Marshal(struct {
+			ParentTaskID domain.ID
+			TaskRequest
+		}{parentID, request})
+		if err != nil {
+			return domain.Task{}, err
+		}
+		digest := sha256.Sum256(encoded)
+		requestHash = hex.EncodeToString(digest[:])
+	}
 	now := s.clock.Now().UTC()
 	task := domain.Task{
 		ID:                   domain.NewID("task"),
 		ParentTaskID:         parentID,
 		Purpose:              request.Purpose,
 		TaskClass:            request.TaskClass,
+		Objective:            request.Objective,
+		PayloadJSON:          append(json.RawMessage(nil), request.PayloadJSON...),
+		IdempotencyKey:       request.IdempotencyKey,
 		State:                domain.TaskEligible,
 		AcceptanceCriteria:   append([]string(nil), request.AcceptanceCriteria...),
 		RequiredCapabilities: append([]string(nil), request.RequiredCapabilities...),
@@ -463,18 +489,42 @@ func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request Ta
 		if err := s.purpose.ValidatePurposeTx(ctx, tx, task.Purpose); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			INSERT INTO tasks(
-				task_id, parent_task_id, purpose_kind, purpose_id, task_class, state, current_fence,
+				task_id, parent_task_id, purpose_kind, purpose_id, task_class, objective, payload_json,
+				idempotency_key, request_hash, state, current_fence,
 				acceptance_criteria_json, required_capabilities_json, required_enforcement,
 				authority_ceiling_json, resource_envelope_id, priority, earliest_start, deadline,
 				created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			task.ID, nullableID(parentID), task.Purpose.Kind, task.Purpose.ID, task.TaskClass, task.State,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
+			task.ID, nullableID(parentID), task.Purpose.Kind, task.Purpose.ID, task.TaskClass,
+			task.Objective, string(task.PayloadJSON), nullableString(task.IdempotencyKey), nullableString(requestHash), task.State,
 			string(criteriaJSON), string(capabilitiesJSON), task.RequiredEnforcement,
 			string(authorityJSON), task.ResourceEnvelopeID, task.Priority,
 			nullableTime(task.EarliestStart), nullableTime(task.Deadline), formatTime(now), formatTime(now),
 		)
+		if err != nil {
+			return err
+		}
+		inserted, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if inserted == 1 {
+			return nil
+		}
+		var existingID domain.ID
+		var existingHash string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT task_id, request_hash FROM tasks WHERE idempotency_key = ?`, task.IdempotencyKey,
+		).Scan(&existingID, &existingHash); err != nil {
+			return err
+		}
+		if existingHash != requestHash {
+			return fmt.Errorf("task idempotency key %q conflicts with a different request", task.IdempotencyKey)
+		}
+		task, err = loadTask(ctx, tx, existingID)
 		return err
 	})
 	if err != nil {
@@ -491,16 +541,19 @@ func loadTask(ctx context.Context, q interface {
 	var purposeKind string
 	var stateValue string
 	var enforcement string
-	var criteriaJSON, capabilitiesJSON, authorityJSON string
+	var criteriaJSON, capabilitiesJSON, authorityJSON, payloadJSON string
+	var idempotencyKey sql.NullString
 	var createdAt, updatedAt string
 	if err := q.QueryRowContext(ctx, `
-		SELECT task_id, parent_task_id, purpose_kind, purpose_id, task_class, state, current_attempt_id, current_fence,
+		SELECT task_id, parent_task_id, purpose_kind, purpose_id, task_class, objective, payload_json,
+		       idempotency_key, state, current_attempt_id, current_fence,
 		       acceptance_criteria_json, required_capabilities_json, required_enforcement,
 		       authority_ceiling_json, resource_envelope_id, priority, earliest_start, deadline,
 		       created_at, updated_at
 		FROM tasks WHERE task_id = ?`, taskID,
 	).Scan(
-		&task.ID, &parentID, &purposeKind, &task.Purpose.ID, &task.TaskClass, &stateValue, &currentAttempt, &task.CurrentFence,
+		&task.ID, &parentID, &purposeKind, &task.Purpose.ID, &task.TaskClass, &task.Objective, &payloadJSON,
+		&idempotencyKey, &stateValue, &currentAttempt, &task.CurrentFence,
 		&criteriaJSON, &capabilitiesJSON, &enforcement, &authorityJSON, &task.ResourceEnvelopeID,
 		&task.Priority, &earliest, &deadline, &createdAt, &updatedAt,
 	); err != nil {
@@ -510,6 +563,8 @@ func loadTask(ctx context.Context, q interface {
 		return domain.Task{}, err
 	}
 	task.ParentTaskID = domain.ID(parentID.String)
+	task.PayloadJSON = json.RawMessage(payloadJSON)
+	task.IdempotencyKey = idempotencyKey.String
 	task.CurrentAttemptID = domain.ID(currentAttempt.String)
 	task.Purpose.Kind = domain.PurposeKind(purposeKind)
 	task.State = domain.TaskState(stateValue)
@@ -572,6 +627,32 @@ func normalizeRootRequest(request TaskRequest) (TaskRequest, error) {
 	if err := validateTimeWindow(request.EarliestStart, request.Deadline); err != nil {
 		return TaskRequest{}, err
 	}
+	return request, nil
+}
+
+func normalizeTaskIntent(request TaskRequest) (TaskRequest, error) {
+	request.Objective = strings.TrimSpace(request.Objective)
+	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
+	if len(strings.TrimSpace(string(request.PayloadJSON))) == 0 {
+		request.PayloadJSON = json.RawMessage(`{}`)
+	} else {
+		var value any
+		decoder := json.NewDecoder(strings.NewReader(string(request.PayloadJSON)))
+		decoder.UseNumber()
+		if err := decoder.Decode(&value); err != nil {
+			return TaskRequest{}, fmt.Errorf("invalid task payload JSON: %w", err)
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return TaskRequest{}, errors.New("invalid task payload JSON: multiple values")
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return TaskRequest{}, fmt.Errorf("normalize task payload JSON: %w", err)
+		}
+		request.PayloadJSON = encoded
+	}
+	request.EarliestStart = request.EarliestStart.UTC()
+	request.Deadline = request.Deadline.UTC()
 	return request, nil
 }
 
@@ -679,6 +760,13 @@ func nullableID(id domain.ID) any {
 		return nil
 	}
 	return string(id)
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func nullableTime(value time.Time) any {

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type PurposeKind string
 
@@ -39,6 +42,9 @@ type Task struct {
 	ParentTaskID         ID
 	Purpose              PurposeRef
 	TaskClass            string
+	Objective            string
+	PayloadJSON          json.RawMessage
+	IdempotencyKey       string
 	State                TaskState
 	CurrentAttemptID     ID
 	CurrentFence         int64

@@ -105,7 +105,6 @@ func (s *Service) Next(ctx context.Context, capacity CapacitySnapshot) (*TaskCan
 	return &candidates[0], nil
 }
 
-
 func (s *Service) ChooseExecutor(ctx context.Context, task domain.Task, eligibleExecutorKinds []string) (string, error) {
 	if err := s.configured(); err != nil {
 		return "", err
@@ -154,7 +153,8 @@ func (s *Service) Lease(ctx context.Context, taskID domain.ID, executorKind stri
 
 func (s *Service) loadEligibleTasks(ctx context.Context) ([]domain.Task, error) {
 	rows, err := s.store.DB().QueryContext(ctx, `
-		SELECT task_id, COALESCE(parent_task_id, ''), purpose_kind, purpose_id, task_class, state,
+		SELECT task_id, COALESCE(parent_task_id, ''), purpose_kind, purpose_id, task_class,
+		       objective, payload_json, COALESCE(idempotency_key, ''), state,
 		       COALESCE(current_attempt_id, ''), current_fence, acceptance_criteria_json,
 		       required_capabilities_json, required_enforcement, authority_ceiling_json,
 		       resource_envelope_id, priority, earliest_start, deadline, created_at, updated_at
@@ -167,17 +167,19 @@ func (s *Service) loadEligibleTasks(ctx context.Context) ([]domain.Task, error) 
 	var tasks []domain.Task
 	for rows.Next() {
 		var task domain.Task
-		var acceptanceJSON, capabilitiesJSON, authorityJSON string
+		var acceptanceJSON, capabilitiesJSON, authorityJSON, payloadJSON string
 		var earliest, deadline sql.NullString
 		var createdAt, updatedAt string
 		if err := rows.Scan(
-			&task.ID, &task.ParentTaskID, &task.Purpose.Kind, &task.Purpose.ID, &task.TaskClass, &task.State,
+			&task.ID, &task.ParentTaskID, &task.Purpose.Kind, &task.Purpose.ID, &task.TaskClass,
+			&task.Objective, &payloadJSON, &task.IdempotencyKey, &task.State,
 			&task.CurrentAttemptID, &task.CurrentFence, &acceptanceJSON, &capabilitiesJSON,
 			&task.RequiredEnforcement, &authorityJSON, &task.ResourceEnvelopeID, &task.Priority,
 			&earliest, &deadline, &createdAt, &updatedAt,
 		); err != nil {
 			return nil, err
 		}
+		task.PayloadJSON = json.RawMessage(payloadJSON)
 		if err := json.Unmarshal([]byte(acceptanceJSON), &task.AcceptanceCriteria); err != nil {
 			return nil, fmt.Errorf("decode acceptance criteria for %s: %w", task.ID, err)
 		}
