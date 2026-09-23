@@ -112,8 +112,12 @@ func TestDecideRejectsAuthorityGrowth(t *testing.T) {
 			input := testInput(Assessment{
 				Verdict: Continue, EvidenceIDs: []string{"evidence-1"}, Next: &tt.proposal,
 			})
-			if decision, err := Decide(input); err == nil {
+			decision, err := Decide(input)
+			if err == nil {
 				t.Fatalf("Decide() = %#v, nil error; want authority validation error", decision)
+			}
+			if decision.Next != nil {
+				t.Errorf("Decide() next = %#v, want nil for invalid authority", decision.Next)
 			}
 		})
 	}
