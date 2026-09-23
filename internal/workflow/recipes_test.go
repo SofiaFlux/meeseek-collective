@@ -143,7 +143,14 @@ func TestDecisionKernelImportsNoRecipeOrIOPackages(t *testing.T) {
 		importPath := strings.Trim(imported.Path.Value, "\"")
 		lowerPath := strings.ToLower(importPath)
 		base := path.Base(lowerPath)
-		if strings.Contains(lowerPath, "ado") || strings.Contains(lowerPath, "copilot") {
+		recipePackage := false
+		for _, segment := range strings.Split(lowerPath, "/") {
+			if strings.HasPrefix(segment, "ado") || segment == "adomcp" || strings.HasPrefix(segment, "copilot") {
+				recipePackage = true
+				break
+			}
+		}
+		if recipePackage {
 			t.Errorf("decision.go imports recipe-specific package %q", importPath)
 		}
 		if _, ok := ioPackages[lowerPath]; ok {
