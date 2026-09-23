@@ -21,6 +21,7 @@ func TestCaseSurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = store.DB().Close() })
 	clk := testutil.NewClock(time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC))
 	purposes := purpose.New(store, clk)
 	missionID, err := purposes.CreateMission(ctx, "Review incoming work")
