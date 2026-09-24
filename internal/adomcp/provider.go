@@ -3,6 +3,7 @@ package adomcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -188,7 +189,37 @@ func (p *Provider) Call(ctx context.Context, capability string, request any) (an
 	if result == nil || result.IsError {
 		return nil, fmt.Errorf("ADO MCP %s returned a tool error", tool)
 	}
-	return result, nil
+	return decodeToolResult(result, tool)
+}
+
+func decodeToolResult(result *mcp.CallToolResult, tool string) (map[string]any, error) {
+	if result.StructuredContent != nil {
+		raw, err := json.Marshal(result.StructuredContent)
+		if err == nil {
+			var decoded map[string]any
+			if json.Unmarshal(raw, &decoded) == nil && decoded != nil {
+				return decoded, nil
+			}
+		}
+	}
+	var texts []string
+	for _, item := range result.Content {
+		if text, ok := item.(*mcp.TextContent); ok {
+			texts = append(texts, text.Text)
+		}
+	}
+	for _, text := range texts {
+		var decoded map[string]any
+		if json.Unmarshal([]byte(text), &decoded) == nil && decoded != nil {
+			return decoded, nil
+		}
+	}
+	joined := strings.TrimSpace(strings.Join(texts, "\n"))
+	var decoded map[string]any
+	if joined != "" && json.Unmarshal([]byte(joined), &decoded) == nil && decoded != nil {
+		return decoded, nil
+	}
+	return nil, fmt.Errorf("ADO MCP %s returned an undecodable result", tool)
 }
 
 func toolFor(capability string) (string, error) {

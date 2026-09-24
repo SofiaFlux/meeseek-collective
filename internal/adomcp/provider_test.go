@@ -28,9 +28,49 @@ func (s *fakeSession) CallTool(_ context.Context, params *mcp.CallToolParams) (*
 	if s.result != nil {
 		return s.result, nil
 	}
-	return &mcp.CallToolResult{}, nil
+	return &mcp.CallToolResult{StructuredContent: map[string]any{}}, nil
 }
 func (s *fakeSession) Close() error { return nil }
+
+func structuredCallResult(content map[string]any) *mcp.CallToolResult {
+	return &mcp.CallToolResult{StructuredContent: content}
+}
+
+func textCallResult(text string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+}
+
+func garbageCallResult() *mcp.CallToolResult {
+	return textCallResult("not JSON")
+}
+
+func TestCallDecodesStructuredAndTextResults(t *testing.T) {
+	p, _ := New(Config{Command: "/bin/true", Organization: "Contoso"})
+	session := &fakeSession{tools: []string{"repo_pull_request"}}
+	p.dial = func(context.Context) (mcpSession, error) { return session, nil }
+	session.result = structuredCallResult(map[string]any{"status": "active"})
+	got, err := p.Call(t.Context(), "ado.pr.get", map[string]any{"action": "get"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok || m["status"] != "active" {
+		t.Fatalf("got %#v", got)
+	}
+	session.result = textCallResult(`{"status":"text"}`)
+	got, err = p.Call(t.Context(), "ado.pr.get", map[string]any{"action": "get"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ = got.(map[string]any)
+	if m == nil || m["status"] != "text" {
+		t.Fatalf("got %#v", got)
+	}
+	session.result = garbageCallResult()
+	if _, err := p.Call(t.Context(), "ado.pr.get", map[string]any{"action": "get"}); err == nil {
+		t.Fatal("accepted undecodable result")
+	}
+}
 
 func TestProviderAdvertisesOnlyExplicitReadCapabilities(t *testing.T) {
 	p, err := New(Config{Command: "/bin/true", Organization: "Contoso"})
