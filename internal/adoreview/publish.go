@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/SofiaFlux/summa42/internal/adoeffects"
@@ -177,8 +178,16 @@ func (p *Publisher) Start(ctx context.Context, envelope executors.AttemptEnvelop
 
 func decodePublishPayload(raw json.RawMessage) (PublishPayload, error) {
 	var payload PublishPayload
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
 		return PublishPayload{}, fmt.Errorf("decode publish payload: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return PublishPayload{}, errors.New("decode publish payload trailer: multiple JSON values")
+	} else if !errors.Is(err, io.EOF) {
+		return PublishPayload{}, fmt.Errorf("decode publish payload trailer: %w", err)
 	}
 	payload.Decision = strings.TrimSpace(payload.Decision)
 	payload.CaseID = strings.TrimSpace(payload.CaseID)

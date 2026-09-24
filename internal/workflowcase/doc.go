@@ -6,10 +6,11 @@
 // supplies objective, payload, acceptance criteria, enforcement, and resource
 // envelope. The case is rechecked in the Task creation transaction.
 //
-// Materialization does not dispatch work. The Scheduler has no production
-// worker loop, and ADO observation, review, and protected-effect adapters are
-// follow-on work. This service does not create Attempt records, verify results,
-// create or validate signed grants or evidence objects, or perform external
-// effects. Callers must bind case work IDs to real Attempt IDs and revalidate
-// the current Owner grant before performing any effect.
+// Materialization does not dispatch work. The scheduler worker, workflow
+// observers, ADO observation/review/protected-effect adapters, publisher, and
+// independent final verifier operate around this durable ledger. This service
+// does not create Attempt records, verify results, create or validate signed
+// grants or evidence objects, or perform external effects. Callers must bind
+// case work IDs to real Attempt IDs and revalidate the current Owner grant
+// before performing any effect.
 package workflowcase

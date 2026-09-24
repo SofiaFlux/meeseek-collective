@@ -387,11 +387,8 @@ func (d *Driver) verifyPublication(ctx context.Context, c workflowcase.Case, tas
 		if !ok {
 			return d.hold(ctx, c, task, "missing slot "+intent.slot, evidenceIDs, result)
 		}
-		if entry.Skipped {
-			return d.hold(ctx, c, task, "skipped slot "+intent.slot, evidenceIDs, result)
-		}
-		if entry.RecordedOnly {
-			return d.hold(ctx, c, task, "recorded-only slot "+intent.slot, evidenceIDs, result)
+		if reason := publisherEntryRejection(intent.slot, entry); reason != "" {
+			return d.hold(ctx, c, task, reason, evidenceIDs, result)
 		}
 		if entry.State != domain.OperationConfirmedEffect {
 			return d.hold(ctx, c, task, fmt.Sprintf("slot %s is %s", intent.slot, entry.State), evidenceIDs, result)
@@ -434,6 +431,16 @@ func (d *Driver) verifyPublication(ctx context.Context, c workflowcase.Case, tas
 	}
 	result.ReadyForVerification = append(result.ReadyForVerification, c.ID)
 	return nil
+}
+
+func publisherEntryRejection(slot string, entry publishEvidenceEntry) string {
+	if entry.Skipped {
+		return "skipped slot " + slot
+	}
+	if entry.RecordedOnly {
+		return "recorded-only slot " + slot
+	}
+	return ""
 }
 
 func decodePublisherEntries(contents [][]byte) ([]publishEvidenceEntry, string) {

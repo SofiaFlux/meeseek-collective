@@ -22,6 +22,10 @@ import (
 	"github.com/SofiaFlux/summa42/internal/workflowcase"
 )
 
+type TaskAcceptance interface {
+	AcceptTask(context.Context, domain.ID, verification.AcceptanceRequest) (verification.AcceptanceRecord, error)
+}
+
 type FinalVerifierConfig struct {
 	MissionID domain.ID
 	// Project limits verification to ready cases whose Work 2 payload has the same project.
@@ -39,11 +43,11 @@ type FinalVerifierResult struct {
 }
 
 type FinalVerifier struct {
-	cases        *workflowcase.Service
-	execution    *execution.Service
-	evidence     *evidence.Store
-	verification *verification.Service
-	config       FinalVerifierConfig
+	cases      *workflowcase.Service
+	execution  *execution.Service
+	evidence   *evidence.Store
+	acceptance TaskAcceptance
+	config     FinalVerifierConfig
 }
 
 type finalVerificationDisposition uint8
@@ -57,6 +61,14 @@ const (
 type finalVerificationVerdict struct {
 	Slot  string                `json:"slot"`
 	State domain.OperationState `json:"state"`
+}
+
+type deterministicAssessmentError struct {
+	reason string
+}
+
+func (e *deterministicAssessmentError) Error() string {
+	return e.reason
 }
 
 type finalVerificationSnapshot struct {
@@ -91,7 +103,7 @@ func NewFinalVerifier(cases *workflowcase.Service, executionSvc *execution.Servi
 	}
 	return &FinalVerifier{
 		cases: cases, execution: executionSvc, evidence: evidenceStore,
-		verification: verificationSvc, config: config,
+		acceptance: verificationSvc, config: config,
 	}, nil
 }
 
@@ -157,8 +169,15 @@ func (v *FinalVerifier) Run(ctx context.Context, interval time.Duration) error {
 
 func (v *FinalVerifier) stepCase(ctx context.Context, c workflowcase.Case) (finalVerificationDisposition, error) {
 	publication, found, err := discoverPublicationAssessment(ctx, v.cases, v.evidence, c, false)
-	if err != nil || !found {
+	if err != nil {
+		var problem *deterministicAssessmentError
+		if errors.As(err, &problem) {
+			return v.reject(ctx, c, problem.reason, nil)
+		}
 		return finalVerificationHeld, err
+	}
+	if !found {
+		return finalVerificationHeld, nil
 	}
 	completionIDs, contents, reason := v.loadCompletionEvidence(ctx, publication.evidenceIDs)
 	if reason != "" {
@@ -172,6 +191,10 @@ func (v *FinalVerifier) stepCase(ctx context.Context, c workflowcase.Case) (fina
 	producingCase.CurrentWorkID = workID
 	producing, found, err := discoverPublicationAssessment(ctx, v.cases, v.evidence, producingCase, true)
 	if err != nil {
+		var problem *deterministicAssessmentError
+		if errors.As(err, &problem) {
+			return v.reject(ctx, c, problem.reason, completionIDs)
+		}
 		return finalVerificationHeld, err
 	}
 	if !found || producing.workID == "" || producing.requestWorkID != producing.workID || producing.caseWorkID != workID {
@@ -184,27 +207,18 @@ func (v *FinalVerifier) stepCase(ctx context.Context, c workflowcase.Case) (fina
 	if !found {
 		return v.reject(ctx, c, "Work 2 task not found for producing assessment", completionIDs)
 	}
-	if v.config.Project != "" {
-		var projectPayload struct {
-			Project string `json:"project"`
-		}
-		if err := json.Unmarshal(task.PayloadJSON, &projectPayload); err != nil {
-			return finalVerificationHeld, nil
-		}
-		project := strings.TrimSpace(projectPayload.Project)
-		if project == "" || project != v.config.Project {
-			return finalVerificationHeld, nil
-		}
-	}
-	if err := validateFinalTask(c, workID, task); err != nil {
-		return v.reject(ctx, c, err.Error(), completionIDs)
-	}
 	payload, err := decodePublishPayload(task.PayloadJSON)
 	if err != nil {
 		return v.reject(ctx, c, "invalid Work 2 payload: "+err.Error(), completionIDs)
 	}
 	if err := bindFinalPayload(c, workID, payload); err != nil {
 		return v.reject(ctx, c, err.Error(), completionIDs)
+	}
+	if err := validateFinalTask(c, workID, task); err != nil {
+		return v.reject(ctx, c, err.Error(), completionIDs)
+	}
+	if v.config.Project != "" && payload.Project != v.config.Project {
+		return finalVerificationHeld, nil
 	}
 	decisionID := producing.decisionID
 	if payload.Decision != string(decisionID) {
@@ -262,14 +276,14 @@ func discoverPublicationAssessment(ctx context.Context, cases *workflowcase.Serv
 	for _, record := range records {
 		var stored workflowcase.AssessmentResult
 		if err := json.Unmarshal([]byte(record.ResultJSON), &stored); err != nil {
-			return driverAssessment{}, false, fmt.Errorf("decode assessment %s result: %w", record.ID, err)
+			return driverAssessment{}, false, &deterministicAssessmentError{reason: fmt.Sprintf("decode assessment %s result: %v", record.ID, err)}
 		}
 		if stored.Case.CurrentWorkID != c.CurrentWorkID {
 			continue
 		}
 		var request workflowcase.AssessmentRequest
 		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {
-			return driverAssessment{}, false, fmt.Errorf("decode assessment %s request: %w", record.ID, err)
+			return driverAssessment{}, false, &deterministicAssessmentError{reason: fmt.Sprintf("decode assessment %s request: %v", record.ID, err)}
 		}
 		assessment := driverAssessment{
 			workID:        domain.ID(record.WorkID),
@@ -281,11 +295,14 @@ func discoverPublicationAssessment(ctx context.Context, cases *workflowcase.Serv
 		for _, rawID := range request.Assessment.EvidenceIDs {
 			id := domain.ID(strings.TrimSpace(rawID))
 			if id == "" {
-				continue
+				return driverAssessment{}, false, &deterministicAssessmentError{reason: "assessment evidence contains a blank ID"}
 			}
 			assessment.evidenceIDs = append(assessment.evidenceIDs, id)
 			object, data, err := evidenceStore.Get(ctx, id)
 			if err != nil {
+				if errors.Is(err, evidence.ErrEvidenceNotFound) || errors.Is(err, evidence.ErrEvidenceCorrupt) {
+					return driverAssessment{}, false, &deterministicAssessmentError{reason: fmt.Sprintf("read assessment evidence %s: %v", id, err)}
+				}
 				return driverAssessment{}, false, err
 			}
 			if object.Kind == "ado.review.decision" {
@@ -303,7 +320,7 @@ func discoverPublicationAssessment(ctx context.Context, cases *workflowcase.Serv
 				return driverAssessment{}, false, nil
 			}
 			if err := json.Unmarshal(decisionData, &assessment.decision); err != nil {
-				return driverAssessment{}, false, fmt.Errorf("decode review decision %s: %w", assessment.decisionID, err)
+				return driverAssessment{}, false, &deterministicAssessmentError{reason: fmt.Sprintf("decode review decision %s: %v", assessment.decisionID, err)}
 			}
 		}
 		return assessment, true, nil
@@ -374,6 +391,9 @@ func bindPublisherEntries(intents []publishIntent, entries []publishEvidenceEntr
 		if slot == "" {
 			return nil, "publisher evidence has a blank slot"
 		}
+		if reason := publisherEntryRejection(slot, entry); reason != "" {
+			return nil, reason
+		}
 		if _, duplicate := observed[slot]; duplicate {
 			return nil, "duplicate publisher slot " + slot
 		}
@@ -429,7 +449,7 @@ func (v *FinalVerifier) finalizeTask(ctx context.Context, task domain.Task, comp
 	case domain.TaskSucceeded:
 		return true, nil
 	case domain.TaskAwaitingVerification:
-		_, err := v.verification.AcceptTask(ctx, task.ID, verification.AcceptanceRequest{
+		_, err := v.acceptance.AcceptTask(ctx, task.ID, verification.AcceptanceRequest{
 			VerifierID: v.config.VerifierID, VerifierType: v.config.VerifierType,
 			CriteriaMet: true, EvidenceIDs: completionIDs,
 		})
@@ -563,7 +583,7 @@ func (v *FinalVerifier) reject(ctx context.Context, c workflowcase.Case, reason 
 }
 
 func (v *FinalVerifier) configured() error {
-	if v == nil || v.cases == nil || v.execution == nil || v.evidence == nil || v.verification == nil {
+	if v == nil || v.cases == nil || v.execution == nil || v.evidence == nil || v.acceptance == nil {
 		return errors.New("final verifier is not configured")
 	}
 	return nil

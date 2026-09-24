@@ -481,6 +481,33 @@ func TestPublishPrepareUnknownRecordedAndStops(t *testing.T) {
 	assertPublishEvidence(t, result, `{"slot":"ado.pr.comment:proj/shop#1:a:b:0","operation":"op-1","state":"OUTCOME_UNKNOWN"}`)
 }
 
+func TestDecodePublishPayloadRejectsUnknownAndTrailingValues(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		reason  string
+	}{
+		{
+			name:    "unknown field",
+			payload: `{"decision":"decision","caseID":"case","workID":"work","project":"proj","repo":"shop","pr":1,"revision":"a:b","unexpected":true}`,
+			reason:  "unknown field",
+		},
+		{
+			name:    "trailing value",
+			payload: `{"decision":"decision","caseID":"case","workID":"work","project":"proj","repo":"shop","pr":1,"revision":"a:b"} {}`,
+			reason:  "trailer",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodePublishPayload(json.RawMessage(test.payload)); err == nil {
+				t.Fatal("accepted non-strict publish payload")
+			} else if !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("error = %q, want reason containing %q", err, test.reason)
+			}
+		})
+	}
+}
+
 func TestPublishRejectsBadPayload(t *testing.T) {
 	ctx := context.Background()
 	store := testutil.OpenStore(t)

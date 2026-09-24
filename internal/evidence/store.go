@@ -26,6 +26,11 @@ type Metadata struct {
 	Kind      string
 }
 
+var (
+	ErrEvidenceNotFound = errors.New("evidence not found")
+	ErrEvidenceCorrupt  = errors.New("evidence corrupt")
+)
+
 type EvidenceObject struct {
 	ID          domain.ID
 	ContentHash string
@@ -170,23 +175,26 @@ func (s *Store) Get(ctx context.Context, id domain.ID) (EvidenceObject, []byte, 
 		`SELECT content_hash, media_type, kind, size_bytes, created_at FROM evidence_objects WHERE evidence_id = ?`, id,
 	).Scan(&object.ContentHash, &object.MediaType, &object.Kind, &object.SizeBytes, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return EvidenceObject{}, nil, fmt.Errorf("evidence %q not found", id)
+			return EvidenceObject{}, nil, fmt.Errorf("%w: evidence %q not found", ErrEvidenceNotFound, id)
 		}
 		return EvidenceObject{}, nil, err
 	}
 	var err error
 	if object.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
-		return EvidenceObject{}, nil, fmt.Errorf("parse evidence timestamp: %w", err)
+		return EvidenceObject{}, nil, fmt.Errorf("%w: parse evidence timestamp: %v", ErrEvidenceCorrupt, err)
 	}
 	if len(object.ContentHash) != 64 {
-		return EvidenceObject{}, nil, fmt.Errorf("evidence %q has invalid content hash length %d", id, len(object.ContentHash))
+		return EvidenceObject{}, nil, fmt.Errorf("%w: evidence %q has invalid content hash length %d", ErrEvidenceCorrupt, id, len(object.ContentHash))
 	}
 	if _, err := hex.DecodeString(object.ContentHash); err != nil {
-		return EvidenceObject{}, nil, fmt.Errorf("evidence %q has invalid content hash: %w", id, err)
+		return EvidenceObject{}, nil, fmt.Errorf("%w: evidence %q has invalid content hash: %v", ErrEvidenceCorrupt, id, err)
 	}
 	path := filepath.Join(s.root, "blobs", "sha256", object.ContentHash[:2], object.ContentHash)
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return EvidenceObject{}, nil, fmt.Errorf("%w: evidence %q blob is missing: %v", ErrEvidenceCorrupt, id, err)
+		}
 		return EvidenceObject{}, nil, fmt.Errorf("read evidence blob: %w", err)
 	}
 	if err := verifyHash(path, object.ContentHash); err != nil {
@@ -231,7 +239,7 @@ func verifyHash(path, expected string) error {
 		return err
 	}
 	if got := hashString(h); got != expected {
-		return fmt.Errorf("evidence blob hash mismatch: got %s want %s", got, expected)
+		return fmt.Errorf("%w: evidence blob hash mismatch: got %s want %s", ErrEvidenceCorrupt, got, expected)
 	}
 	return nil
 }

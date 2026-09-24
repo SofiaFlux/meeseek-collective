@@ -296,6 +296,84 @@ func TestMigration00015DownWithClosedCase(t *testing.T) {
 	}
 }
 
+func TestMigration00015DownWithRejectedCase(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "workflow-verifications-rejected-down.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.DB().Close()
+	db := store.DB()
+
+	migrations, err := fs.Sub(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, db, migrations, goose.WithTableName("schema_migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.DownTo(ctx, 14); err != nil {
+		t.Fatalf("down to v14: %v", err)
+	}
+
+	now := "2026-09-24T10:00:00Z"
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO missions(mission_id,statement,active,created_at,deactivated_at)
+		VALUES ('mission-workflow-15-rejected','Verify workflow migration',1,?,NULL)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO workflow_cases(case_id,mission_id,source,object_id,revision_id,observation_evidence_id,
+			initial_request_json,grant_json,state,current_work_id,next_work_json,completed_steps,max_steps,
+			remaining_budget,progress_signature,created_at,updated_at)
+		VALUES ('case-workflow-15-rejected','mission-workflow-15-rejected','ado','item-15','r15','observation-15',
+			'{}','{"Capabilities":["read"],"Actions":null}','BLOCKED','','{}',1,3,2,'rejected',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO workflow_assessments(assessment_id,case_id,work_id,request_json,result_json,created_at)
+		VALUES ('assessment-workflow-15-rejected','case-workflow-15-rejected','work-15','{}','{}',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, 15); err != nil {
+		t.Fatalf("up to v15: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO workflow_verifications(verification_id,case_id,verifier_id,verifier_type,snapshot_hash,
+			snapshot_json,evidence_ids_json,created_at)
+		VALUES ('verification-workflow-15-rejected','case-workflow-15-rejected','', 'REJECT','',
+			'{"reason":"publication mismatch"}','[]',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := provider.DownTo(ctx, 14); err != nil {
+		t.Fatalf("down rejected case: %v", err)
+	}
+	var state string
+	if err := db.QueryRowContext(ctx, "SELECT state FROM workflow_cases WHERE case_id='case-workflow-15-rejected'").Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "BLOCKED" {
+		t.Fatalf("state after down=%q, want BLOCKED", state)
+	}
+	var assessmentCount int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM workflow_assessments WHERE case_id='case-workflow-15-rejected'").Scan(&assessmentCount); err != nil {
+		t.Fatal(err)
+	}
+	if assessmentCount != 1 {
+		t.Fatalf("assessment count after down=%d, want 1", assessmentCount)
+	}
+	var verificationTableCount int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='workflow_verifications'").Scan(&verificationTableCount); err != nil {
+		t.Fatal(err)
+	}
+	if verificationTableCount != 0 {
+		t.Fatal("workflow_verifications survived down migration")
+	}
+}
+
 func TestMigration00015RejectsDuplicateVerificationCase(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "workflow-verifications-unique.db")
