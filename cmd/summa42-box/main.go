@@ -456,6 +456,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "run-final-verifier" {
+		if err := runFinalVerifier(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -850,4 +857,125 @@ func runDriver(ctx context.Context, args []string) error {
 		return fmt.Errorf("construct ADO workflow driver: %w", err)
 	}
 	return driver.Run(ctx, pollInterval)
+}
+
+const (
+	defaultFinalVerifierID   = "final-verifier"
+	defaultFinalVerifierType = "AUTOMATED"
+)
+
+// The default CLI identity is final-verifier/AUTOMATED; deployments can override both values.
+type finalVerifierFlags struct {
+	MissionID    domain.ID
+	Project      string
+	VerifierID   domain.ID
+	VerifierType string
+}
+
+func parseFinalVerifierFlags(args []string) (finalVerifierFlags, time.Duration, error) {
+	var mission, project, verifierID, verifierType string
+	var pollInterval time.Duration
+	flags := flag.NewFlagSet("run-final-verifier", flag.ContinueOnError)
+	flags.StringVar(&mission, "mission", "", "mission ID for final verification cases")
+	flags.StringVar(&project, "project", "", "ADO project scope (empty uses stored payload scope)")
+	flags.StringVar(&verifierID, "verifier-id", defaultFinalVerifierID, "independent final verifier identity")
+	flags.StringVar(&verifierType, "verifier-type", defaultFinalVerifierType, "independent final verifier type")
+	flags.DurationVar(&pollInterval, "poll-interval", 30*time.Second, "interval between final verifier polls")
+	if err := flags.Parse(args); err != nil {
+		return finalVerifierFlags{}, 0, err
+	}
+	mission = strings.TrimSpace(mission)
+	project = strings.TrimSpace(project)
+	verifierID = strings.TrimSpace(verifierID)
+	verifierType = strings.TrimSpace(verifierType)
+	if mission == "" {
+		return finalVerifierFlags{}, 0, errors.New("run-final-verifier requires --mission")
+	}
+	if verifierID == "" {
+		return finalVerifierFlags{}, 0, errors.New("run-final-verifier requires a non-empty --verifier-id")
+	}
+	if verifierType == "" {
+		return finalVerifierFlags{}, 0, errors.New("run-final-verifier requires a non-empty --verifier-type")
+	}
+	if pollInterval <= 0 {
+		return finalVerifierFlags{}, 0, errors.New("run-final-verifier requires a positive --poll-interval")
+	}
+	return finalVerifierFlags{
+		MissionID:    domain.ID(mission),
+		Project:      project,
+		VerifierID:   domain.ID(verifierID),
+		VerifierType: verifierType,
+	}, pollInterval, nil
+}
+
+func runFinalVerifier(ctx context.Context, args []string) error {
+	if ctx == nil {
+		return errors.New("Box context is required")
+	}
+	verifierCfg, pollInterval, err := parseFinalVerifierFlags(args)
+	if err != nil {
+		return err
+	}
+	home, err := localconfig.ResolveHome("")
+	if err != nil {
+		return err
+	}
+	cfg, err := localconfig.Load(home)
+	if err != nil {
+		return fmt.Errorf("load initialized Collective: %w", err)
+	}
+	material, err := loadStartupMaterial(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	feedbackSink, err := buildFeedbackSink(cfg)
+	if err != nil {
+		return err
+	}
+	adoProvider, err := buildADOProviderFromEnv()
+	if err != nil {
+		return err
+	}
+	if adoProvider == nil {
+		return errors.New("run-final-verifier requires ADO MCP configuration (SUMMA42_ADO_MCP_COMMAND and SUMMA42_ADO_ORGANIZATION)")
+	}
+	capabilityProviders := []capabilities.Provider{adoProvider}
+	operationProviders, err := buildAdoEffectProviders(adoProvider)
+	if err != nil {
+		return err
+	}
+	if len(operationProviders) != 2 {
+		return errors.New("run-final-verifier requires ADO comment and vote providers")
+	}
+
+	box, err := summa42runtime.Open(ctx, summa42runtime.Config{
+		StatePath:           cfg.DatabasePath,
+		EvidencePath:        cfg.EvidencePath,
+		CollectiveID:        cfg.CollectiveID,
+		OwnerPrincipalID:    cfg.OwnerPrincipalID,
+		FieldFeedback:       cfg.FieldFeedback,
+		FeedbackSink:        feedbackSink,
+		PolicyEngine:        material.policyEngine,
+		OperationProviders:  operationProviders,
+		CapabilityProviders: capabilityProviders,
+	})
+	if err != nil {
+		return fmt.Errorf("open Box runtime: %w", err)
+	}
+	defer box.Close()
+	if err := assessConfiguredProviders(ctx, box.Capabilities, adoProvider); err != nil {
+		return fmt.Errorf("assess configured ADO capability provider: %w", err)
+	}
+	cases := workflowcase.New(box.Store, box.Clock, box.Purpose)
+	verifier, err := adoreview.NewFinalVerifier(cases, box.Execution, box.Evidence, box.Verification, adoreview.FinalVerifierConfig{
+		MissionID:    verifierCfg.MissionID,
+		Comment:      operationProviders[0],
+		Vote:         operationProviders[1],
+		VerifierID:   verifierCfg.VerifierID,
+		VerifierType: verifierCfg.VerifierType,
+	})
+	if err != nil {
+		return fmt.Errorf("construct ADO final verifier: %w", err)
+	}
+	return verifier.Run(ctx, pollInterval)
 }
