@@ -54,6 +54,17 @@ func TestCopilotParsesCleanResult(t *testing.T) {
 	}
 }
 
+func TestCopilotAcceptsAllAllowlistedReadTools(t *testing.T) {
+	base := copilotConfig(writeFakeCopilot(t, "#!/bin/sh\nexit 0\n"))
+	base.AllowedTools = []string{
+		"repo_pull_request", "repo_pull_request_org", "repo_pull_request_thread",
+		"repo_file", "pipelines_build", "core_list_projects", "wit_work_item",
+	}
+	if _, err := executors.NewCopilotExecutor(base); err != nil {
+		t.Fatalf("allowlisted read tools rejected: %v", err)
+	}
+}
+
 func TestCopilotRejectsHostileToolConfigs(t *testing.T) {
 	base := copilotConfig(writeFakeCopilot(t, "#!/bin/sh\nexit 0\n"))
 	cases := map[string]func(executors.CopilotConfig) executors.CopilotConfig{

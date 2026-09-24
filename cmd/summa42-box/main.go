@@ -18,6 +18,7 @@ import (
 	"github.com/SofiaFlux/summa42/internal/capabilities"
 	"github.com/SofiaFlux/summa42/internal/control"
 	"github.com/SofiaFlux/summa42/internal/domain"
+	"github.com/SofiaFlux/summa42/internal/executors"
 	"github.com/SofiaFlux/summa42/internal/feedbackgithub"
 	"github.com/SofiaFlux/summa42/internal/fieldfeedback"
 	"github.com/SofiaFlux/summa42/internal/localconfig"
@@ -204,6 +205,46 @@ func buildADOProviderFromEnv() (*adomcp.Provider, error) {
 		return nil, errors.New("ADO MCP requires both SUMMA42_ADO_MCP_COMMAND and SUMMA42_ADO_ORGANIZATION")
 	}
 	return adomcp.New(adomcp.Config{Command: command, Organization: organization})
+}
+
+func splitCSV(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func buildCopilotExecutorFromEnv() (map[string]executors.Executor, error) {
+	path := strings.TrimSpace(os.Getenv("SUMMA42_COPILOT_PATH"))
+	if path == "" {
+		return nil, nil
+	}
+	server := strings.TrimSpace(os.Getenv("SUMMA42_COPILOT_MCP_SERVER"))
+	tools := splitCSV(os.Getenv("SUMMA42_COPILOT_TOOLS"))
+	if len(tools) == 0 {
+		tools = []string{"repo_pull_request", "repo_pull_request_org", "repo_pull_request_thread", "repo_file", "pipelines_build", "core_list_projects", "wit_work_item"}
+	}
+	timeout := 5 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("SUMMA42_COPILOT_TIMEOUT")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("invalid SUMMA42_COPILOT_TIMEOUT %q", raw)
+		}
+		timeout = parsed
+	}
+	executor, err := executors.NewCopilotExecutor(executors.CopilotConfig{
+		Path: path, Model: strings.TrimSpace(os.Getenv("SUMMA42_COPILOT_MODEL")),
+		MCPServer: server, AllowedTools: tools, Timeout: timeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]executors.Executor{"copilot": executor}, nil
 }
 
 type capabilityAssessor interface {
@@ -422,6 +463,20 @@ func runWorker(ctx context.Context, args []string) error {
 		FeedbackSink:        feedbackSink,
 		PolicyEngine:        material.policyEngine,
 		CapabilityProviders: capabilityProviders,
+	}
+	copilotExecutors, err := buildCopilotExecutorFromEnv()
+	if err != nil {
+		return err
+	}
+	if copilotExecutors == nil {
+		fmt.Fprintln(os.Stderr, "executor kind copilot is not registered: SUMMA42_COPILOT_PATH is not set")
+	} else {
+		if runtimeCfg.Executors == nil {
+			runtimeCfg.Executors = make(map[string]executors.Executor, len(copilotExecutors))
+		}
+		for kind, executor := range copilotExecutors {
+			runtimeCfg.Executors[kind] = executor
+		}
 	}
 	if leaseDuration > 0 {
 		runtimeCfg.LeaseDuration = leaseDuration
