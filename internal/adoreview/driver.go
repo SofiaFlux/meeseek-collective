@@ -543,7 +543,9 @@ func (d *Driver) persistTerminalEvidence(ctx context.Context, c workflowcase.Cas
 				if err != nil {
 					return "", fmt.Errorf("read terminal evidence %s: %w", ref.ID, err)
 				}
-				if latestID == "" || object.CreatedAt.After(latestAt) {
+				// Break timestamp ties by ID so provenance order cannot affect selection.
+				if latestID == "" || object.CreatedAt.After(latestAt) ||
+					(object.CreatedAt.Equal(latestAt) && ref.ID > latestID) {
 					latestID = ref.ID
 					latestAt = object.CreatedAt
 				}

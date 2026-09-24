@@ -67,6 +67,7 @@ type driverHarness struct {
 	execution      *execution.Service
 	evidence       *evidence.Store
 	verification   *verification.Service
+	clock          *testutil.Clock
 	caller         *fakeCaller
 	comment        *fakeLookupProvider
 	vote           *fakeLookupProvider
@@ -122,7 +123,7 @@ func setupDriverHarness(t *testing.T, decision ReviewDecision) *driverHarness {
 	}
 	h := &driverHarness{
 		ctx: ctx, store: store, cases: cases, execution: execSvc, evidence: evidenceStore,
-		verification: verificationSvc, caller: caller, comment: comment, vote: vote, driver: driver,
+		verification: verificationSvc, clock: clk, caller: caller, comment: comment, vote: vote, driver: driver,
 		mission: mission,
 	}
 	grant := workflow.Grant{
@@ -761,6 +762,7 @@ func TestDriverTerminalHoldUsesFailureEvidence(t *testing.T) {
 	}
 	task := materializeDriverWork2(t, h, c)
 	first := putDriverEvidence(t, h.evidence, "first failure", "text/plain", executors.EvidenceStdout)
+	h.clock.Advance(time.Second)
 	second := putDriverEvidence(t, h.evidence, "second failure", "text/plain", executors.EvidenceStdout)
 	for index, evidenceID := range []domain.ID{first.ID, second.ID} {
 		attempt, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
@@ -775,8 +777,44 @@ func TestDriverTerminalHoldUsesFailureEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	evidenceIDs := driverAssessmentEvidenceIDs(t, h, c.ID, c.CurrentWorkID)
-	if len(evidenceIDs) != 1 || (evidenceIDs[0] != string(first.ID) && evidenceIDs[0] != string(second.ID)) {
-		t.Fatalf("terminal assessment evidence = %v, want one failure evidence ID", evidenceIDs)
+	if len(evidenceIDs) != 1 || evidenceIDs[0] != string(second.ID) {
+		t.Fatalf("terminal assessment evidence = %v, want latest failure %s", evidenceIDs, second.ID)
+	}
+}
+
+func TestDriverTerminalHoldBreaksFailureEvidenceTiesByID(t *testing.T) {
+	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve"})
+	c, err := h.cases.Get(h.ctx, h.driverCaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := materializeDriverWork2(t, h, c)
+	first := putDriverEvidence(t, h.evidence, "first tied failure", "text/plain", executors.EvidenceStdout)
+	second := putDriverEvidence(t, h.evidence, "second tied failure", "text/plain", executors.EvidenceStdout)
+	firstAttempt, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.execution.FailAttempt(h.ctx, firstAttempt.ID, domain.FailureExecution, "publisher-failed", nil); err != nil {
+		t.Fatal(err)
+	}
+	secondAttempt, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.execution.FailAttempt(h.ctx, secondAttempt.ID, domain.FailureExecution, "publisher-failed", []domain.ID{first.ID, second.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.driver.StepOnce(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := first.ID
+	if second.ID > want {
+		want = second.ID
+	}
+	evidenceIDs := driverAssessmentEvidenceIDs(t, h, c.ID, c.CurrentWorkID)
+	if len(evidenceIDs) != 1 || evidenceIDs[0] != string(want) {
+		t.Fatalf("terminal assessment evidence = %v, want tied failure evidence %s", evidenceIDs, want)
 	}
 }
 
