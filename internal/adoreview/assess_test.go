@@ -78,7 +78,7 @@ func (g *gateCaller) Call(_ context.Context, capability string, _ any) (any, err
 
 func defaultReviewGrant() workflow.Grant {
 	return workflow.Grant{
-		Capabilities: []string{"read"},
+		Capabilities: []string{"read", "ado.pr.approve", "ado.pr.comment"},
 		Actions:      []string{"ado.pr.approve", "ado.pr.comment"},
 	}
 }
@@ -386,6 +386,76 @@ func TestAssessReviewGrantDeniesComment(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertBlocked(t, ctx, cases, c, result, "grant-denies-ado.pr.comment")
+}
+
+func TestAssessReviewCleanGrantDeniesApproveCapability(t *testing.T) {
+	denying := workflow.Grant{Capabilities: []string{"read"}, Actions: []string{"ado.pr.approve"}}
+	ctx, _, cases, evidenceStore, mission := setupAssess(t, denying)
+	c := ensureReviewCase(t, ctx, cases, mission, denying)
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewClean, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
+	}
+	result, _, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, greenGateCaller(), review))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBlocked(t, ctx, cases, c, result, "grant-denies-capability:ado.pr.approve")
+}
+
+func TestAssessReviewCleanAddsApproveCapability(t *testing.T) {
+	grant := defaultReviewGrant()
+	ctx, _, cases, evidenceStore, mission := setupAssess(t, grant)
+	c := ensureReviewCase(t, ctx, cases, mission, grant)
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewClean, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
+	}
+	result, _, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, greenGateCaller(), review))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision.Outcome != workflow.OutcomeContinue || result.Decision.Next == nil {
+		t.Fatalf("assessment = %+v, want CONTINUE with next work", result.Decision)
+	}
+	if !contains(result.Decision.Next.RequiredCapabilities, "ado.pr.approve") ||
+		!contains(result.Decision.Next.AuthorityCeiling, "ado.pr.approve") {
+		t.Fatalf("next capabilities = %+v, want approve capability", result.Decision.Next)
+	}
+}
+
+func TestAssessReviewFindingsGrantDeniesCommentCapability(t *testing.T) {
+	denying := workflow.Grant{Capabilities: []string{"read"}, Actions: []string{"ado.pr.comment"}}
+	ctx, _, cases, evidenceStore, mission := setupAssess(t, denying)
+	c := ensureReviewCase(t, ctx, cases, mission, denying)
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewFindings, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
+		Findings: []executors.ReviewFinding{{Path: "main.go", Line: 2, Explanation: "needs a comment"}},
+	}
+	result, _, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, greenGateCaller(), review))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBlocked(t, ctx, cases, c, result, "grant-denies-capability:ado.pr.comment")
+}
+
+func TestAssessReviewFindingsAddsCommentCapability(t *testing.T) {
+	grant := defaultReviewGrant()
+	ctx, _, cases, evidenceStore, mission := setupAssess(t, grant)
+	c := ensureReviewCase(t, ctx, cases, mission, grant)
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewFindings, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
+		Findings: []executors.ReviewFinding{{Path: "main.go", Line: 2, Explanation: "needs a comment"}},
+	}
+	result, _, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, greenGateCaller(), review))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision.Outcome != workflow.OutcomeContinue || result.Decision.Next == nil {
+		t.Fatalf("assessment = %+v, want CONTINUE with next work", result.Decision)
+	}
+	if !contains(result.Decision.Next.RequiredCapabilities, "ado.pr.comment") ||
+		!contains(result.Decision.Next.AuthorityCeiling, "ado.pr.comment") {
+		t.Fatalf("next capabilities = %+v, want comment capability", result.Decision.Next)
+	}
 }
 
 func TestAssessReviewCIGreenContinues(t *testing.T) {

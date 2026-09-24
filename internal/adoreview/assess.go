@@ -48,6 +48,9 @@ const (
 	DecisionCommentAction = "comment"
 	DecisionApproveAction = "approve"
 	DecisionHoldAction    = "hold"
+
+	effectApproveCapability = "ado.pr.approve"
+	effectCommentCapability = "ado.pr.comment"
 )
 
 func AssessReview(ctx context.Context, cases *workflowcase.Service, evidenceStore *evidence.Store, input ReviewInput) (workflowcase.AssessmentResult, ReviewDecision, error) {
@@ -194,22 +197,32 @@ func AssessReview(ctx context.Context, cases *workflowcase.Service, evidenceStor
 		if len(input.Review.Findings) > 0 {
 			return hold("verdict-findings-mismatch: CLEAN verdict carries findings")
 		}
-		if !contains(input.Case.Grant.Actions, "ado.pr.approve") {
+		if !contains(input.Case.Grant.Actions, effectApproveCapability) {
 			return hold("grant-denies-ado.pr.approve: grant does not permit approving the PR")
 		}
-		return finish(workflow.Continue, []string{"ado.pr.approve"}, ReviewDecision{
+		if !contains(input.Case.Grant.Capabilities, effectApproveCapability) {
+			return hold("grant-denies-capability:ado.pr.approve: grant does not permit approving the PR")
+		}
+		input.Case.NextWork.RequiredCapabilities = append(input.Case.NextWork.RequiredCapabilities, effectApproveCapability)
+		input.Case.NextWork.AuthorityCeiling = append(input.Case.NextWork.AuthorityCeiling, effectApproveCapability)
+		return finish(workflow.Continue, []string{effectApproveCapability}, ReviewDecision{
 			Action: DecisionApproveAction, Vote: "approve",
 			Reason: fmt.Sprintf("review CLEAN for %s %s; approving PR", objectID, revisionID),
 		})
 	case executors.ReviewFindings:
-		if !contains(input.Case.Grant.Actions, "ado.pr.comment") {
+		if !contains(input.Case.Grant.Actions, effectCommentCapability) {
 			return hold("grant-denies-ado.pr.comment: grant does not permit commenting on the PR")
 		}
+		if !contains(input.Case.Grant.Capabilities, effectCommentCapability) {
+			return hold("grant-denies-capability:ado.pr.comment: grant does not permit commenting on the PR")
+		}
+		input.Case.NextWork.RequiredCapabilities = append(input.Case.NextWork.RequiredCapabilities, effectCommentCapability)
+		input.Case.NextWork.AuthorityCeiling = append(input.Case.NextWork.AuthorityCeiling, effectCommentCapability)
 		comments := make([]DecisionComment, 0, len(input.Review.Findings))
 		for _, finding := range input.Review.Findings {
 			comments = append(comments, renderComment(finding))
 		}
-		return finish(workflow.Continue, []string{"ado.pr.comment"}, ReviewDecision{
+		return finish(workflow.Continue, []string{effectCommentCapability}, ReviewDecision{
 			Action: DecisionCommentAction, Comments: comments,
 			Reason: fmt.Sprintf("review found %d findings for %s %s; commenting on PR", len(comments), objectID, revisionID),
 		})

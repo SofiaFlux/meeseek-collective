@@ -78,11 +78,9 @@ workflow.WorkProposal{
 }
 ```
 
-Caps/ceiling copy the current case step, so the ceiling⊆grant and
-required⊆ceiling checks hold by construction (validated at `Ensure` time
-against the unchanged grant). Before proposing, the assessor verifies the
-needed action ∈ grant actions; otherwise `Unknown` hold with reason
-`grant-denies-<action>` (a `Decide` error is never used for policy outcomes).
+Caps/ceiling copy the current case step, then the branch appends its effect capability (`ado.pr.comment` or `ado.pr.approve`) to both sets, preserving Work 2 subset validity.
+Before proposing, the assessor requires both the action and effect capability in the grant; a missing capability holds as `grant-denies-capability:<cap>`.
+Policy outcomes remain `Unknown` holds, never `Decide` errors.
 
 - CLEAN + gates pass → `Continue` with the approve Next.
 - FINDINGS → `Continue` with the comment Next. Findings never propose
