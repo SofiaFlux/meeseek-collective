@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ const (
 	Active               State = "ACTIVE"
 	Blocked              State = "BLOCKED"
 	ReadyForVerification State = "READY_FOR_VERIFICATION"
+	Closed               State = "CLOSED"
 )
 
 type Case struct {
@@ -54,9 +56,32 @@ type AssessmentRecord struct {
 	CreatedAt   time.Time
 }
 
+type VerificationRequest struct {
+	CaseID       domain.ID
+	VerifierID   domain.ID
+	VerifierType string
+	SnapshotHash string
+	SnapshotJSON string
+	EvidenceIDs  []domain.ID
+}
+
+type VerificationRecord struct {
+	ID           domain.ID
+	CaseID       domain.ID
+	VerifierID   domain.ID
+	VerifierType string
+	SnapshotHash string
+	SnapshotJSON string
+	EvidenceIDs  []domain.ID
+	CreatedAt    time.Time
+}
+
 const caseColumns = `case_id, mission_id, source, object_id, revision_id,
 		observation_evidence_id, state, current_work_id, next_work_json, grant_json,
 		completed_steps, max_steps, remaining_budget, progress_signature, initial_request_json`
+
+const verificationColumns = `verification_id, case_id, verifier_id, verifier_type, snapshot_hash,
+		snapshot_json, evidence_ids_json, created_at`
 
 type Service struct {
 	store    *state.Store
@@ -112,6 +137,35 @@ func (s *Service) ListActive(ctx context.Context, missionID domain.ID) ([]Case, 
 	return cases, nil
 }
 
+func (s *Service) ListReadyForVerification(ctx context.Context, missionID domain.ID) ([]Case, error) {
+	if s == nil || s.store == nil {
+		return nil, errors.New("workflow case service is not configured")
+	}
+	missionID = domain.ID(strings.TrimSpace(string(missionID)))
+	if missionID == "" {
+		return nil, errors.New("mission ID is required")
+	}
+	rows, err := s.store.DB().QueryContext(ctx,
+		`SELECT `+caseColumns+` FROM workflow_cases WHERE state = ? AND mission_id = ? ORDER BY case_id`,
+		ReadyForVerification, missionID)
+	if err != nil {
+		return nil, fmt.Errorf("list workflow cases ready for verification: %w", err)
+	}
+	defer rows.Close()
+	cases := make([]Case, 0)
+	for rows.Next() {
+		c, _, err := scanCase(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan workflow case ready for verification: %w", err)
+		}
+		cases = append(cases, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list workflow cases ready for verification: %w", err)
+	}
+	return cases, nil
+}
+
 func (s *Service) ListAssessments(ctx context.Context, caseID domain.ID) ([]AssessmentRecord, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("workflow case service is not configured")
@@ -144,6 +198,168 @@ func (s *Service) ListAssessments(ctx context.Context, caseID domain.ID) ([]Asse
 		return nil, fmt.Errorf("list workflow assessments: %w", err)
 	}
 	return records, nil
+}
+
+func (s *Service) Close(ctx context.Context, request VerificationRequest) (VerificationRecord, error) {
+	if s == nil || s.store == nil || s.clock == nil || s.purposes == nil {
+		return VerificationRecord{}, errors.New("workflow case service is not configured")
+	}
+	request.CaseID = domain.ID(strings.TrimSpace(string(request.CaseID)))
+	request.VerifierID = domain.ID(strings.TrimSpace(string(request.VerifierID)))
+	request.VerifierType = strings.TrimSpace(request.VerifierType)
+	request.SnapshotHash = strings.TrimSpace(request.SnapshotHash)
+	if request.CaseID == "" || request.VerifierID == "" || request.VerifierType == "" || request.SnapshotHash == "" || strings.TrimSpace(request.SnapshotJSON) == "" {
+		return VerificationRecord{}, errors.New("case, verifier, snapshot hash, and snapshot JSON are required")
+	}
+	evidenceIDs := normalizeWorkflowEvidenceIDs(request.EvidenceIDs)
+
+	var result VerificationRecord
+	err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, `SELECT `+caseColumns+` FROM workflow_cases WHERE case_id = ?`, request.CaseID)
+		current, _, err := scanCase(row)
+		if err != nil {
+			return err
+		}
+		if err := s.purposes.ValidatePurposeTx(ctx, tx, domain.PurposeRef{Kind: domain.PurposeMission, ID: current.MissionID}); err != nil {
+			return err
+		}
+
+		existing, err := scanVerification(tx.QueryRowContext(ctx, `SELECT `+verificationColumns+` FROM workflow_verifications WHERE case_id = ?`, request.CaseID))
+		if err == nil {
+			if existing.SnapshotHash != request.SnapshotHash || !equalWorkflowEvidenceIDs(existing.EvidenceIDs, evidenceIDs) {
+				return fmt.Errorf("%w: verification already exists for case %s", domain.ErrIntentConflict, request.CaseID)
+			}
+			result = existing
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if current.State != ReadyForVerification {
+			return fmt.Errorf("case %s is not ready for verification", request.CaseID)
+		}
+		if err := requireWorkflowEvidence(ctx, tx, evidenceIDs); err != nil {
+			return err
+		}
+		evidenceJSON, err := json.Marshal(evidenceIDs)
+		if err != nil {
+			return fmt.Errorf("encode verification evidence: %w", err)
+		}
+		now := s.clock.Now().UTC()
+		record := VerificationRecord{
+			ID: domain.NewID("verification"), CaseID: request.CaseID, VerifierID: request.VerifierID,
+			VerifierType: request.VerifierType, SnapshotHash: request.SnapshotHash, SnapshotJSON: request.SnapshotJSON,
+			EvidenceIDs: evidenceIDs, CreatedAt: now,
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO workflow_verifications (
+				verification_id, case_id, verifier_id, verifier_type, snapshot_hash,
+				snapshot_json, evidence_ids_json, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			record.ID, record.CaseID, record.VerifierID, record.VerifierType, record.SnapshotHash,
+			record.SnapshotJSON, string(evidenceJSON), formatWorkflowTime(now),
+		); err != nil {
+			return err
+		}
+		updated, err := tx.ExecContext(ctx, `
+			UPDATE workflow_cases
+			SET state = ?, current_work_id = '', next_work_json = '{}', updated_at = ?
+			WHERE case_id = ? AND state = ?`,
+			Closed, formatWorkflowTime(now), request.CaseID, ReadyForVerification,
+		)
+		if err != nil {
+			return err
+		}
+		changed, err := updated.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return errors.New("workflow case closure lost state race")
+		}
+		result = record
+		return nil
+	})
+	if err != nil {
+		return VerificationRecord{}, fmt.Errorf("close workflow case: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Service) Reject(ctx context.Context, caseID domain.ID, reason string, evidenceIDs []domain.ID) (VerificationRecord, error) {
+	if s == nil || s.store == nil || s.clock == nil || s.purposes == nil {
+		return VerificationRecord{}, errors.New("workflow case service is not configured")
+	}
+	caseID = domain.ID(strings.TrimSpace(string(caseID)))
+	reason = strings.TrimSpace(reason)
+	if caseID == "" || reason == "" {
+		return VerificationRecord{}, errors.New("case and rejection reason are required")
+	}
+	evidenceIDs = normalizeWorkflowEvidenceIDs(evidenceIDs)
+	snapshotJSON, err := json.Marshal(struct {
+		Reason string `json:"reason"`
+	}{Reason: reason})
+	if err != nil {
+		return VerificationRecord{}, fmt.Errorf("encode rejection reason: %w", err)
+	}
+
+	var result VerificationRecord
+	err = s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		row := tx.QueryRowContext(ctx, `SELECT `+caseColumns+` FROM workflow_cases WHERE case_id = ?`, caseID)
+		current, _, err := scanCase(row)
+		if err != nil {
+			return err
+		}
+		if err := s.purposes.ValidatePurposeTx(ctx, tx, domain.PurposeRef{Kind: domain.PurposeMission, ID: current.MissionID}); err != nil {
+			return err
+		}
+		if current.State != ReadyForVerification {
+			return fmt.Errorf("case %s is not ready for rejection", caseID)
+		}
+		if err := requireWorkflowEvidence(ctx, tx, evidenceIDs); err != nil {
+			return err
+		}
+		evidenceJSON, err := json.Marshal(evidenceIDs)
+		if err != nil {
+			return fmt.Errorf("encode rejection evidence: %w", err)
+		}
+		now := s.clock.Now().UTC()
+		record := VerificationRecord{
+			ID: domain.NewID("verification"), CaseID: caseID, VerifierType: "REJECT",
+			SnapshotJSON: string(snapshotJSON), EvidenceIDs: evidenceIDs, CreatedAt: now,
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO workflow_verifications (
+				verification_id, case_id, verifier_id, verifier_type, snapshot_hash,
+				snapshot_json, evidence_ids_json, created_at
+			) VALUES (?, ?, '', 'REJECT', '', ?, ?, ?)`,
+			record.ID, record.CaseID, record.SnapshotJSON, string(evidenceJSON), formatWorkflowTime(now),
+		); err != nil {
+			return err
+		}
+		updated, err := tx.ExecContext(ctx, `
+			UPDATE workflow_cases
+			SET state = ?, current_work_id = '', next_work_json = '{}', updated_at = ?
+			WHERE case_id = ? AND state = ?`,
+			Blocked, formatWorkflowTime(now), caseID, ReadyForVerification,
+		)
+		if err != nil {
+			return err
+		}
+		changed, err := updated.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return errors.New("workflow case rejection lost state race")
+		}
+		result = record
+		return nil
+	})
+	if err != nil {
+		return VerificationRecord{}, fmt.Errorf("reject workflow case: %w", err)
+	}
+	return result, nil
 }
 
 func (s *Service) Ensure(ctx context.Context, observation Observation) (Case, error) {
@@ -256,4 +472,69 @@ func scanCase(row rowScanner) (Case, string, error) {
 		return Case{}, "", fmt.Errorf("decode grant: %w", err)
 	}
 	return c, requestJSON, nil
+}
+
+func normalizeWorkflowEvidenceIDs(ids []domain.ID) []domain.ID {
+	set := make(map[domain.ID]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			set[id] = struct{}{}
+		}
+	}
+	normalized := make([]domain.ID, 0, len(set))
+	for id := range set {
+		normalized = append(normalized, id)
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i] < normalized[j] })
+	return normalized
+}
+
+func equalWorkflowEvidenceIDs(left, right []domain.ID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func requireWorkflowEvidence(ctx context.Context, tx *sql.Tx, ids []domain.ID) error {
+	for _, id := range ids {
+		var one int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM evidence_objects WHERE evidence_id = ?`, id).Scan(&one); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("evidence %q not found", id)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func scanVerification(row rowScanner) (VerificationRecord, error) {
+	var record VerificationRecord
+	var evidenceJSON, createdAt string
+	if err := row.Scan(
+		&record.ID, &record.CaseID, &record.VerifierID, &record.VerifierType, &record.SnapshotHash,
+		&record.SnapshotJSON, &evidenceJSON, &createdAt,
+	); err != nil {
+		return VerificationRecord{}, err
+	}
+	if err := json.Unmarshal([]byte(evidenceJSON), &record.EvidenceIDs); err != nil {
+		return VerificationRecord{}, fmt.Errorf("decode verification evidence: %w", err)
+	}
+	record.EvidenceIDs = normalizeWorkflowEvidenceIDs(record.EvidenceIDs)
+	created, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return VerificationRecord{}, fmt.Errorf("parse workflow verification %s created_at: %w", record.ID, err)
+	}
+	record.CreatedAt = created
+	return record, nil
+}
+
+func formatWorkflowTime(value time.Time) string {
+	return value.UTC().Format(time.RFC3339Nano)
 }

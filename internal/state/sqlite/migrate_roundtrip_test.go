@@ -59,3 +59,93 @@ func TestFieldFeedbackAndRunManifestMigrationsRoundTripWithExistingTask(t *testi
 		}
 	}
 }
+
+func TestMigration00015RoundTripsWorkflowCaseAndAssessments(t *testing.T) {
+	ctx:=context.Background()
+	path:=filepath.Join(t.TempDir(),"workflow-verifications-roundtrip.db")
+	store,err:=Open(ctx,path);if err!=nil{t.Fatal(err)}
+	defer store.DB().Close()
+	db:=store.DB()
+
+	migrations,err:=fs.Sub(migrationFiles,"migrations");if err!=nil{t.Fatal(err)}
+	provider,err:=goose.NewProvider(goose.DialectSQLite3,db,migrations,goose.WithTableName("schema_migrations"))
+	if err!=nil{t.Fatal(err)}
+	if _,err:=provider.DownTo(ctx,14);err!=nil{t.Fatalf("down to v14: %v",err)}
+
+	now:="2026-09-24T10:00:00Z"
+	if _,err:=db.ExecContext(ctx,`
+		INSERT INTO missions(mission_id,statement,active,created_at,deactivated_at)
+		VALUES ('mission-workflow-15','Verify workflow migration',1,?,NULL)`,now);err!=nil{t.Fatal(err)}
+	if _,err:=db.ExecContext(ctx,`
+		INSERT INTO workflow_cases(case_id,mission_id,source,object_id,revision_id,observation_evidence_id,
+			initial_request_json,grant_json,state,current_work_id,next_work_json,completed_steps,max_steps,
+			remaining_budget,progress_signature,created_at,updated_at)
+		VALUES ('case-workflow-15','mission-workflow-15','ado','item-15','r15','observation-15',
+			'{}','{"Capabilities":["read"],"Actions":null}','ACTIVE','work-15','{}',1,3,2,'ready',?,?)`,now,now);err!=nil{t.Fatal(err)}
+	if _,err:=db.ExecContext(ctx,`
+		INSERT INTO workflow_assessments(assessment_id,case_id,work_id,request_json,result_json,created_at)
+		VALUES ('assessment-workflow-15','case-workflow-15','work-15','{}','{}',?)`,now);err!=nil{t.Fatal(err)}
+
+	if _,err:=provider.UpTo(ctx,15);err!=nil{t.Fatalf("up to v15: %v",err)}
+	var state string
+	if err:=db.QueryRowContext(ctx,"SELECT state FROM workflow_cases WHERE case_id='case-workflow-15'").Scan(&state);err!=nil{t.Fatal(err)}
+	if state!="ACTIVE"{t.Fatalf("state after up=%q,want ACTIVE",state)}
+	if _,err:=db.ExecContext(ctx,"UPDATE workflow_cases SET state='CLOSED' WHERE case_id='case-workflow-15'");err!=nil{t.Fatalf("CLOSED state rejected: %v",err)}
+	if _,err:=db.ExecContext(ctx,"UPDATE workflow_cases SET state='ACTIVE' WHERE case_id='case-workflow-15'");err!=nil{t.Fatal(err)}
+
+	if _,err:=provider.DownTo(ctx,14);err!=nil{t.Fatalf("down to v14: %v",err)}
+	if err:=db.QueryRowContext(ctx,"SELECT state FROM workflow_cases WHERE case_id='case-workflow-15'").Scan(&state);err!=nil{t.Fatal(err)}
+	if state!="ACTIVE"{t.Fatalf("state after down=%q,want ACTIVE",state)}
+	var assessmentCount int
+	if err:=db.QueryRowContext(ctx,"SELECT count(*) FROM workflow_assessments WHERE case_id='case-workflow-15'").Scan(&assessmentCount);err!=nil{t.Fatal(err)}
+	if assessmentCount!=1{t.Fatalf("assessments after round trip=%d,want 1",assessmentCount)}
+	var foreignKeyCount int
+	if err:=db.QueryRowContext(ctx,`SELECT count(*) FROM pragma_foreign_key_list('workflow_assessments') WHERE "table"='workflow_cases'`).Scan(&foreignKeyCount);err!=nil{t.Fatal(err)}
+	if foreignKeyCount!=1{t.Fatalf("workflow_assessments workflow_cases foreign keys=%d,want 1",foreignKeyCount)}
+	var indexCount int
+	if err:=db.QueryRowContext(ctx,`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='workflow_cases_state_updated_at'`).Scan(&indexCount);err!=nil{t.Fatal(err)}
+	if indexCount!=1{t.Fatalf("workflow case state index count=%d,want 1",indexCount)}
+	var verificationTableCount int
+	if err:=db.QueryRowContext(ctx,`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='workflow_verifications'`).Scan(&verificationTableCount);err!=nil{t.Fatal(err)}
+	if verificationTableCount!=0{t.Fatalf("workflow_verifications survived down migration")}
+}
+
+func TestMigration00015RejectsDuplicateVerificationCase(t *testing.T) {
+	ctx:=context.Background()
+	path:=filepath.Join(t.TempDir(),"workflow-verifications-unique.db")
+	store,err:=Open(ctx,path);if err!=nil{t.Fatal(err)}
+	defer store.DB().Close()
+	db:=store.DB()
+
+	migrations,err:=fs.Sub(migrationFiles,"migrations");if err!=nil{t.Fatal(err)}
+	provider,err:=goose.NewProvider(goose.DialectSQLite3,db,migrations,goose.WithTableName("schema_migrations"))
+	if err!=nil{t.Fatal(err)}
+	if _,err:=provider.DownTo(ctx,14);err!=nil{t.Fatalf("down to v14: %v",err)}
+
+	now:="2026-09-24T10:00:00Z"
+	if _,err:=db.ExecContext(ctx,`
+		INSERT INTO missions(mission_id,statement,active,created_at,deactivated_at)
+		VALUES ('mission-workflow-15-unique','Verify workflow migration',1,?,NULL)`,now);err!=nil{t.Fatal(err)}
+	if _,err:=db.ExecContext(ctx,`
+		INSERT INTO workflow_cases(case_id,mission_id,source,object_id,revision_id,observation_evidence_id,
+			initial_request_json,grant_json,state,current_work_id,next_work_json,completed_steps,max_steps,
+			remaining_budget,progress_signature,created_at,updated_at)
+		VALUES ('case-workflow-15-unique','mission-workflow-15-unique','ado','item-15','r15','observation-15',
+			'{}','{"Capabilities":["read"],"Actions":null}','READY_FOR_VERIFICATION','','{}',1,3,2,'ready',?,?)`,now,now);err!=nil{t.Fatal(err)}
+	if _,err:=provider.UpTo(ctx,15);err!=nil{t.Fatalf("up to v15: %v",err)}
+
+	insertVerification:=func(id string){t.Helper();if _,err:=db.ExecContext(ctx,`
+		INSERT INTO workflow_verifications(verification_id,case_id,verifier_id,verifier_type,snapshot_hash,
+			snapshot_json,evidence_ids_json,created_at)
+		VALUES (?,'case-workflow-15-unique','verifier-15','HUMAN','snapshot-hash','{"state":"verified"}','["evidence-15"]',?)`,id,now);err!=nil{t.Fatal(err)}}
+	insertVerification("verification-workflow-15")
+	if _,err:=db.ExecContext(ctx,`
+		INSERT INTO workflow_verifications(verification_id,case_id,verifier_id,verifier_type,snapshot_hash,
+			snapshot_json,evidence_ids_json,created_at)
+		VALUES ('verification-workflow-15-duplicate','case-workflow-15-unique','verifier-15','HUMAN','snapshot-hash',
+			'{"state":"verified"}','["evidence-15"]',?)`,now);err==nil{t.Fatal("duplicate verification case_id was accepted")}
+
+	var count int
+	if err:=db.QueryRowContext(ctx,"SELECT count(*) FROM workflow_verifications WHERE case_id='case-workflow-15-unique'").Scan(&count);err!=nil{t.Fatal(err)}
+	if count!=1{t.Fatalf("verification rows=%d,want 1",count)}
+}
