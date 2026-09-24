@@ -57,7 +57,7 @@ if _, err := store.DB().ExecContext(ctx,
 task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
     Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
     Objective:            "review the diff",
-    PayloadJSON:          json.RawMessage(`{"pr": 7}`),
+    PayloadJSON:          json.RawMessage(`{"pr":7}`),
     AcceptanceCriteria:   []string{"done"},
     RequiredCapabilities: []string{"shell"},
     RequiredEnforcement:  domain.EnforcementEnforced,
@@ -269,7 +269,7 @@ func TestStepOnceCompletesEligibleTask(t *testing.T) {
     if envelope.TaskID != task.ID || envelope.AttemptID != got.AttemptID {
         t.Fatalf("envelope IDs = %q/%q, want %q/%q", envelope.TaskID, envelope.AttemptID, task.ID, got.AttemptID)
     }
-    if envelope.Objective != "review the diff" || string(envelope.PayloadJSON) != `{"pr": 7}` {
+    if envelope.Objective != "review the diff" || string(envelope.PayloadJSON) != `{"pr":7}` {
         t.Fatalf("envelope intent = %q %q", envelope.Objective, envelope.PayloadJSON)
     }
     if len(envelope.VisibleCapabilities) != 1 || envelope.VisibleCapabilities[0] != "shell" {
