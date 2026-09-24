@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/SofiaFlux/summa42/internal/localconfig"
 	"github.com/SofiaFlux/summa42/internal/policy"
 	summa42runtime "github.com/SofiaFlux/summa42/internal/runtime"
+	"github.com/SofiaFlux/summa42/internal/scheduler"
 	state "github.com/SofiaFlux/summa42/internal/state/sqlite"
 )
 
@@ -296,8 +298,139 @@ func loadStartupMaterial(ctx context.Context, cfg localconfig.Config) (startupMa
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 && os.Args[1] == "run-worker" {
+		if err := runWorker(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func parseWorkerFlags(args []string) (pollInterval time.Duration, leaseDuration time.Duration, err error) {
+	flags := flag.NewFlagSet("run-worker", flag.ContinueOnError)
+	flags.DurationVar(&pollInterval, "poll-interval", 30*time.Second, "interval between scheduler polls")
+	flags.DurationVar(&leaseDuration, "lease-duration", 0, "attempt lease duration (0 uses Box default)")
+	if err := flags.Parse(args); err != nil {
+		return 0, 0, err
+	}
+	if pollInterval <= 0 {
+		return 0, 0, errors.New("run-worker requires a positive --poll-interval")
+	}
+	if leaseDuration < 0 {
+		return 0, 0, errors.New("run-worker requires a non-negative --lease-duration")
+	}
+	return pollInterval, leaseDuration, nil
+}
+
+func splitWorkspaceRootArg(args []string) (workspaceRoot string, rest []string, err error) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--workspace-root" {
+			if i+1 >= len(args) {
+				return "", nil, errors.New("run-worker requires a value for --workspace-root")
+			}
+			workspaceRoot = args[i+1]
+			i++
+			continue
+		}
+		if value, ok := strings.CutPrefix(arg, "--workspace-root="); ok {
+			workspaceRoot = value
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	return workspaceRoot, rest, nil
+}
+
+func workerCapacity(box *summa42runtime.Box) (scheduler.CapacitySnapshot, error) {
+	caps := make(map[string]scheduler.CapabilityCapacity, len(box.Executors))
+	for kind := range box.Executors {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			continue
+		}
+		caps[kind] = scheduler.CapabilityCapacity{Accessible: true, Enforcement: domain.EnforcementEnforced}
+	}
+	if len(caps) == 0 {
+		return scheduler.CapacitySnapshot{}, errors.New("run-worker has no schedulable capabilities: the Box executor registry is empty, so there is no capability source to advertise")
+	}
+	return scheduler.CapacitySnapshot{Capabilities: caps}, nil
+}
+
+func runWorker(ctx context.Context, args []string) error {
+	if ctx == nil {
+		return errors.New("Box context is required")
+	}
+	workspaceRoot, rest, err := splitWorkspaceRootArg(args)
+	if err != nil {
+		return err
+	}
+	pollInterval, leaseDuration, err := parseWorkerFlags(rest)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return errors.New("run-worker requires --workspace-root")
+	}
+	home, err := localconfig.ResolveHome("")
+	if err != nil {
+		return err
+	}
+	cfg, err := localconfig.Load(home)
+	if err != nil {
+		return fmt.Errorf("load initialized Collective: %w", err)
+	}
+	material, err := loadStartupMaterial(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	feedbackSink, err := buildFeedbackSink(cfg)
+	if err != nil {
+		return err
+	}
+	adoProvider, err := buildADOProviderFromEnv()
+	if err != nil {
+		return err
+	}
+	var capabilityProviders []capabilities.Provider
+	if adoProvider != nil {
+		capabilityProviders = append(capabilityProviders, adoProvider)
+	}
+
+	runtimeCfg := summa42runtime.Config{
+		StatePath:           cfg.DatabasePath,
+		EvidencePath:        cfg.EvidencePath,
+		CollectiveID:        cfg.CollectiveID,
+		OwnerPrincipalID:    cfg.OwnerPrincipalID,
+		FieldFeedback:       cfg.FieldFeedback,
+		FeedbackSink:        feedbackSink,
+		PolicyEngine:        material.policyEngine,
+		CapabilityProviders: capabilityProviders,
+	}
+	if leaseDuration > 0 {
+		runtimeCfg.LeaseDuration = leaseDuration
+	}
+	box, err := summa42runtime.Open(ctx, runtimeCfg)
+	if err != nil {
+		return fmt.Errorf("open Box runtime: %w", err)
+	}
+	defer box.Close()
+	if err := assessConfiguredProviders(ctx, box.Capabilities, adoProvider); err != nil {
+		return fmt.Errorf("assess configured ADO capability provider: %w", err)
+	}
+	capacity, err := workerCapacity(box)
+	if err != nil {
+		return err
+	}
+	worker, err := scheduler.NewWorker(box.Scheduler, box.Execution, box.Evidence, box.Verification, box.Executors, box.Clock, workspaceRoot)
+	if err != nil {
+		return err
+	}
+	return worker.Run(ctx, capacity, pollInterval)
 }

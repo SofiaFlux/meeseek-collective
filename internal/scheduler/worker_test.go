@@ -359,3 +359,105 @@ func TestStepOnceToleratesStaleLeaseOnComplete(t *testing.T) {
 		t.Fatalf("evidence IDs = %v, want persisted IDs kept", got.EvidenceIDs)
 	}
 }
+
+func TestRunStopsOnCancellationWithoutNewLease(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	resourceSvc := resources.New(store, clk)
+	schedSvc := scheduler.New(store, clk, purposes, execSvc, resourceSvc, time.Minute)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifySvc := verification.New(store, clk, execSvc)
+	capacity := scheduler.CapacitySnapshot{Capabilities: map[string]scheduler.CapabilityCapacity{
+		"shell": {Accessible: true, Enforcement: domain.EnforcementEnforced},
+	}}
+	worker, err := scheduler.NewWorker(schedSvc, execSvc, evidenceStore, verifySvc,
+		map[string]executors.Executor{"shell": &fakeExecutor{}}, clk, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := worker.Run(runCtx, capacity, time.Millisecond); err != nil {
+		t.Fatalf("Run on cancelled context = %v, want nil", err)
+	}
+}
+
+func TestRunStepsOnceThenStops(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	resourceSvc := resources.New(store, clk)
+	schedSvc := scheduler.New(store, clk, purposes, execSvc, resourceSvc, time.Minute)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifySvc := verification.New(store, clk, execSvc)
+	envelopeID := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, ?, ?)`,
+		envelopeID, 100, clk.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
+		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
+		Objective:            "review the diff",
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
+		AcceptanceCriteria:   []string{"done"},
+		RequiredCapabilities: []string{"shell"},
+		RequiredEnforcement:  domain.EnforcementEnforced,
+		AuthorityCeiling:     []string{"shell"},
+		ResourceEnvelopeID:   envelopeID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capacity := scheduler.CapacitySnapshot{Capabilities: map[string]scheduler.CapabilityCapacity{
+		"shell": {Accessible: true, Enforcement: domain.EnforcementEnforced},
+	}}
+	fake := &fakeExecutor{result: executors.ExecutionResult{ExitCode: 0, Stdout: "ok"}}
+	worker, err := scheduler.NewWorker(schedSvc, execSvc, evidenceStore, verifySvc,
+		map[string]executors.Executor{"shell": fake}, clk, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(runCtx, capacity, time.Millisecond) }()
+	deadline := time.After(10 * time.Second)
+	for {
+		reloaded, err := execSvc.Task(ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reloaded.State == domain.TaskAwaitingVerification {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("worker did not complete the task")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop after cancel")
+	}
+	if len(fake.seen) != 1 {
+		t.Fatalf("executor calls = %d, want exactly 1", len(fake.seen))
+	}
+}

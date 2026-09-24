@@ -204,5 +204,30 @@ func (w *Worker) failExecution(ctx context.Context, _ executors.Executor, kind s
 }
 
 func (w *Worker) Run(ctx context.Context, capacity CapacitySnapshot, interval time.Duration) error {
-	return errors.New("not implemented")
+	if interval <= 0 {
+		return errors.New("worker requires a positive poll interval")
+	}
+	if err := w.stepGuarded(ctx, capacity); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := w.stepGuarded(ctx, capacity); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (w *Worker) stepGuarded(ctx context.Context, capacity CapacitySnapshot) error {
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
+	_, err := w.StepOnce(ctx, capacity)
+	return err
 }
