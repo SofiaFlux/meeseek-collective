@@ -231,6 +231,8 @@ func hasDirectReviewer(pr PullRequest, reviewerID string) bool {
 }
 
 func hasGroupReviewer(pr PullRequest, _ string) bool {
+	// Fail-closed intent: any group reviewer counts as group-only (conservative
+	// exclusion direction) even when the reviewer identity is not checked here.
 	for _, r := range pr.Reviewers {
 		if r.IsGroup {
 			return true

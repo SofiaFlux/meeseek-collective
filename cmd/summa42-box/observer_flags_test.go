@@ -106,3 +106,18 @@ func TestParseObserverFlagsAcceptsRepeatableCapabilities(t *testing.T) {
 		t.Fatalf("scope = %q %q, want shop web", cfg.Project, cfg.Repository)
 	}
 }
+
+func TestParseObserverFlagsRejectsLoneProjectOrRepository(t *testing.T) {
+	projectOnly := append(requiredObserverArgs(), "--project=shop")
+	if _, _, err := parseObserverFlags(projectOnly); err == nil {
+		t.Fatal("expected error for --project without --repository")
+	} else if !strings.Contains(err.Error(), "--project") || !strings.Contains(err.Error(), "--repository") {
+		t.Fatalf("error = %q, want explicit --project/--repository pair message", err)
+	}
+	repoOnly := append(requiredObserverArgs(), "--repository=web")
+	if _, _, err := parseObserverFlags(repoOnly); err == nil {
+		t.Fatal("expected error for --repository without --project")
+	} else if !strings.Contains(err.Error(), "--project") || !strings.Contains(err.Error(), "--repository") {
+		t.Fatalf("error = %q, want explicit --project/--repository pair message", err)
+	}
+}

@@ -2,7 +2,9 @@ package adoreview
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -93,6 +95,9 @@ func TestObserveOnceMaterializesNewRevision(t *testing.T) {
 	}
 	if task.Objective != "Review ADO PR shop#1" {
 		t.Fatalf("objective = %q, want %q", task.Objective, "Review ADO PR shop#1")
+	}
+	if task.State != domain.TaskEligible {
+		t.Fatalf("task state = %q, want ELIGIBLE (not leased)", task.State)
 	}
 	if task.ResourceEnvelopeID != cfg.ResourceEnvelopeID {
 		t.Fatalf("envelope = %q, want %q", task.ResourceEnvelopeID, cfg.ResourceEnvelopeID)
@@ -249,5 +254,151 @@ func TestRunRejectsNonPositiveInterval(t *testing.T) {
 	}
 	if len(caller.calls) != 0 {
 		t.Fatalf("caller calls = %d, want 0 (interval guard before first poll)", len(caller.calls))
+	}
+}
+
+func TestCanonicalEvidenceUsesSpecKeys(t *testing.T) {
+	pr := PullRequest{Repository: "shop", Number: 42, SourceCommit: "abc", TargetCommit: "def",
+		AuthorID: "u1", Reviewers: []Reviewer{{ID: "u2"}, {ID: "g-eng", IsGroup: true}}}
+	raw, err := json.Marshal(canonicalEvidence(pr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blob map[string]any
+	if err := json.Unmarshal(raw, &blob); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for k := range blob {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	wantKeys := []string{"author", "draft", "pr", "repo", "reviewers", "sourceCommit", "targetCommit"}
+	if len(keys) != len(wantKeys) {
+		t.Fatalf("blob keys = %v, want %v (raw %s)", keys, wantKeys, raw)
+	}
+	for i := range wantKeys {
+		if keys[i] != wantKeys[i] {
+			t.Fatalf("blob keys = %v, want %v (raw %s)", keys, wantKeys, raw)
+		}
+	}
+	if blob["repo"] != "shop" || blob["pr"] != float64(42) || blob["sourceCommit"] != "abc" ||
+		blob["targetCommit"] != "def" || blob["draft"] != false || blob["author"] != "u1" {
+		t.Fatalf("blob scalar fields = %s, want spec values", raw)
+	}
+	reviewers, ok := blob["reviewers"].([]any)
+	if !ok || len(reviewers) != 2 || reviewers[0] != "u2" || reviewers[1] != "g-eng" {
+		t.Fatalf("blob reviewers = %v, want [u2 g-eng] string ID list", blob["reviewers"])
+	}
+}
+
+// Trigger: partial case advanced to READY via Assess, so the Find-first repair
+// path calls MaterializeTask on a non-active case and deterministically fails.
+func TestObserveOnceMaterializeFailureAfterAssessmentSurfacesFailedAndReusesCase(t *testing.T) {
+	ctx, _, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	partial, err := cases.Ensure(ctx, workflowcase.Observation{
+		MissionID: cfg.MissionID, Source: "ado", ObjectID: "shop#1", RevisionID: "a:b",
+		EvidenceID: "ev-partial",
+		FirstWork:  workflow.WorkProposal{Kind: "ado.pr.review", RequiredCapabilities: []string{"read"}, AuthorityCeiling: []string{"read"}},
+		Grant:      cfg.Grant, MaxSteps: cfg.MaxSteps, RemainingBudget: cfg.RemainingBudget,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cases.Assess(ctx, workflowcase.AssessmentRequest{CaseID: partial.ID, WorkID: partial.CurrentWorkID,
+		Assessment:      workflow.Assessment{Verdict: workflow.Ready, EvidenceIDs: []string{"reviewed"}},
+		RemainingBudget: cfg.RemainingBudget - 1, ProgressSignature: "reviewed"}); err != nil {
+		t.Fatal(err)
+	}
+	caller := &fakeCaller{pages: []any{map[string]any{"prs": []any{goodPRItem()}}}}
+	result, err := ObserveOnce(ctx, caller, cases, execSvc, evidenceStore, cfg)
+	if err != nil {
+		t.Fatalf("ObserveOnce = %v, want nil tick error (materialize failure is per-PR Failed)", err)
+	}
+	if len(result.Failed) != 1 {
+		t.Fatalf("failed = %+v, want 1 entry for the advanced case", result.Failed)
+	}
+	if len(result.Ensured) != 0 || len(result.Materialized) != 0 {
+		t.Fatalf("result = %+v, want 0 ensured 0 materialized on materialize failure", result)
+	}
+	reused, found, err := cases.Find(ctx, cfg.MissionID, "ado", "shop#1", "a:b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || reused.ID != partial.ID {
+		t.Fatalf("Find = %+v %v, want reuse of case %s", reused, found, partial.ID)
+	}
+}
+
+func TestObserveOnceRevisionChangeOpensNewCase(t *testing.T) {
+	ctx, _, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	firstCaller := &fakeCaller{pages: []any{map[string]any{"prs": []any{goodPRItem()}}}}
+	first, err := ObserveOnce(ctx, firstCaller, cases, execSvc, evidenceStore, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := goodPRItem()
+	moved["sourceCommit"] = "a"
+	moved["targetCommit"] = "c"
+	secondCaller := &fakeCaller{pages: []any{map[string]any{"prs": []any{moved}}}}
+	second, err := ObserveOnce(ctx, secondCaller, cases, execSvc, evidenceStore, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Ensured) != 1 || len(second.Ensured) != 1 {
+		t.Fatalf("ensured = %v %v, want 1 case per revision", first.Ensured, second.Ensured)
+	}
+	if first.Ensured[0] == second.Ensured[0] {
+		t.Fatalf("revision change reused case %s, want two distinct cases for a:b and a:c", first.Ensured[0])
+	}
+	for _, rev := range []string{"a:b", "a:c"} {
+		if _, found, err := cases.Find(ctx, cfg.MissionID, "ado", "shop#1", rev); err != nil || !found {
+			t.Fatalf("Find shop#1 %s = %v %v, want found", rev, found, err)
+		}
+	}
+}
+
+func TestObserveOnceUnparseableItemYieldsExclusion(t *testing.T) {
+	ctx, _, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	caller := &fakeCaller{pages: []any{map[string]any{"prs": []any{
+		goodPRItem(),
+		map[string]any{"repository": "shop"},
+	}}}}
+	result, err := ObserveOnce(ctx, caller, cases, execSvc, evidenceStore, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Ensured) != 1 || len(result.Materialized) != 1 {
+		t.Fatalf("result = %+v, want the parseable PR materialized", result)
+	}
+	found := false
+	for _, e := range result.Excluded {
+		if e.Reason == ReasonUnparseable {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("excluded = %+v, want one unparseable-pr entry", result.Excluded)
+	}
+	if len(result.Failed) != 0 {
+		t.Fatalf("failed = %+v, want empty (unparseable is an exclusion, not a failure)", result.Failed)
+	}
+}
+
+// Trigger: work capabilities outside the grant ceiling fail Decide, so Ensure
+// fails while the PR identity is known.
+func TestObserveOnceEnsureFailureYieldsExclusion(t *testing.T) {
+	ctx, _, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	cfg.WorkCapabilities = []string{"write"}
+	caller := &fakeCaller{pages: []any{map[string]any{"prs": []any{goodPRItem()}}}}
+	result, err := ObserveOnce(ctx, caller, cases, execSvc, evidenceStore, cfg)
+	if err != nil {
+		t.Fatalf("ObserveOnce = %v, want nil tick error (ensure failure is an exclusion)", err)
+	}
+	if len(result.Excluded) != 1 || result.Excluded[0].Reason != ReasonEnsureFailed {
+		t.Fatalf("excluded = %+v, want one ensure-failed entry", result.Excluded)
+	}
+	if len(result.Failed) != 0 || len(result.Ensured) != 0 || len(result.Materialized) != 0 {
+		t.Fatalf("result = %+v, want only the ensure-failed exclusion", result)
 	}
 }

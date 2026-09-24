@@ -502,6 +502,9 @@ func parseObserverFlags(args []string) (adoreview.Config, time.Duration, error) 
 	if pollInterval <= 0 {
 		return adoreview.Config{}, 0, errors.New("run-observer requires a positive --poll-interval")
 	}
+	if (strings.TrimSpace(cfg.Project) == "") != (strings.TrimSpace(cfg.Repository) == "") {
+		return adoreview.Config{}, 0, errors.New("run-observer requires --project and --repository together (optional pair)")
+	}
 	cfg.MissionID = domain.ID(mission)
 	cfg.ReviewerID = reviewer
 	cfg.Grant = workflow.Grant{Capabilities: []string(grantCaps), Actions: []string(grantActions)}

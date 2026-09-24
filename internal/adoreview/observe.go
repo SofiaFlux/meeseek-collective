@@ -39,6 +39,8 @@ type ObserveResult struct {
 	Failed       []FailedPR
 }
 
+const ReasonEnsureFailed = "ensure-failed"
+
 func (c Config) validate() error {
 	if strings.TrimSpace(string(c.MissionID)) == "" || strings.TrimSpace(c.ReviewerID) == "" {
 		return errors.New("mission and reviewer are required")
@@ -106,7 +108,7 @@ func ObserveOnce(ctx context.Context, caller PRCaller, cases *workflowcase.Servi
 	result.Excluded = append(result.Excluded, excluded...)
 	for _, pr := range kept {
 		if err := observeOne(ctx, cases, execSvc, evidenceStore, cfg, pr, &result); err != nil {
-			result.Failed = append(result.Failed, FailedPR{PR: pr, Err: err.Error()})
+			return result, err
 		}
 	}
 	return result, nil
@@ -120,13 +122,14 @@ func observeOne(ctx context.Context, cases *workflowcase.Service, execSvc *execu
 	if found {
 		task, err := materialize(ctx, cases, execSvc, cfg, existing, pr)
 		if err != nil {
-			return err
+			result.Failed = append(result.Failed, FailedPR{PR: pr, Err: err.Error()})
+			return nil
 		}
 		result.Ensured = append(result.Ensured, existing.ID)
 		result.Materialized = append(result.Materialized, task.ID)
 		return nil
 	}
-	canonical, err := json.Marshal(pr)
+	canonical, err := json.Marshal(canonicalEvidence(pr))
 	if err != nil {
 		return err
 	}
@@ -142,15 +145,32 @@ func observeOne(ctx context.Context, cases *workflowcase.Service, execSvc *execu
 		Grant:      cfg.Grant, MaxSteps: cfg.MaxSteps, RemainingBudget: cfg.RemainingBudget,
 	})
 	if err != nil {
-		return err
+		result.Excluded = append(result.Excluded, ExcludedPR{PR: pr, Reason: ReasonEnsureFailed})
+		return nil
 	}
 	task, err := materialize(ctx, cases, execSvc, cfg, created, pr)
 	if err != nil {
-		return err
+		result.Failed = append(result.Failed, FailedPR{PR: pr, Err: err.Error()})
+		return nil
 	}
 	result.Ensured = append(result.Ensured, created.ID)
 	result.Materialized = append(result.Materialized, task.ID)
 	return nil
+}
+
+// canonicalEvidence renders the stable evidence blob for a PR using exactly the
+// spec keys repo, pr, sourceCommit, targetCommit, draft, author, reviewers
+// (reviewers as a string ID list), never the Go struct field names.
+func canonicalEvidence(pr PullRequest) map[string]any {
+	reviewers := make([]string, 0, len(pr.Reviewers))
+	for _, r := range pr.Reviewers {
+		reviewers = append(reviewers, r.ID)
+	}
+	return map[string]any{
+		"repo": pr.Repository, "pr": pr.Number,
+		"sourceCommit": pr.SourceCommit, "targetCommit": pr.TargetCommit,
+		"draft": pr.IsDraft, "author": pr.AuthorID, "reviewers": reviewers,
+	}
 }
 
 func materialize(ctx context.Context, cases *workflowcase.Service, execSvc *execution.Service, cfg Config, c workflowcase.Case, pr PullRequest) (domain.Task, error) {
