@@ -106,7 +106,7 @@ func (w *Worker) executeAttempt(ctx context.Context, executor executors.Executor
 	}
 	envelope := executors.AttemptEnvelope{
 		TaskID: task.ID, AttemptID: attempt.ID,
-		Objective: task.Objective, PayloadJSON: task.PayloadJSON,
+		Objective: task.Objective, PayloadJSON: append([]byte(nil), task.PayloadJSON...),
 		AcceptanceCriteria: append([]string(nil), task.AcceptanceCriteria...),
 		Workspace:          workspace, VisibleCapabilities: append([]string(nil), task.RequiredCapabilities...),
 		ResourceEnvelopeID: task.ResourceEnvelopeID,
@@ -117,7 +117,7 @@ func (w *Worker) executeAttempt(ctx context.Context, executor executors.Executor
 	if execErr != nil || outcome.ExitCode != 0 {
 		return w.failExecution(ctx, executor, kind, task, attempt, result, outcome, execErr)
 	}
-	return w.completeExecution(ctx, task, attempt, result, outcome)
+	return w.completeExecution(ctx, kind, task, attempt, result, outcome)
 }
 
 func (w *Worker) runExecutor(ctx context.Context, executor executors.Executor, envelope executors.AttemptEnvelope) (result executors.ExecutionResult, err error) {
@@ -160,13 +160,13 @@ func (w *Worker) persistEvidence(ctx context.Context, outcome executors.Executio
 	return ids, nil
 }
 
-func (w *Worker) completeExecution(ctx context.Context, task domain.Task, attempt domain.Attempt, result *StepResult, outcome executors.ExecutionResult) error {
+func (w *Worker) completeExecution(ctx context.Context, kind string, task domain.Task, attempt domain.Attempt, result *StepResult, outcome executors.ExecutionResult) error {
 	ids, err := w.persistEvidence(ctx, outcome)
 	if err != nil {
 		return err
 	}
 	if len(ids) == 0 {
-		return w.failExecution(ctx, nil, "", task, attempt, result, outcome, errors.New("executor returned no evidence"))
+		return w.failExecution(ctx, nil, kind, task, attempt, result, outcome, errors.New("executor returned no evidence"))
 	}
 	if _, err := w.verification.CompleteAttempt(ctx, attempt.ID, verification.CompletionManifest{EvidenceIDs: ids}); err != nil {
 		if errors.Is(err, domain.ErrStaleAttempt) || errors.Is(err, domain.ErrLeaseInactive) {

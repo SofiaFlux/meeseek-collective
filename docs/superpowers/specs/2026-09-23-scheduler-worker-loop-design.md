@@ -89,7 +89,8 @@ bounds retries without a separate counter.
 ## Error handling
 
 - Lease lost mid-execution: the guarded completion/failure rejects with a
-  stale/lease error; the worker logs the attempt's evidence IDs and moves on.
+  stale/lease error; the worker reports FAILED with the persisted evidence IDs
+  kept and a nil error (no logger is wired in this slice).
   Already-`Put` blobs stay unreferenced — orphan blobs are expected and tolerated.
   No retry in the same tick, no blind repeat. No `RenewLease` in this slice.
 - Context cancelled: the current step finishes, no new lease is taken, `Run` returns.

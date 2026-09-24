@@ -85,7 +85,7 @@ func TestStepOnceCompletesEligibleTask(t *testing.T) {
 	task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
 		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
 		Objective:            "review the diff",
-		PayloadJSON:          json.RawMessage(`{"pr": 7}`),
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
 		AcceptanceCriteria:   []string{"done"},
 		RequiredCapabilities: []string{"shell"},
 		RequiredEnforcement:  domain.EnforcementEnforced,
@@ -168,7 +168,7 @@ func TestStepOnceFailsExecutorErrorAndBlocksRepeatSignature(t *testing.T) {
 	task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
 		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
 		Objective:            "review the diff",
-		PayloadJSON:          json.RawMessage(`{"pr": 7}`),
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
 		AcceptanceCriteria:   []string{"done"},
 		RequiredCapabilities: []string{"shell"},
 		RequiredEnforcement:  domain.EnforcementEnforced,
@@ -248,7 +248,7 @@ func TestStepOnceRecoversExecutorPanic(t *testing.T) {
 	task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
 		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
 		Objective:            "review the diff",
-		PayloadJSON:          json.RawMessage(`{"pr": 7}`),
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
 		AcceptanceCriteria:   []string{"done"},
 		RequiredCapabilities: []string{"shell"},
 		RequiredEnforcement:  domain.EnforcementEnforced,
@@ -323,7 +323,7 @@ func TestStepOnceToleratesStaleLeaseOnComplete(t *testing.T) {
 	task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
 		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
 		Objective:            "review the diff",
-		PayloadJSON:          json.RawMessage(`{"pr": 7}`),
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
 		AcceptanceCriteria:   []string{"done"},
 		RequiredCapabilities: []string{"shell"},
 		RequiredEnforcement:  domain.EnforcementEnforced,
@@ -459,5 +459,304 @@ func TestRunStepsOnceThenStops(t *testing.T) {
 	}
 	if len(fake.seen) != 1 {
 		t.Fatalf("executor calls = %d, want exactly 1", len(fake.seen))
+	}
+}
+
+func TestNewWorkerEmptyRegistryErrorsWithoutLeasing(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	resourceSvc := resources.New(store, clk)
+	schedSvc := scheduler.New(store, clk, purposes, execSvc, resourceSvc, time.Minute)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifySvc := verification.New(store, clk, execSvc)
+	envelopeID := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, ?, ?)`,
+		envelopeID, 100, clk.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execSvc.CreateTask(ctx, execution.TaskRequest{
+		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
+		Objective:            "review the diff",
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
+		AcceptanceCriteria:   []string{"done"},
+		RequiredCapabilities: []string{"shell"},
+		RequiredEnforcement:  domain.EnforcementEnforced,
+		AuthorityCeiling:     []string{"shell"},
+		ResourceEnvelopeID:   envelopeID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.NewWorker(schedSvc, execSvc, evidenceStore, verifySvc,
+		map[string]executors.Executor{}, clk, t.TempDir()); err == nil {
+		t.Fatal("expected error for empty executor registry")
+	}
+	var attempts int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM attempts`).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 {
+		t.Fatalf("attempts = %d, want 0 (no lease taken)", attempts)
+	}
+}
+
+func TestStepOnceFailsNonZeroExitWithoutError(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	resourceSvc := resources.New(store, clk)
+	schedSvc := scheduler.New(store, clk, purposes, execSvc, resourceSvc, time.Minute)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifySvc := verification.New(store, clk, execSvc)
+	envelopeID := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, ?, ?)`,
+		envelopeID, 100, clk.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
+		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
+		Objective:            "review the diff",
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
+		AcceptanceCriteria:   []string{"done"},
+		RequiredCapabilities: []string{"shell"},
+		RequiredEnforcement:  domain.EnforcementEnforced,
+		AuthorityCeiling:     []string{"shell"},
+		ResourceEnvelopeID:   envelopeID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capacity := scheduler.CapacitySnapshot{Capabilities: map[string]scheduler.CapabilityCapacity{
+		"shell": {Accessible: true, Enforcement: domain.EnforcementEnforced},
+	}}
+	fake := &fakeExecutor{result: executors.ExecutionResult{ExitCode: 1, Stdout: "boom"}}
+	worker, err := scheduler.NewWorker(schedSvc, execSvc, evidenceStore, verifySvc,
+		map[string]executors.Executor{"shell": fake}, clk, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := worker.StepOnce(ctx, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != scheduler.StepFailed {
+		t.Fatalf("outcome = %q, want FAILED", got.Outcome)
+	}
+	var signature, class string
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT signature, failure_class FROM attempt_failures WHERE task_id = ?`, task.ID).Scan(&signature, &class); err != nil {
+		t.Fatal(err)
+	}
+	if signature != "worker:shell:"+string(task.ID) {
+		t.Fatalf("signature = %q", signature)
+	}
+	if class != string(domain.FailureExecution) {
+		t.Fatalf("failure class = %q, want %q", class, domain.FailureExecution)
+	}
+	if len(got.EvidenceIDs) == 0 {
+		t.Fatalf("evidence IDs = %v, want persisted stdout kept", got.EvidenceIDs)
+	}
+}
+
+func TestStepOncePersistsStdoutStderrEvidenceInOrder(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	resourceSvc := resources.New(store, clk)
+	schedSvc := scheduler.New(store, clk, purposes, execSvc, resourceSvc, time.Minute)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifySvc := verification.New(store, clk, execSvc)
+	envelopeID := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, ?, ?)`,
+		envelopeID, 100, clk.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execSvc.CreateTask(ctx, execution.TaskRequest{
+		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
+		Objective:            "review the diff",
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
+		AcceptanceCriteria:   []string{"done"},
+		RequiredCapabilities: []string{"shell"},
+		RequiredEnforcement:  domain.EnforcementEnforced,
+		AuthorityCeiling:     []string{"shell"},
+		ResourceEnvelopeID:   envelopeID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	capacity := scheduler.CapacitySnapshot{Capabilities: map[string]scheduler.CapabilityCapacity{
+		"shell": {Accessible: true, Enforcement: domain.EnforcementEnforced},
+	}}
+	fake := &fakeExecutor{result: executors.ExecutionResult{ExitCode: 0, Stdout: "out", Stderr: "err", Evidence: []executors.Evidence{{Kind: executors.EvidenceAgentMessage, Content: "msg"}}}}
+	worker, err := scheduler.NewWorker(schedSvc, execSvc, evidenceStore, verifySvc,
+		map[string]executors.Executor{"shell": fake}, clk, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := worker.StepOnce(ctx, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != scheduler.StepCompleted {
+		t.Fatalf("outcome = %q, want COMPLETED", got.Outcome)
+	}
+	if len(got.EvidenceIDs) != 3 {
+		t.Fatalf("evidence IDs = %v, want 3 in stdout/stderr/evidence order", got.EvidenceIDs)
+	}
+	wantKinds := []string{string(executors.EvidenceStdout), string(executors.EvidenceStderr), string(executors.EvidenceAgentMessage)}
+	for i, id := range got.EvidenceIDs {
+		var kind string
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT kind FROM evidence_objects WHERE evidence_id = ?`, id).Scan(&kind); err != nil {
+			t.Fatal(err)
+		}
+		if kind != wantKinds[i] {
+			t.Fatalf("evidence[%d] kind = %q, want %q", i, kind, wantKinds[i])
+		}
+	}
+}
+
+func TestStepOnceToleratesStaleLeaseOnFail(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	resourceSvc := resources.New(store, clk)
+	schedSvc := scheduler.New(store, clk, purposes, execSvc, resourceSvc, time.Minute)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifySvc := verification.New(store, clk, execSvc)
+	envelopeID := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, ?, ?)`,
+		envelopeID, 100, clk.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
+		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
+		Objective:            "review the diff",
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
+		AcceptanceCriteria:   []string{"done"},
+		RequiredCapabilities: []string{"shell"},
+		RequiredEnforcement:  domain.EnforcementEnforced,
+		AuthorityCeiling:     []string{"shell"},
+		ResourceEnvelopeID:   envelopeID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capacity := scheduler.CapacitySnapshot{Capabilities: map[string]scheduler.CapabilityCapacity{
+		"shell": {Accessible: true, Enforcement: domain.EnforcementEnforced},
+	}}
+	exec := &advancingExecutor{
+		result: executors.ExecutionResult{ExitCode: 1, Stdout: "partial"},
+		clk:    clk,
+	}
+	worker, err := scheduler.NewWorker(schedSvc, execSvc, evidenceStore, verifySvc,
+		map[string]executors.Executor{"shell": exec}, clk, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := worker.StepOnce(ctx, capacity)
+	if err != nil {
+		t.Fatalf("stale lease on failure aborted the step: %v", err)
+	}
+	if got.Outcome != scheduler.StepFailed {
+		t.Fatalf("outcome = %q, want FAILED", got.Outcome)
+	}
+	if got.TaskID != task.ID || got.AttemptID == "" {
+		t.Fatalf("result = %+v, want task %q with attempt", got, task.ID)
+	}
+	if len(got.EvidenceIDs) == 0 {
+		t.Fatalf("evidence IDs = %v, want persisted IDs kept", got.EvidenceIDs)
+	}
+}
+
+func TestStepOnceFailsEmptyOutputWithKindSignature(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	resourceSvc := resources.New(store, clk)
+	schedSvc := scheduler.New(store, clk, purposes, execSvc, resourceSvc, time.Minute)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifySvc := verification.New(store, clk, execSvc)
+	envelopeID := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, ?, ?)`,
+		envelopeID, 100, clk.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	task, err := execSvc.CreateTask(ctx, execution.TaskRequest{
+		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
+		Objective:            "review the diff",
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
+		AcceptanceCriteria:   []string{"done"},
+		RequiredCapabilities: []string{"shell"},
+		RequiredEnforcement:  domain.EnforcementEnforced,
+		AuthorityCeiling:     []string{"shell"},
+		ResourceEnvelopeID:   envelopeID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capacity := scheduler.CapacitySnapshot{Capabilities: map[string]scheduler.CapabilityCapacity{
+		"shell": {Accessible: true, Enforcement: domain.EnforcementEnforced},
+	}}
+	fake := &fakeExecutor{result: executors.ExecutionResult{ExitCode: 0}}
+	worker, err := scheduler.NewWorker(schedSvc, execSvc, evidenceStore, verifySvc,
+		map[string]executors.Executor{"shell": fake}, clk, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := worker.StepOnce(ctx, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != scheduler.StepFailed {
+		t.Fatalf("outcome = %q, want FAILED", got.Outcome)
+	}
+	if len(got.EvidenceIDs) != 0 {
+		t.Fatalf("evidence IDs = %v, want empty", got.EvidenceIDs)
+	}
+	var signature, class string
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT signature, failure_class FROM attempt_failures WHERE task_id = ?`, task.ID).Scan(&signature, &class); err != nil {
+		t.Fatal(err)
+	}
+	if signature != "worker:shell:"+string(task.ID) {
+		t.Fatalf("signature = %q, want %q", signature, "worker:shell:"+string(task.ID))
+	}
+	if class != string(domain.FailureExecution) {
+		t.Fatalf("failure class = %q, want %q", class, domain.FailureExecution)
 	}
 }
