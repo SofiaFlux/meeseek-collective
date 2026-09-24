@@ -41,11 +41,14 @@ func TestProviderAdvertisesOnlyExplicitReadCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(definitions) != 4 {
-		t.Fatalf("got %d definitions, want 4", len(definitions))
+	if len(definitions) != 8 {
+		t.Fatalf("got %d definitions, want 8", len(definitions))
 	}
-	if definitions[0].Skill.Name != "ado.projects.list" || definitions[1].Skill.Name != "ado.work_item.read" || definitions[2].Skill.Name != "ado.pr.list" || definitions[3].Skill.Name != "ado.pr.get" {
-		t.Fatalf("unexpected definitions: %+v", definitions)
+	want := []string{"ado.projects.list", "ado.work_item.read", "ado.pr.list", "ado.pr.get", "ado.pr.org_active", "ado.pr.threads", "ado.pr.file", "ado.build.status"}
+	for i, name := range want {
+		if definitions[i].Skill.Name != name {
+			t.Fatalf("definition[%d] = %q, want %q", i, definitions[i].Skill.Name, name)
+		}
 	}
 	for _, definition := range definitions {
 		if definition.Access.Provider != p.Name() || len(definition.Authority.Capabilities) != 1 || definition.Authority.Capabilities[0] != definition.Skill.Name {
@@ -125,10 +128,10 @@ func TestProviderAdvertisesPRListAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(definitions) != 4 {
-		t.Fatalf("got %d definitions, want 4", len(definitions))
+	if len(definitions) != 8 {
+		t.Fatalf("got %d definitions, want 8", len(definitions))
 	}
-	want := []string{"ado.projects.list", "ado.work_item.read", "ado.pr.list", "ado.pr.get"}
+	want := []string{"ado.projects.list", "ado.work_item.read", "ado.pr.list", "ado.pr.get", "ado.pr.org_active", "ado.pr.threads", "ado.pr.file", "ado.build.status"}
 	for i, name := range want {
 		if definitions[i].Skill.Name != name {
 			t.Fatalf("definition[%d] = %q, want %q", i, definitions[i].Skill.Name, name)
@@ -165,5 +168,96 @@ func TestProviderEnforcesPerCapabilityActions(t *testing.T) {
 	}
 	if len(session.called) != 2 || session.called[0] != "repo_pull_request" || session.called[1] != "repo_pull_request" {
 		t.Fatalf("called tools: %v", session.called)
+	}
+}
+
+func TestProviderAdvertisesAllEightCapabilities(t *testing.T) {
+	p, err := New(Config{Command: "/bin/true", Organization: "Contoso"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions, err := p.Advertise(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ado.projects.list", "ado.work_item.read", "ado.pr.list", "ado.pr.get", "ado.pr.org_active", "ado.pr.threads", "ado.pr.file", "ado.build.status"}
+	if len(definitions) != len(want) {
+		t.Fatalf("got %d definitions, want %d", len(definitions), len(want))
+	}
+	for i, name := range want {
+		if definitions[i].Skill.Name != name {
+			t.Fatalf("definition[%d] = %q, want %q", i, definitions[i].Skill.Name, name)
+		}
+		if definitions[i].Access.Provider != p.Name() || len(definitions[i].Authority.Capabilities) != 1 || definitions[i].Authority.Capabilities[0] != name {
+			t.Fatalf("unscoped definition: %+v", definitions[i])
+		}
+	}
+}
+
+func TestProviderOrgActiveForwardsFiltersWithoutAction(t *testing.T) {
+	p, _ := New(Config{Command: "/bin/true", Organization: "Contoso"})
+	dials := 0
+	session := &fakeSession{tools: []string{"repo_pull_request_org"}}
+	p.dial = func(context.Context) (mcpSession, error) { dials++; return session, nil }
+	if _, err := p.Call(t.Context(), "ado.pr.org_active", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Call(t.Context(), "ado.pr.org_active", map[string]any{"status": "active"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []any{
+		map[string]any{"action": "list"},
+		map[string]any{"tool": "repo_pull_request"},
+	} {
+		if _, err := p.Call(t.Context(), "ado.pr.org_active", bad); err == nil {
+			t.Fatalf("accepted org_active: %#v", bad)
+		}
+	}
+	if dials != 2 {
+		t.Fatalf("dialed %d times, want 2", dials)
+	}
+	if len(session.called) != 2 || session.called[0] != "repo_pull_request_org" {
+		t.Fatalf("called tools: %v", session.called)
+	}
+}
+
+func TestProviderForwardsThreadFileAndBuildCalls(t *testing.T) {
+	p, _ := New(Config{Command: "/bin/true", Organization: "Contoso"})
+	session := &fakeSession{tools: []string{"repo_pull_request_thread", "repo_file", "pipelines_build"}}
+	p.dial = func(context.Context) (mcpSession, error) { return session, nil }
+	calls := []struct {
+		capability string
+		request    map[string]any
+		tool       string
+	}{
+		{"ado.pr.threads", map[string]any{"action": "list_comments", "pullRequestId": 7, "threadId": 3}, "repo_pull_request_thread"},
+		{"ado.pr.file", map[string]any{"action": "get_content", "path": "main.go"}, "repo_file"},
+		{"ado.build.status", map[string]any{"action": "get_status", "buildId": 9}, "pipelines_build"},
+	}
+	for _, call := range calls {
+		if _, err := p.Call(t.Context(), call.capability, call.request); err != nil {
+			t.Fatalf("%s: %v", call.capability, err)
+		}
+	}
+	if len(session.called) != len(calls) {
+		t.Fatalf("called tools: %v", session.called)
+	}
+	for i, call := range calls {
+		if session.called[i] != call.tool {
+			t.Fatalf("call[%d] tool = %q, want %q", i, session.called[i], call.tool)
+		}
+	}
+	for _, bad := range []struct {
+		capability string
+		request    map[string]any
+	}{
+		{"ado.pr.threads", map[string]any{"action": "create"}},
+		{"ado.pr.file", map[string]any{"action": "delete"}},
+		{"ado.build.status", map[string]any{"action": "list"}},
+		{"ado.build.status", map[string]any{"action": "get_status", "tool": "pipelines_write"}},
+	} {
+		if _, err := p.Call(t.Context(), bad.capability, bad.request); err == nil {
+			t.Fatalf("accepted %s: %#v", bad.capability, bad.request)
+		}
 	}
 }

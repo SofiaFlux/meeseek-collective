@@ -59,6 +59,10 @@ func (p *Provider) Advertise(context.Context) ([]capabilities.Definition, error)
 		p.definition("ado.work_item.read", "wit_work_item"),
 		p.definition("ado.pr.list", "repo_pull_request"),
 		p.definition("ado.pr.get", "repo_pull_request"),
+		p.definition("ado.pr.org_active", "repo_pull_request_org"),
+		p.definition("ado.pr.threads", "repo_pull_request_thread"),
+		p.definition("ado.pr.file", "repo_file"),
+		p.definition("ado.build.status", "pipelines_build"),
 	}, nil
 }
 
@@ -138,6 +142,37 @@ func (p *Provider) Call(ctx context.Context, capability string, request any) (an
 		for key, value := range m {
 			args[key] = value
 		}
+	case "ado.pr.org_active":
+		if request != nil {
+			m, ok := request.(map[string]any)
+			if !ok {
+				return nil, errors.New("org PR request must be an object")
+			}
+			if _, has := m["action"]; has {
+				return nil, errors.New("org PR listing accepts no action")
+			}
+			if _, bypass := m["tool"]; bypass {
+				return nil, errors.New("MCP tool override is forbidden")
+			}
+			for key, value := range m {
+				args[key] = value
+			}
+		}
+	case "ado.pr.threads", "ado.pr.file", "ado.build.status":
+		m, ok := request.(map[string]any)
+		if !ok {
+			return nil, errors.New("request must be an object")
+		}
+		action, ok := m["action"].(string)
+		if !ok || !allowedAction(capability, action) {
+			return nil, fmt.Errorf("action %q is not allowed for %q", action, capability)
+		}
+		if _, bypass := m["tool"]; bypass {
+			return nil, errors.New("MCP tool override is forbidden")
+		}
+		for key, value := range m {
+			args[key] = value
+		}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, p.config.Timeout)
 	defer cancel()
@@ -164,6 +199,14 @@ func toolFor(capability string) (string, error) {
 		return "wit_work_item", nil
 	case "ado.pr.list", "ado.pr.get":
 		return "repo_pull_request", nil
+	case "ado.pr.org_active":
+		return "repo_pull_request_org", nil
+	case "ado.pr.threads":
+		return "repo_pull_request_thread", nil
+	case "ado.pr.file":
+		return "repo_file", nil
+	case "ado.build.status":
+		return "pipelines_build", nil
 	default:
 		return "", fmt.Errorf("unsupported ADO capability %q", capability)
 	}
@@ -174,8 +217,11 @@ var allowedActions = map[string]map[string]bool{
 		"get": true, "get_batch": true, "list_comments": true, "my": true,
 		"list_revisions": true, "list_for_iteration": true, "get_type": true,
 	},
-	"ado.pr.list": {"list": true, "list_by_commits": true},
-	"ado.pr.get":  {"get": true},
+	"ado.pr.list":      {"list": true, "list_by_commits": true},
+	"ado.pr.get":       {"get": true},
+	"ado.pr.threads":   {"list": true, "list_comments": true},
+	"ado.pr.file":      {"get_content": true, "list_directory": true},
+	"ado.build.status": {"get_status": true},
 }
 
 func allowedAction(capability, action string) bool {
