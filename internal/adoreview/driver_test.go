@@ -3,9 +3,11 @@ package adoreview
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +41,19 @@ type fakeCompletions struct {
 
 func (f *fakeCompletions) Provenance(context.Context, domain.ID) (runmanifest.Provenance, error) {
 	return f.provenance, f.err
+}
+
+type selectiveCompletions struct {
+	delegate           Completions
+	unavailableAttempt domain.ID
+	unavailableError   error
+}
+
+func (f *selectiveCompletions) Provenance(ctx context.Context, attemptID domain.ID) (runmanifest.Provenance, error) {
+	if attemptID == f.unavailableAttempt {
+		return runmanifest.Provenance{}, f.unavailableError
+	}
+	return f.delegate.Provenance(ctx, attemptID)
 }
 
 type blockingDriverCaller struct {
@@ -425,21 +440,40 @@ func TestDriverRejectsMalformedPRGetResponse(t *testing.T) {
 }
 
 func TestDriverPropagatesProvenanceErrors(t *testing.T) {
-	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
-	wantErr := errors.New("provenance database failure")
-	h.driver.manifests = &fakeCompletions{err: wantErr}
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "database failure", err: errors.New("provenance database failure")},
+		{name: "incomplete", err: runmanifest.ErrIncomplete},
+		{name: "sql no rows", err: sql.ErrNoRows},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
+			h.driver.manifests = &fakeCompletions{err: test.err}
 
-	_, err := h.driver.StepOnce(h.ctx)
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("error = %v, want %v", err, wantErr)
+			result, err := h.driver.StepOnce(h.ctx)
+			if !errors.Is(err, test.err) {
+				t.Fatalf("error = %v, want %v", err, test.err)
+			}
+			if len(result.Materialized) != 0 {
+				t.Fatalf("materialized = %v, want none", result.Materialized)
+			}
+		})
 	}
 }
 
 func TestDriverSkipsUnavailableProvenance(t *testing.T) {
-	for _, sentinel := range []error{runmanifest.ErrNotFound, runmanifest.ErrIncomplete} {
-		t.Run(sentinel.Error(), func(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "not found", err: runmanifest.ErrNotFound},
+		{name: "wrapped not found", err: fmt.Errorf("provenance lookup: %w", runmanifest.ErrNotFound)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
-			h.driver.manifests = &fakeCompletions{err: sentinel}
+			h.driver.manifests = &fakeCompletions{err: test.err}
 
 			result, err := h.driver.StepOnce(h.ctx)
 			if err != nil {
@@ -581,6 +615,7 @@ func TestDriverHoldsBlockedWork2Task(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := materializeDriverWork2(t, h, c)
+	var latestAttemptID domain.ID
 	for index := 0; index < 2; index++ {
 		attempt, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
 		if err != nil {
@@ -589,6 +624,15 @@ func TestDriverHoldsBlockedWork2Task(t *testing.T) {
 		if err := h.execution.FailAttempt(h.ctx, attempt.ID, domain.FailureExecution, "publisher-failed", nil); err != nil {
 			t.Fatal(err)
 		}
+		latestAttemptID = attempt.ID
+	}
+	if _, err := h.driver.StepOnce(h.ctx); !errors.Is(err, runmanifest.ErrIncomplete) {
+		t.Fatalf("error = %v, want %v", err, runmanifest.ErrIncomplete)
+	}
+	h.driver.manifests = &selectiveCompletions{
+		delegate:           h.driver.manifests,
+		unavailableAttempt: latestAttemptID,
+		unavailableError:   runmanifest.ErrNotFound,
 	}
 	if _, err := h.driver.StepOnce(h.ctx); err != nil {
 		t.Fatal(err)

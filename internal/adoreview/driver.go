@@ -2,7 +2,6 @@ package adoreview
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -288,7 +287,7 @@ func (d *Driver) orderingReady(ctx context.Context, assessment driverAssessment)
 }
 
 func isUnavailableProvenance(err error) bool {
-	return errors.Is(err, runmanifest.ErrNotFound) || errors.Is(err, runmanifest.ErrIncomplete) || errors.Is(err, sql.ErrNoRows)
+	return errors.Is(err, runmanifest.ErrNotFound)
 }
 
 func decodeWorkOnePayload(raw json.RawMessage) (workOnePayload, error) {
