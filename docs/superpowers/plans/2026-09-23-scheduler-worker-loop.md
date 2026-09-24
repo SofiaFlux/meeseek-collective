@@ -14,7 +14,7 @@
 - TDD: failing test first for every behavior, then minimal implementation.
 - The worker dispatches no `operations.Service` effects; executors only return evidence.
 - Success never yields `SUCCEEDED`: completion lands in `AWAITING_VERIFICATION` with `PENDING` verification work.
-- Full `go test ./... -count=1` and `go vet ./...` must pass before each commit.
+- Full `go test ./internal/scheduler -count=1` must pass before each Task 1–3 commit; full `go test ./... -count=1` and `go vet ./...` must pass in Task 4 before the final commit.
 
 ---
 
@@ -512,8 +512,8 @@ func (panicExecutor) Start(context.Context, executors.AttemptEnvelope) (executor
 
 `errors` must be imported in the test file.
 
-- [ ] **Step 2: Run them, expect PASS already for error path, FAIL for panic.** Run: `GOCACHE=/tmp/summa42-full-go-cache go test ./internal/scheduler -run 'TestStepOnce(FailsExecutorErrorAndBlocksRepeatSignature|RecoversExecutorPanic)$' -count=1`. Expected: panic test FAILs (panic escapes; the step has no recover yet). If both pass, the test is wrong — stop and inspect.
-- [ ] **Step 3: Confirm recovery is already in place.** `runExecutor` from Task 2 already recovers. If Step 2 showed the panic escaping, wire `executeAttempt` through `runExecutor` (it does) and re-run. No new production code expected; if the panic test passed in Step 2 without recovery, delete the test's false premise and re-check.
+- [ ] **Step 2: Run them, expect PASS for both.** Run: `GOCACHE=/tmp/summa42-full-go-cache go test ./internal/scheduler -run 'TestStepOnce(FailsExecutorErrorAndBlocksRepeatSignature|RecoversExecutorPanic)$' -count=1`. Expected: PASS — panic recovery already lives in `runExecutor` from Task 2, so the panic test passes immediately. If the panic test FAILs (panic escapes), stop: `executeAttempt` is not wired through `runExecutor`.
+- [ ] **Step 3: Verify recovery is in place, no new production code.** Confirm `runExecutor` contains the `recover()` branch from Task 2; do not duplicate it.
 - [ ] **Step 4: Add guard-rejection tolerance.** Change `completeExecution` and `failExecution` so a stale/lease guard rejection does not abort the loop with a raw error: on `CompleteAttempt`/`FailAttempt` error matching `domain.ErrStaleAttempt` or `domain.ErrLeaseInactive` (both defined in `internal/domain/errors.go`), set `result.Outcome = StepFailed`, keep already-persisted IDs, and return nil. Any other error still returns.
 
 ```go
