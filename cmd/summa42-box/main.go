@@ -240,11 +240,29 @@ func buildCopilotExecutorFromEnv() (map[string]executors.Executor, error) {
 	executor, err := executors.NewCopilotExecutor(executors.CopilotConfig{
 		Path: path, Model: strings.TrimSpace(os.Getenv("SUMMA42_COPILOT_MODEL")),
 		MCPServer: server, AllowedTools: tools, Timeout: timeout,
+		Environment: copilotEnvironmentFromOS(),
 	})
 	if err != nil {
 		return nil, err
 	}
 	return map[string]executors.Executor{"copilot": executor}, nil
+}
+
+// copilotEnvironmentFromOS snapshots the allowlisted OS vars into the child
+// environment at build time. Absent vars are omitted, never empty-string injected.
+func copilotEnvironmentFromOS() map[string]string {
+	allowlisted := []string{
+		"PATH", "COPILOT_MODEL", "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+		"SSL_CERT_FILE", "SSL_CERT_DIR", "TMPDIR", "TMP", "TEMP",
+	}
+	env := make(map[string]string, len(allowlisted))
+	for _, key := range allowlisted {
+		if value, ok := os.LookupEnv(key); ok {
+			env[key] = value
+		}
+	}
+	return env
 }
 
 type capabilityAssessor interface {

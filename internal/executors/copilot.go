@@ -111,6 +111,8 @@ func NewCopilotExecutor(config CopilotConfig) (*CopilotExecutor, error) {
 			return nil, fmt.Errorf("copilot allowed tool %q is not a permitted read-only tool", tool)
 		}
 		lowered := strings.ToLower(trimmed)
+		// Exact allowlist membership is checked first and subsumes the fragment
+		// scan (fragments are future-proofing for qualified Server(tool) forms).
 		for _, fragment := range copilotForbiddenToolFragments {
 			if strings.Contains(lowered, fragment) {
 				return nil, fmt.Errorf("copilot allowed tool %q contains forbidden fragment %q", tool, fragment)
@@ -231,9 +233,20 @@ func validateCopilotResult(data []byte) (string, error) {
 			return "", fmt.Errorf("copilot result reviewedCommits[%d] must not be blank", i)
 		}
 	}
+	if len(result.ReviewedFiles) == 0 {
+		return "", errors.New("copilot result reviewedFiles is required")
+	}
+	for i, file := range result.ReviewedFiles {
+		if strings.TrimSpace(file) == "" {
+			return "", fmt.Errorf("copilot result reviewedFiles[%d] must not be blank", i)
+		}
+	}
 	for i, finding := range result.Findings {
 		if strings.TrimSpace(finding.Path) == "" {
 			return "", fmt.Errorf("copilot result findings[%d] is missing path", i)
+		}
+		if strings.TrimSpace(finding.Explanation) == "" {
+			return "", fmt.Errorf("copilot result findings[%d] is missing explanation", i)
 		}
 	}
 	canonical, err := json.Marshal(result)

@@ -108,10 +108,13 @@ func TestCopilotRejectsHostileToolConfigs(t *testing.T) {
 
 func TestCopilotRejectsInvalidResult(t *testing.T) {
 	cases := map[string]string{
-		"non-JSON stdout":      "#!/bin/sh\necho 'not json'\n",
-		"bad verdict":          "#!/bin/sh\necho '{\"verdict\":\"BOGUS\",\"reviewedCommits\":[\"abc\"],\"reviewedFiles\":[\"main.go\"],\"findings\":[]}'\n",
-		"empty commits":        "#!/bin/sh\necho '{\"verdict\":\"CLEAN\",\"reviewedCommits\":[],\"reviewedFiles\":[\"main.go\"],\"findings\":[]}'\n",
-		"finding without path": "#!/bin/sh\necho '{\"verdict\":\"FINDINGS\",\"reviewedCommits\":[\"abc\"],\"reviewedFiles\":[\"main.go\"],\"findings\":[{\"line\":1,\"explanation\":\"x\",\"evidence\":\"y\"}]}'\n",
+		"non-JSON stdout":             "#!/bin/sh\necho 'not json'\n",
+		"bad verdict":                 "#!/bin/sh\necho '{\"verdict\":\"BOGUS\",\"reviewedCommits\":[\"abc\"],\"reviewedFiles\":[\"main.go\"],\"findings\":[]}'\n",
+		"empty commits":               "#!/bin/sh\necho '{\"verdict\":\"CLEAN\",\"reviewedCommits\":[],\"reviewedFiles\":[\"main.go\"],\"findings\":[]}'\n",
+		"empty files":                 "#!/bin/sh\necho '{\"verdict\":\"CLEAN\",\"reviewedCommits\":[\"abc\"],\"reviewedFiles\":[],\"findings\":[]}'\n",
+		"blank file entry":            "#!/bin/sh\necho '{\"verdict\":\"CLEAN\",\"reviewedCommits\":[\"abc\"],\"reviewedFiles\":[\"   \"],\"findings\":[]}'\n",
+		"finding without path":        "#!/bin/sh\necho '{\"verdict\":\"FINDINGS\",\"reviewedCommits\":[\"abc\"],\"reviewedFiles\":[\"main.go\"],\"findings\":[{\"line\":1,\"explanation\":\"x\",\"evidence\":\"y\"}]}'\n",
+		"finding without explanation": "#!/bin/sh\necho '{\"verdict\":\"FINDINGS\",\"reviewedCommits\":[\"abc\"],\"reviewedFiles\":[\"main.go\"],\"findings\":[{\"path\":\"main.go\",\"line\":1,\"evidence\":\"y\"}]}'\n",
 	}
 	for name, script := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -213,5 +216,105 @@ func TestCopilotRejectsProtectedEnv(t *testing.T) {
 	cfg.Environment = map[string]string{"SUMMA42_OWNER_PRIVATE_KEY": "must-not-pass"}
 	if _, err := executors.NewCopilotExecutor(cfg); err == nil {
 		t.Fatal("expected constructor error for protected env")
+	}
+}
+
+func TestCopilotRejectsNonAllowlistedEnv(t *testing.T) {
+	cfg := copilotConfig(writeFakeCopilot(t, "#!/bin/sh\nexit 0\n"))
+	cfg.Environment = map[string]string{"FOO": "1"}
+	if _, err := executors.NewCopilotExecutor(cfg); err == nil {
+		t.Fatal("expected constructor error for non-allowlisted env FOO")
+	}
+	for _, key := range []string{"SUMMA42_OWNER_PRIVATE_KEY", "AZURE_CLIENT_SECRET", "AWS_SECRET_ACCESS_KEY"} {
+		cfg := copilotConfig(writeFakeCopilot(t, "#!/bin/sh\nexit 0\n"))
+		cfg.Environment = map[string]string{key: "secret"}
+		if _, err := executors.NewCopilotExecutor(cfg); err == nil {
+			t.Fatalf("expected constructor error for protected env %s", key)
+		}
+	}
+}
+
+func TestCopilotAcceptsAllowlistedEnv(t *testing.T) {
+	cfg := copilotConfig(writeFakeCopilot(t, "#!/bin/sh\nexit 0\n"))
+	cfg.Environment = map[string]string{
+		"PATH": "/usr/bin", "COPILOT_MODEL": "gpt-5", "GH_TOKEN": "t",
+	}
+	if _, err := executors.NewCopilotExecutor(cfg); err != nil {
+		t.Fatalf("allowlisted env rejected: %v", err)
+	}
+}
+
+func TestCopilotModelFlagPrecedence(t *testing.T) {
+	path := writeFakeCopilot(t, "#!/bin/sh\necho \"$@\" > \"$(pwd)/argv.txt\"\necho '{\"verdict\":\"CLEAN\",\"reviewedCommits\":[\"abc\"],\"reviewedFiles\":[\"main.go\"],\"findings\":[]}'\n")
+	cfg := copilotConfig(path)
+	cfg.Model = "flag-model"
+	cfg.Environment = map[string]string{"COPILOT_MODEL": "env-model"}
+	executor, err := executors.NewCopilotExecutor(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	if _, err := executor.Start(context.Background(), executors.AttemptEnvelope{
+		TaskID: "task-1", AttemptID: "attempt-1", Workspace: workspace,
+		Objective: "review", PayloadJSON: json.RawMessage(`{"repo":"shop","pr":1,"sourceCommit":"a","targetCommit":"b"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(workspace, "argv.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump := string(raw)
+	if got := strings.Count(dump, "--model="); got != 1 {
+		t.Fatalf("--model= count = %d, want 1: %q", got, dump)
+	}
+	if !strings.Contains(dump, "--model=flag-model") {
+		t.Fatalf("argv missing --model=flag-model: %q", dump)
+	}
+	if strings.Contains(dump, "--model=env-model") {
+		t.Fatalf("argv uses env model value: %q", dump)
+	}
+}
+
+func TestCopilotEvidenceIsCanonical(t *testing.T) {
+	raw := "  {\"verdict\" : \"CLEAN\" , \"reviewedCommits\" : [\"abc\"] , \"reviewedFiles\" : [\"main.go\"] , \"findings\" : [] , \"reason\" : \"ok\" }  \n"
+	path := writeFakeCopilot(t, "#!/bin/sh\nprintf '%s' '"+strings.ReplaceAll(raw, "'", "'\\''")+"'\n")
+	executor, err := executors.NewCopilotExecutor(copilotConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Start(context.Background(), executors.AttemptEnvelope{
+		TaskID: "task-1", AttemptID: "attempt-1", Workspace: t.TempDir(),
+		Objective: "review", PayloadJSON: json.RawMessage(`{"repo":"shop","pr":1,"sourceCommit":"a","targetCommit":"b"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded executors.ReviewResult
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout != string(canonical) {
+		t.Fatalf("Stdout = %q, want canonical %q", result.Stdout, string(canonical))
+	}
+	if strings.Contains(result.Stdout, " : ") {
+		t.Fatalf("Stdout is not compact canonical JSON: %q", result.Stdout)
+	}
+	found := map[executors.EvidenceKind]int{}
+	for _, ev := range result.Evidence {
+		found[ev.Kind]++
+		if ev.Kind == executors.EvidenceAgentMessage && ev.Content != result.Stdout {
+			t.Fatalf("AGENT_MESSAGE evidence = %q, want Stdout %q", ev.Content, result.Stdout)
+		}
+	}
+	if found[executors.EvidenceStderr] == 0 {
+		t.Fatal("STDERR evidence always required")
+	}
+	if found[executors.EvidenceStdout] == 0 {
+		t.Fatal("STDOUT evidence required when stdout non-empty")
 	}
 }
