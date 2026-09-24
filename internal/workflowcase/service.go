@@ -110,6 +110,26 @@ func (s *Service) Get(ctx context.Context, caseID domain.ID) (Case, error) {
 	return c, nil
 }
 
+func (s *Service) FindVerification(ctx context.Context, caseID domain.ID) (VerificationRecord, bool, error) {
+	if s == nil || s.store == nil {
+		return VerificationRecord{}, false, errors.New("workflow case service is not configured")
+	}
+	caseID = domain.ID(strings.TrimSpace(string(caseID)))
+	if caseID == "" {
+		return VerificationRecord{}, false, errors.New("case ID is required")
+	}
+	record, err := scanVerification(s.store.DB().QueryRowContext(ctx,
+		`SELECT `+verificationColumns+` FROM workflow_verifications WHERE case_id = ?`, caseID,
+	))
+	if errors.Is(err, sql.ErrNoRows) {
+		return VerificationRecord{}, false, nil
+	}
+	if err != nil {
+		return VerificationRecord{}, false, err
+	}
+	return record, true, nil
+}
+
 func (s *Service) ListActive(ctx context.Context, missionID domain.ID) ([]Case, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("workflow case service is not configured")

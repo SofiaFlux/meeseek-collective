@@ -273,19 +273,27 @@ func TestFinalVerifierClosesConfirmedCase(t *testing.T) {
 	if record.VerifierID != finalVerifierTestID || record.VerifierType != finalVerifierTestType {
 		t.Fatalf("verification identity = %q/%q", record.VerifierID, record.VerifierType)
 	}
-	if len(record.EvidenceIDs) != 2 {
-		t.Fatalf("verification evidence = %v, want decision and completion evidence", record.EvidenceIDs)
+	if len(record.EvidenceIDs) != 3 {
+		t.Fatalf("verification evidence = %v, want decision, completion, and verification evidence", record.EvidenceIDs)
 	}
 	requireFinalEvidence(t, record.EvidenceIDs, f.decisionID, f.completionEvidence)
+	var verificationEvidence domain.ID
 	for _, id := range record.EvidenceIDs {
-		object, _, err := f.evidence.Get(f.ctx, id)
+		object, data, err := f.evidence.Get(f.ctx, id)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if object.Kind == "ado.workflow.verification" {
-			t.Fatalf("verification record cited transient verification evidence %s", id)
+			verificationEvidence = id
+			if string(data) != record.SnapshotJSON {
+				t.Fatalf("verification evidence = %s, snapshot = %s", data, record.SnapshotJSON)
+			}
 		}
 	}
+	if verificationEvidence == "" {
+		t.Fatal("verification record omitted ado.workflow.verification evidence")
+	}
+	requireFinalEvidence(t, record.EvidenceIDs, verificationEvidence)
 	var snapshot struct {
 		CaseID   string   `json:"caseID"`
 		Revision string   `json:"revision"`
@@ -310,6 +318,21 @@ func TestFinalVerifierClosesConfirmedCase(t *testing.T) {
 		State domain.OperationState `json:"state"`
 	}{"ado.pr.approve:proj/shop#1:a:b", domain.OperationConfirmedEffect}) {
 		t.Fatalf("snapshot verdicts = %+v", snapshot.Verdicts)
+	}
+	replayIntents := make([]publishIntent, 0, len(snapshot.Slots))
+	replayVerdicts := make([]finalVerificationVerdict, 0, len(snapshot.Verdicts))
+	for _, slot := range snapshot.Slots {
+		replayIntents = append(replayIntents, publishIntent{slot: slot})
+	}
+	for _, verdict := range snapshot.Verdicts {
+		replayVerdicts = append(replayVerdicts, finalVerificationVerdict{Slot: verdict.Slot, State: verdict.State})
+	}
+	if err := f.verifier.close(f.ctx, closed, f.workID, replayIntents, replayVerdicts, f.decisionID, []domain.ID{f.completionEvidence}); err != nil {
+		t.Fatal(err)
+	}
+	replay := finalVerificationRecord(t, f.driverHarness, f.caseID)
+	if !reflect.DeepEqual(replay.EvidenceIDs, record.EvidenceIDs) {
+		t.Fatalf("replay evidence = %v, want %v", replay.EvidenceIDs, record.EvidenceIDs)
 	}
 	if len(f.vote.requests) != 1 || len(f.comment.requests) != 0 {
 		t.Fatalf("final lookup counts = vote:%d comment:%d", len(f.vote.requests), len(f.comment.requests))
@@ -337,6 +360,46 @@ func TestFinalVerifierClosesConfirmedCase(t *testing.T) {
 	}
 	if active != 1 {
 		t.Fatalf("Mission active = %d, want 1", active)
+	}
+}
+
+func TestFinalVerifierReusesExistingVerificationBlob(t *testing.T) {
+	f := setupReadyFinalVerifier(t,
+		ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"},
+		publishEvidenceEntry{
+			Slot: "ado.pr.approve:proj/shop#1:a:b", Operation: "op-1",
+			State: domain.OperationConfirmedEffect, Reference: "vote-1",
+		},
+	)
+	snapshot, err := json.Marshal(finalVerificationSnapshot{
+		CaseID: f.caseID, Revision: "a:b", WorkID: f.workID,
+		Slots: []string{"ado.pr.approve:proj/shop#1:a:b"},
+		Verdicts: []finalVerificationVerdict{{
+			Slot: "ado.pr.approve:proj/shop#1:a:b", State: domain.OperationConfirmedEffect,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing, err := f.evidence.Put(f.ctx, strings.NewReader(string(snapshot)), evidence.Metadata{
+		MediaType: "application/json", Kind: "ado.workflow.verification",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.verifier.StepOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	record := finalVerificationRecord(t, f.driverHarness, f.caseID)
+	requireFinalEvidence(t, record.EvidenceIDs, existing.ID)
+	var count int
+	if err := f.store.DB().QueryRowContext(f.ctx,
+		`SELECT count(*) FROM evidence_objects WHERE kind = 'ado.workflow.verification'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("verification evidence count = %d, want reused existing blob", count)
 	}
 }
 
@@ -635,5 +698,22 @@ func TestFinalVerifierConcurrentCloseReplay(t *testing.T) {
 	}
 	if count := finalVerificationCount(t, f.driverHarness, f.caseID); count != 1 {
 		t.Fatalf("concurrent verification count = %d, want 1", count)
+	}
+	record := finalVerificationRecord(t, f.driverHarness, f.caseID)
+	var verificationEvidence domain.ID
+	for _, id := range record.EvidenceIDs {
+		object, data, err := f.evidence.Get(f.ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if object.Kind == "ado.workflow.verification" {
+			verificationEvidence = id
+			if string(data) != record.SnapshotJSON {
+				t.Fatalf("verification evidence = %s, snapshot = %s", data, record.SnapshotJSON)
+			}
+		}
+	}
+	if verificationEvidence == "" {
+		t.Fatal("concurrent verification record omitted verification evidence")
 	}
 }

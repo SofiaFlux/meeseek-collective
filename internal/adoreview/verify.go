@@ -1,6 +1,7 @@
 package adoreview
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -62,6 +63,8 @@ type finalVerificationSnapshot struct {
 	Slots    []string                   `json:"slots"`
 	Verdicts []finalVerificationVerdict `json:"verdicts"`
 }
+
+const finalVerificationEvidenceKind = "ado.workflow.verification"
 
 func NewFinalVerifier(cases *workflowcase.Service, executionSvc *execution.Service, evidenceStore *evidence.Store, verificationSvc *verification.Service, config FinalVerifierConfig) (*FinalVerifier, error) {
 	if cases == nil || executionSvc == nil || evidenceStore == nil || verificationSvc == nil {
@@ -442,19 +445,97 @@ func (v *FinalVerifier) close(ctx context.Context, c workflowcase.Case, workID d
 		return err
 	}
 	digest := sha256.Sum256(body)
-	evidenceIDs := make([]domain.ID, 0, len(completionIDs)+1)
-	evidenceIDs = append(evidenceIDs, completionIDs...)
-	evidenceIDs = append(evidenceIDs, decisionID)
-	request := workflowcase.VerificationRequest{
-		CaseID: c.ID, VerifierID: v.config.VerifierID, VerifierType: v.config.VerifierType,
-		SnapshotHash: hex.EncodeToString(digest[:]), SnapshotJSON: string(body), EvidenceIDs: evidenceIDs,
+	snapshotHash := hex.EncodeToString(digest[:])
+	request, err := v.finalVerificationRequest(ctx, c, body, snapshotHash, decisionID, completionIDs)
+	if err != nil {
+		return err
 	}
 	_, err = v.cases.Close(ctx, request)
 	if !errors.Is(err, domain.ErrIntentConflict) {
 		return err
 	}
-	_, replayErr := v.cases.Close(ctx, request)
+
+	record, found, findErr := v.cases.FindVerification(ctx, c.ID)
+	if findErr != nil {
+		return findErr
+	}
+	if !found || record.SnapshotHash != snapshotHash || record.SnapshotJSON != string(body) {
+		return err
+	}
+	verificationEvidenceID, found, findErr := v.verificationEvidenceIDFromRecord(ctx, record, body)
+	if findErr != nil {
+		return findErr
+	}
+	if !found {
+		return errors.New("existing workflow verification has no matching verification evidence")
+	}
+	replayRequest := request
+	replayRequest.EvidenceIDs = make([]domain.ID, 0, len(completionIDs)+2)
+	replayRequest.EvidenceIDs = append(replayRequest.EvidenceIDs, completionIDs...)
+	replayRequest.EvidenceIDs = append(replayRequest.EvidenceIDs, decisionID, verificationEvidenceID)
+	_, replayErr := v.cases.Close(ctx, replayRequest)
 	return replayErr
+}
+
+func (v *FinalVerifier) finalVerificationRequest(ctx context.Context, c workflowcase.Case, body []byte, snapshotHash string, decisionID domain.ID, completionIDs []domain.ID) (workflowcase.VerificationRequest, error) {
+	verificationEvidenceID, err := v.finalVerificationEvidenceID(ctx, c.ID, body, snapshotHash)
+	if err != nil {
+		return workflowcase.VerificationRequest{}, err
+	}
+	evidenceIDs := make([]domain.ID, 0, len(completionIDs)+2)
+	evidenceIDs = append(evidenceIDs, completionIDs...)
+	evidenceIDs = append(evidenceIDs, decisionID, verificationEvidenceID)
+	return workflowcase.VerificationRequest{
+		CaseID: c.ID, VerifierID: v.config.VerifierID, VerifierType: v.config.VerifierType,
+		SnapshotHash: snapshotHash, SnapshotJSON: string(body), EvidenceIDs: evidenceIDs,
+	}, nil
+}
+
+func (v *FinalVerifier) finalVerificationEvidenceID(ctx context.Context, caseID domain.ID, body []byte, snapshotHash string) (domain.ID, error) {
+	record, found, err := v.cases.FindVerification(ctx, caseID)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		if record.SnapshotHash != snapshotHash || record.SnapshotJSON != string(body) {
+			return "", fmt.Errorf("%w: verification already exists for case %s", domain.ErrIntentConflict, caseID)
+		}
+		verificationEvidenceID, found, err := v.verificationEvidenceIDFromRecord(ctx, record, body)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return "", errors.New("existing workflow verification has no matching verification evidence")
+		}
+		return verificationEvidenceID, nil
+	}
+	object, found, err := v.evidence.FindByContentHash(ctx, snapshotHash, finalVerificationEvidenceKind)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return object.ID, nil
+	}
+	object, err = v.evidence.Put(ctx, bytes.NewReader(body), evidence.Metadata{
+		MediaType: "application/json", Kind: finalVerificationEvidenceKind,
+	})
+	if err != nil {
+		return "", fmt.Errorf("store final verification evidence: %w", err)
+	}
+	return object.ID, nil
+}
+
+func (v *FinalVerifier) verificationEvidenceIDFromRecord(ctx context.Context, record workflowcase.VerificationRecord, body []byte) (domain.ID, bool, error) {
+	for _, id := range record.EvidenceIDs {
+		object, data, err := v.evidence.Get(ctx, id)
+		if err != nil {
+			return "", false, err
+		}
+		if object.Kind == finalVerificationEvidenceKind && bytes.Equal(data, body) {
+			return id, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func (v *FinalVerifier) reject(ctx context.Context, c workflowcase.Case, reason string, evidenceIDs []domain.ID) (finalVerificationDisposition, error) {

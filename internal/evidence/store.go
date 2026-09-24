@@ -132,6 +132,33 @@ func (s *Store) Put(ctx context.Context, r io.Reader, metadata Metadata) (Eviden
 	return object, nil
 }
 
+func (s *Store) FindByContentHash(ctx context.Context, contentHash, kind string) (EvidenceObject, bool, error) {
+	if s == nil || s.state == nil {
+		return EvidenceObject{}, false, errors.New("evidence store is not configured")
+	}
+	contentHash = strings.TrimSpace(contentHash)
+	kind = strings.TrimSpace(kind)
+	if contentHash == "" || kind == "" {
+		return EvidenceObject{}, false, errors.New("content hash and kind are required")
+	}
+	var id domain.ID
+	if err := s.state.DB().QueryRowContext(ctx, `
+		SELECT evidence_id FROM evidence_objects
+		WHERE content_hash = ? AND kind = ?
+		ORDER BY created_at, evidence_id LIMIT 1`, contentHash, kind,
+	).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EvidenceObject{}, false, nil
+		}
+		return EvidenceObject{}, false, err
+	}
+	object, _, err := s.Get(ctx, id)
+	if err != nil {
+		return EvidenceObject{}, false, err
+	}
+	return object, true, nil
+}
+
 func (s *Store) Get(ctx context.Context, id domain.ID) (EvidenceObject, []byte, error) {
 	if s == nil || s.state == nil {
 		return EvidenceObject{}, nil, errors.New("evidence store is not configured")
