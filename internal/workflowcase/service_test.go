@@ -2,7 +2,9 @@ package workflowcase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -124,5 +126,109 @@ func TestEnsureCaseRejectsInvalidInputAndProposal(t *testing.T) {
 				t.Fatal("invalid observation was accepted")
 			}
 		})
+	}
+}
+
+func TestListActiveFiltersMissionAndOrdersByID(t *testing.T) {
+	svc, _, missionID, ctx := setupEnsure(t)
+	ensure := func(object string) Case {
+		t.Helper()
+		observation := sampleObservation(missionID)
+		observation.ObjectID = object
+		c, err := svc.Ensure(ctx, observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	first := ensure("item-1")
+	second := ensure("item-2")
+	blocked := ensure("item-4")
+	if _, err := svc.Assess(ctx, AssessmentRequest{
+		CaseID: blocked.ID, WorkID: blocked.CurrentWorkID,
+		Assessment:      workflow.Assessment{Verdict: workflow.Unknown, Reason: "blocked", EvidenceIDs: []string{"evidence"}},
+		RemainingBudget: blocked.RemainingBudget, ProgressSignature: "blocked",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	otherMission := domain.NewID("mission")
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	if _, err := svc.store.DB().ExecContext(ctx,
+		`INSERT INTO missions(mission_id, statement, active, created_at, deactivated_at) VALUES (?, 'other', 0, ?, ?)`,
+		otherMission, now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.store.DB().ExecContext(ctx,
+		`INSERT INTO workflow_cases(case_id, mission_id, source, object_id, revision_id, observation_evidence_id,
+		 initial_request_json, grant_json, state, current_work_id, next_work_json, completed_steps, max_steps,
+		 remaining_budget, progress_signature, created_at, updated_at)
+		 VALUES (?, ?, 'ado', 'item-3', 'r3', 'e3', '{}', '{"Capabilities":["read"],"Actions":null}',
+		 'ACTIVE', ?, '{"Kind":"publish-decision","RequiredCapabilities":null,"AuthorityCeiling":null,"ProposedActions":null}',
+		 0, 3, 5, '', ?, ?)`,
+		domain.NewID("case"), otherMission, domain.NewID("work"), now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.ListActive(ctx, missionID)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{string(first.ID), string(second.ID)}
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("ListActive = %+v, want %v", got, want)
+	}
+	for index := range want {
+		if string(got[index].ID) != want[index] {
+			t.Fatalf("ListActive IDs = %q, want ordered %v", got[index].ID, want)
+		}
+	}
+}
+
+func TestListAssessmentsRoundTripsStoredJSON(t *testing.T) {
+	svc, _, missionID, ctx := setupEnsure(t)
+	initial, err := svc.Ensure(ctx, sampleObservation(missionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := AssessmentRequest{
+		CaseID: initial.ID, WorkID: initial.CurrentWorkID, RemainingBudget: 4, ProgressSignature: "reviewed",
+		Assessment: workflow.Assessment{
+			Verdict: workflow.Continue, EvidenceIDs: []string{"review-evidence"},
+			Next: &workflow.WorkProposal{Kind: "publish", RequiredCapabilities: []string{"read"}, AuthorityCeiling: []string{"read"}},
+		},
+	}
+	if _, err := svc.Assess(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	var storedID, storedRequest, storedResult, storedCreated string
+	if err := svc.store.DB().QueryRowContext(ctx,
+		`SELECT assessment_id, request_json, result_json, created_at FROM workflow_assessments WHERE case_id = ?`, initial.ID,
+	).Scan(&storedID, &storedRequest, &storedResult, &storedCreated); err != nil {
+		t.Fatal(err)
+	}
+	records, err := svc.ListAssessments(ctx, initial.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %+v, want one", records)
+	}
+	record := records[0]
+	if record.ID != storedID || record.WorkID != string(initial.CurrentWorkID) || record.RequestJSON != storedRequest || record.ResultJSON != storedResult || record.CreatedAt.UTC().Format(time.RFC3339Nano) != storedCreated {
+		t.Fatalf("record = %+v, want stored %s %s %s %s", record, storedID, storedRequest, storedResult, storedCreated)
+	}
+	var decodedRequest AssessmentRequest
+	var decodedResult AssessmentResult
+	if err := json.Unmarshal([]byte(record.RequestJSON), &decodedRequest); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(record.ResultJSON), &decodedResult); err != nil {
+		t.Fatal(err)
+	}
+	if decodedRequest.WorkID != initial.CurrentWorkID || decodedResult.Case.ID != initial.ID {
+		t.Fatalf("round trip = request %+v result %+v", decodedRequest, decodedResult)
 	}
 }

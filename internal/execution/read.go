@@ -22,6 +22,28 @@ func (s *Service) Task(ctx context.Context, taskID domain.ID) (domain.Task, erro
 	return loadTask(ctx, s.store.DB(), taskID)
 }
 
+func (s *Service) FindByIdempotencyKey(ctx context.Context, key string) (domain.Task, bool, error) {
+	if err := s.configured(); err != nil {
+		return domain.Task{}, false, err
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return domain.Task{}, false, errors.New("idempotency key is required")
+	}
+	var taskID domain.ID
+	if err := s.store.DB().QueryRowContext(ctx, `SELECT task_id FROM tasks WHERE idempotency_key = ?`, key).Scan(&taskID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Task{}, false, nil
+		}
+		return domain.Task{}, false, err
+	}
+	task, err := loadTask(ctx, s.store.DB(), taskID)
+	if err != nil {
+		return domain.Task{}, false, err
+	}
+	return task, true, nil
+}
+
 func (s *Service) Attempt(ctx context.Context, attemptID domain.ID) (domain.Attempt, error) {
 	if err := s.configured(); err != nil {
 		return domain.Attempt{}, err

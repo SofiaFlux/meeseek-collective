@@ -14,7 +14,7 @@ import (
 
 type fakeClock struct{ now time.Time }
 
-func (c *fakeClock) Now() time.Time { return c.now }
+func (c *fakeClock) Now() time.Time          { return c.now }
 func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
 
 func newExecutionService(t *testing.T) (*Service, *fakeClock, context.Context, domain.ID) {
@@ -53,8 +53,6 @@ func seedActiveAttempt(t *testing.T, svc *Service, missionID domain.ID) (domain.
 	}
 	return task, attempt
 }
-
-
 
 type failingAttemptStartRecorder struct{}
 
@@ -241,5 +239,29 @@ func TestChallengeTaskPersistsChallengeAndStopsExecution(t *testing.T) {
 	}
 	if state != domain.TaskChallenged || count != 1 {
 		t.Fatalf("challenge state=%q count=%d", state, count)
+	}
+}
+
+func TestFindByIdempotencyKeyHitAndMiss(t *testing.T) {
+	svc, _, ctx, missionID := newExecutionService(t)
+	request := baseTaskRequest(missionID)
+	request.IdempotencyKey = "driver-work-2"
+	task, err := svc.CreateTask(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := svc.FindByIdempotencyKey(ctx, request.IdempotencyKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || got.ID != task.ID || got.IdempotencyKey != request.IdempotencyKey {
+		t.Fatalf("FindByIdempotencyKey hit = %+v, %v; want task %s", got, found, task.ID)
+	}
+	got, found, err = svc.FindByIdempotencyKey(ctx, "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found || got.ID != "" {
+		t.Fatalf("FindByIdempotencyKey miss = %+v, %v; want zero task, false", got, found)
 	}
 }

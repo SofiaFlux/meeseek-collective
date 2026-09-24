@@ -1,0 +1,451 @@
+package adoreview
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/SofiaFlux/summa42/internal/adoeffects"
+	"github.com/SofiaFlux/summa42/internal/domain"
+	"github.com/SofiaFlux/summa42/internal/evidence"
+	"github.com/SofiaFlux/summa42/internal/execution"
+	"github.com/SofiaFlux/summa42/internal/executors"
+	"github.com/SofiaFlux/summa42/internal/operations"
+	"github.com/SofiaFlux/summa42/internal/purpose"
+	"github.com/SofiaFlux/summa42/internal/runmanifest"
+	state "github.com/SofiaFlux/summa42/internal/state/sqlite"
+	"github.com/SofiaFlux/summa42/internal/teb"
+	"github.com/SofiaFlux/summa42/internal/testutil"
+	"github.com/SofiaFlux/summa42/internal/verification"
+	"github.com/SofiaFlux/summa42/internal/workflow"
+	"github.com/SofiaFlux/summa42/internal/workflowcase"
+)
+
+type fakeLookupProvider struct {
+	name     string
+	outcome  domain.OperationState
+	requests []operations.ProviderDispatchRequest
+}
+
+func (f *fakeLookupProvider) Name() string { return f.name }
+
+func (f *fakeLookupProvider) LookupOutcome(_ context.Context, request operations.ProviderDispatchRequest) (operations.ProviderOutcome, error) {
+	f.requests = append(f.requests, request)
+	return operations.ProviderOutcome{State: f.outcome}, nil
+}
+
+type driverHarness struct {
+	ctx          context.Context
+	store        *state.Store
+	cases        *workflowcase.Service
+	execution    *execution.Service
+	evidence     *evidence.Store
+	verification *verification.Service
+	caller       *fakeCaller
+	comment      *fakeLookupProvider
+	vote         *fakeLookupProvider
+	driver       *Driver
+	mission      domain.ID
+	driverCaseID domain.ID
+	decision     domain.ID
+}
+
+func setupDriverHarness(t *testing.T, decision ReviewDecision) *driverHarness {
+	t.Helper()
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	manifests := runmanifest.New(store, runmanifest.StaticContext{
+		Build:      runmanifest.BuildMetadata{RuntimeVersion: "v-test", RuntimeCommit: "commit-test"},
+		TEBProfile: teb.PartialProfile("driver-test", teb.GuaranteeNonRoot),
+	})
+	execSvc := execution.New(store, clk, purposes, manifests)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verificationSvc := verification.New(store, clk, execSvc)
+	cases := workflowcase.New(store, clk, purposes)
+	mission, err := purposes.CreateMission(ctx, "drive ADO publication")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, ?, ?)`,
+		envelope, 100, clk.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	comment := &fakeLookupProvider{name: commentProviderName, outcome: domain.OperationConfirmedEffect}
+	vote := &fakeLookupProvider{name: voteProviderName, outcome: domain.OperationConfirmedEffect}
+	pages := make([]any, 32)
+	for index := range pages {
+		pages[index] = map[string]any{"project": "proj"}
+	}
+	caller := &fakeCaller{pages: pages}
+	driver, err := NewDriver(cases, execSvc, evidenceStore, manifests, DriverConfig{
+		MissionID: mission, ResourceEnvelopeID: envelope, Comment: comment, Vote: vote, Caller: caller,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &driverHarness{
+		ctx: ctx, store: store, cases: cases, execution: execSvc, evidence: evidenceStore,
+		verification: verificationSvc, caller: caller, comment: comment, vote: vote, driver: driver,
+		mission: mission,
+	}
+	grant := workflow.Grant{
+		Capabilities: []string{"read", effectCommentCapability, effectApproveCapability},
+		Actions:      []string{effectCommentCapability, effectApproveCapability},
+	}
+	initial, err := cases.Ensure(ctx, workflowcase.Observation{
+		MissionID: mission, Source: "ado", ObjectID: "shop#1", RevisionID: "a:b", EvidenceID: "ev-review-work-1",
+		FirstWork: workflow.WorkProposal{Kind: "ado.pr.review", RequiredCapabilities: []string{"read"}, AuthorityCeiling: []string{"read"}},
+		Grant:     grant, MaxSteps: 3, RemainingBudget: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work1Payload, err := json.Marshal(map[string]any{"repo": "shop", "pr": 1, "sourceCommit": "a", "targetCommit": "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work1, err := cases.MaterializeTask(ctx, execSvc, initial.ID, initial.CurrentWorkID, execution.TaskRequest{
+		Objective: "Review ADO PR shop#1", PayloadJSON: work1Payload,
+		AcceptanceCriteria: []string{"review evidence recorded for a:b"}, ResourceEnvelopeID: envelope,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewEvidence := putDriverEvidence(t, evidenceStore, "review completed", "text/plain", executors.EvidenceAgentMessage)
+	completeDriverTask(t, h, work1, reviewEvidence.ID)
+	h.decision = putDecision(t, evidenceStore, ctx, decision)
+	capability := effectApproveCapability
+	if decision.Action == DecisionCommentAction {
+		capability = effectCommentCapability
+	}
+	result, err := cases.Assess(ctx, workflowcase.AssessmentRequest{
+		CaseID: initial.ID, WorkID: initial.CurrentWorkID, RemainingBudget: 9, ProgressSignature: "review-complete",
+		Assessment: workflow.Assessment{
+			Verdict: workflow.Continue, EvidenceIDs: []string{string(reviewEvidence.ID), string(h.decision)},
+			Next: &workflow.WorkProposal{
+				Kind: "publish-decision", RequiredCapabilities: []string{capability},
+				AuthorityCeiling: []string{capability}, ProposedActions: []string{capability},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.driverCaseID = result.Case.ID
+	return h
+}
+
+func putDriverEvidence(t *testing.T, store *evidence.Store, content, mediaType string, kind executors.EvidenceKind) evidence.EvidenceObject {
+	t.Helper()
+	object, err := store.Put(t.Context(), strings.NewReader(content), evidence.Metadata{MediaType: mediaType, Kind: string(kind)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return object
+}
+
+func completeDriverTask(t *testing.T, h *driverHarness, task domain.Task, evidenceID domain.ID) domain.Attempt {
+	t.Helper()
+	attempt, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.verification.CompleteAttempt(h.ctx, attempt.ID, verification.CompletionManifest{EvidenceIDs: []domain.ID{evidenceID}}); err != nil {
+		t.Fatal(err)
+	}
+	return attempt
+}
+
+func materializeDriverWork2(t *testing.T, h *driverHarness, c workflowcase.Case) domain.Task {
+	t.Helper()
+	if _, err := h.driver.StepOnce(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	task, found, err := h.execution.FindByIdempotencyKey(h.ctx, string(c.CurrentWorkID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatalf("Work 2 task for %s was not materialized", c.CurrentWorkID)
+	}
+	return task
+}
+
+func driverPublisherContent(t *testing.T, entries ...publishEvidenceEntry) string {
+	t.Helper()
+	result, err := publishExecutionResult(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result.Evidence[0].Content
+}
+
+func driverAssessmentReason(t *testing.T, h *driverHarness, caseID, workID domain.ID) string {
+	t.Helper()
+	records, err := h.cases.ListAssessments(h.ctx, caseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.WorkID != string(workID) {
+			continue
+		}
+		var request workflowcase.AssessmentRequest
+		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {
+			t.Fatal(err)
+		}
+		return request.Assessment.Reason
+	}
+	t.Fatalf("assessment for work %s not found", workID)
+	return ""
+}
+
+func TestDriverMaterializesWork2Idempotently(t *testing.T) {
+	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
+	c, err := h.cases.Get(h.ctx, h.driverCaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := h.driver.StepOnce(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := h.driver.StepOnce(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, found, err := h.execution.FindByIdempotencyKey(h.ctx, string(c.CurrentWorkID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("Work 2 task not found")
+	}
+	if len(first.Materialized) != 1 || len(second.Materialized) != 1 || first.Materialized[0] != task.ID || second.Materialized[0] != task.ID {
+		t.Fatalf("materialized results = %+v, %+v; want task %s", first, second, task.ID)
+	}
+	var count int
+	if err := h.store.DB().QueryRowContext(h.ctx, `SELECT count(*) FROM tasks WHERE idempotency_key = ?`, string(c.CurrentWorkID)).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("Work 2 task count = %d, want 1", count)
+	}
+	var payload PublishPayload
+	if err := json.Unmarshal(task.PayloadJSON, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Decision != string(h.decision) || payload.CaseID != string(c.ID) || payload.WorkID != string(c.CurrentWorkID) ||
+		payload.Project != "proj" || payload.Repo != "shop" || payload.PR != 1 || payload.Revision != "a:b" {
+		t.Fatalf("Work 2 payload = %+v", payload)
+	}
+}
+
+func TestDriverAssessesVerifiedPublication(t *testing.T) {
+	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
+	c, err := h.cases.Get(h.ctx, h.driverCaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := materializeDriverWork2(t, h, c)
+	content := driverPublisherContent(t, publishEvidenceEntry{
+		Slot: "ado.pr.approve:proj/shop#1:a:b", Operation: "op-1", State: domain.OperationConfirmedEffect, Reference: "vote-1",
+	})
+	evidenceObject := putDriverEvidence(t, h.evidence, content, "text/plain", executors.EvidenceAgentMessage)
+	completeDriverTask(t, h, task, evidenceObject.ID)
+	result, err := h.driver.StepOnce(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := h.cases.Get(h.ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != workflowcase.ReadyForVerification {
+		t.Fatalf("case state = %q, want READY_FOR_VERIFICATION", stored.State)
+	}
+	if len(result.ReadyForVerification) != 1 || result.ReadyForVerification[0] != c.ID {
+		t.Fatalf("driver result = %+v, want ready case %s", result, c.ID)
+	}
+	if len(h.vote.requests) != 1 || len(h.comment.requests) != 0 {
+		t.Fatalf("lookup counts = vote:%d comment:%d", len(h.vote.requests), len(h.comment.requests))
+	}
+	var intent adoeffects.VoteIntent
+	if err := json.Unmarshal(h.vote.requests[0].CanonicalIntent, &intent); err != nil {
+		t.Fatal(err)
+	}
+	if intent.Project != "proj" || intent.Repository != "shop" || intent.PR != 1 || intent.Vote != 10 {
+		t.Fatalf("vote lookup intent = %+v", intent)
+	}
+}
+
+func TestDriverHoldsUnverifiedPublication(t *testing.T) {
+	tests := []struct {
+		name       string
+		decision   ReviewDecision
+		entries    []publishEvidenceEntry
+		comment    domain.OperationState
+		vote       domain.OperationState
+		reasonPart string
+	}{
+		{
+			name: "lookup unknown", decision: ReviewDecision{Action: DecisionCommentAction, Comments: []DecisionComment{{Path: "a.go", Line: 1, Body: "nit"}}},
+			entries: []publishEvidenceEntry{{Slot: "ado.pr.comment:proj/shop#1:a:b:0", Operation: "op-1", State: domain.OperationConfirmedEffect}},
+			comment: domain.OperationOutcomeUnknown, reasonPart: "OUTCOME_UNKNOWN",
+		},
+		{
+			name: "entry skipped", decision: ReviewDecision{Action: DecisionApproveAction, Vote: "approve"},
+			entries:    []publishEvidenceEntry{{Slot: "ado.pr.approve:proj/shop#1:a:b", Skipped: true}},
+			reasonPart: "skipped",
+		},
+		{
+			name: "missing slot", decision: ReviewDecision{Action: DecisionCommentAction, Comments: []DecisionComment{{Path: "a.go", Line: 1, Body: "first"}, {Path: "b.go", Line: 2, Body: "second"}}},
+			entries:    []publishEvidenceEntry{{Slot: "ado.pr.comment:proj/shop#1:a:b:0", Operation: "op-1", State: domain.OperationConfirmedEffect}},
+			reasonPart: "missing slot",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := setupDriverHarness(t, test.decision)
+			if test.comment != "" {
+				h.comment.outcome = test.comment
+			}
+			if test.vote != "" {
+				h.vote.outcome = test.vote
+			}
+			c, err := h.cases.Get(h.ctx, h.driverCaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := materializeDriverWork2(t, h, c)
+			content := driverPublisherContent(t, test.entries...)
+			evidenceObject := putDriverEvidence(t, h.evidence, content, "text/plain", executors.EvidenceAgentMessage)
+			completeDriverTask(t, h, task, evidenceObject.ID)
+			if _, err := h.driver.StepOnce(h.ctx); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := h.cases.Get(h.ctx, c.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.State != workflowcase.Blocked {
+				t.Fatalf("case state = %q, want BLOCKED", stored.State)
+			}
+			reason := driverAssessmentReason(t, h, c.ID, c.CurrentWorkID)
+			if !strings.Contains(reason, test.reasonPart) {
+				t.Fatalf("assessment reason = %q, want substring %q", reason, test.reasonPart)
+			}
+		})
+	}
+}
+
+func TestDriverHoldsBlockedWork2Task(t *testing.T) {
+	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve"})
+	c, err := h.cases.Get(h.ctx, h.driverCaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := materializeDriverWork2(t, h, c)
+	for index := 0; index < 2; index++ {
+		attempt, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.execution.FailAttempt(h.ctx, attempt.ID, domain.FailureExecution, "publisher-failed", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.driver.StepOnce(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := h.cases.Get(h.ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != workflowcase.Blocked {
+		t.Fatalf("case state = %q, want BLOCKED", stored.State)
+	}
+	if reason := driverAssessmentReason(t, h, c.ID, c.CurrentWorkID); !strings.Contains(reason, "work2 BLOCKED") {
+		t.Fatalf("assessment reason = %q, want work2 BLOCKED", reason)
+	}
+}
+
+func TestDriverSkipsNonPublishCases(t *testing.T) {
+	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve"})
+	otherMission := domain.NewID("mission")
+	now := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	if _, err := h.store.DB().ExecContext(h.ctx,
+		`INSERT INTO missions(mission_id, statement, active, created_at, deactivated_at) VALUES (?, 'other', 0, ?, ?)`,
+		otherMission, now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	otherWorkID := domain.NewID("work")
+	if _, err := h.store.DB().ExecContext(h.ctx,
+		`INSERT INTO workflow_cases(case_id, mission_id, source, object_id, revision_id, observation_evidence_id,
+		 initial_request_json, grant_json, state, current_work_id, next_work_json, completed_steps, max_steps,
+		 remaining_budget, progress_signature, created_at, updated_at)
+		 VALUES (?, ?, 'ado', 'shop#2', 'c:d', 'other-mission', '{}',
+		 '{"Capabilities":["read","ado.pr.approve","ado.pr.comment"],"Actions":["ado.pr.approve","ado.pr.comment"]}',
+		 'ACTIVE', ?, '{"Kind":"publish-decision","RequiredCapabilities":null,"AuthorityCeiling":null,"ProposedActions":null}',
+		 0, 3, 10, '', ?, ?)`,
+		domain.NewID("case"), otherMission, otherWorkID, now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	grant := defaultReviewGrant()
+	otherSource, err := h.cases.Ensure(h.ctx, workflowcase.Observation{
+		MissionID: h.mission, Source: "github", ObjectID: "shop#3", RevisionID: "e:f", EvidenceID: "other-source",
+		FirstWork: workflow.WorkProposal{Kind: "publish-decision", RequiredCapabilities: []string{"read"}, AuthorityCeiling: []string{"read"}},
+		Grant:     grant, MaxSteps: 3, RemainingBudget: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKind, err := h.cases.Ensure(h.ctx, workflowcase.Observation{
+		MissionID: h.mission, Source: "ado", ObjectID: "shop#4", RevisionID: "g:h", EvidenceID: "other-kind",
+		FirstWork: workflow.WorkProposal{Kind: "ado.pr.review", RequiredCapabilities: []string{"read"}, AuthorityCeiling: []string{"read"}},
+		Grant:     grant, MaxSteps: 3, RemainingBudget: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.driver.StepOnce(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, workID := range []domain.ID{otherWorkID, otherSource.CurrentWorkID, otherKind.CurrentWorkID} {
+		if task, found, err := h.execution.FindByIdempotencyKey(h.ctx, string(workID)); err != nil {
+			t.Fatal(err)
+		} else if found {
+			t.Fatalf("non-publish case materialized task %+v", task)
+		}
+	}
+}
+
+func TestDriverRunStopsOnCancel(t *testing.T) {
+	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve"})
+	c, err := h.cases.Get(h.ctx, h.driverCaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := h.driver.Run(runCtx, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if task, found, err := h.execution.FindByIdempotencyKey(h.ctx, string(c.CurrentWorkID)); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatalf("cancelled Run materialized task %+v", task)
+	}
+}
