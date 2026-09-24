@@ -3,6 +3,9 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -77,7 +80,117 @@ func (w *Worker) StepOnce(ctx context.Context, capacity CapacitySnapshot) (StepR
 	if candidate == nil {
 		return StepResult{Outcome: StepIdle}, nil
 	}
-	return StepResult{}, errors.New("not implemented")
+	kind, err := w.scheduler.ChooseExecutor(ctx, candidate.Task, w.registryKinds())
+	if err != nil {
+		return StepResult{}, err
+	}
+	executor, ok := w.executors[kind]
+	if !ok {
+		return StepResult{}, fmt.Errorf("executor %q is not registered", kind)
+	}
+	attempt, err := w.scheduler.Lease(ctx, candidate.Task.ID, kind)
+	if err != nil {
+		return StepResult{}, err
+	}
+	result := StepResult{Outcome: StepFailed, TaskID: candidate.Task.ID, AttemptID: attempt.ID}
+	if err := w.executeAttempt(ctx, executor, kind, candidate.Task, attempt, &result); err != nil {
+		return StepResult{}, err
+	}
+	return result, nil
+}
+
+func (w *Worker) executeAttempt(ctx context.Context, executor executors.Executor, kind string, task domain.Task, attempt domain.Attempt, result *StepResult) (err error) {
+	workspace := filepath.Join(w.workspaceRoot, string(attempt.ID))
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		return err
+	}
+	envelope := executors.AttemptEnvelope{
+		TaskID: task.ID, AttemptID: attempt.ID,
+		Objective: task.Objective, PayloadJSON: task.PayloadJSON,
+		AcceptanceCriteria: append([]string(nil), task.AcceptanceCriteria...),
+		Workspace:          workspace, VisibleCapabilities: append([]string(nil), task.RequiredCapabilities...),
+		ResourceEnvelopeID: task.ResourceEnvelopeID,
+	}
+	execCtx, cancel := context.WithTimeout(ctx, w.scheduler.leaseDuration)
+	defer cancel()
+	outcome, execErr := w.runExecutor(execCtx, executor, envelope)
+	if execErr != nil || outcome.ExitCode != 0 {
+		return w.failExecution(ctx, executor, kind, task, attempt, result, outcome, execErr)
+	}
+	return w.completeExecution(ctx, task, attempt, result, outcome)
+}
+
+func (w *Worker) runExecutor(ctx context.Context, executor executors.Executor, envelope executors.AttemptEnvelope) (result executors.ExecutionResult, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = executors.ExecutionResult{}
+			err = fmt.Errorf("executor panic: %v", recovered)
+		}
+	}()
+	return executor.Start(ctx, envelope)
+}
+
+func (w *Worker) persistEvidence(ctx context.Context, outcome executors.ExecutionResult) ([]domain.ID, error) {
+	type blob struct {
+		content string
+		media   string
+		kind    string
+	}
+	blobs := make([]blob, 0, len(outcome.Evidence)+2)
+	if outcome.Stdout != "" {
+		blobs = append(blobs, blob{outcome.Stdout, "text/plain", string(executors.EvidenceStdout)})
+	}
+	if outcome.Stderr != "" {
+		blobs = append(blobs, blob{outcome.Stderr, "text/plain", string(executors.EvidenceStderr)})
+	}
+	for _, item := range outcome.Evidence {
+		if item.Content == "" {
+			continue
+		}
+		blobs = append(blobs, blob{item.Content, "text/plain", string(item.Kind)})
+	}
+	ids := make([]domain.ID, 0, len(blobs))
+	for _, b := range blobs {
+		object, err := w.evidence.Put(ctx, strings.NewReader(b.content), evidence.Metadata{MediaType: b.media, Kind: b.kind})
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, object.ID)
+	}
+	return ids, nil
+}
+
+func (w *Worker) completeExecution(ctx context.Context, task domain.Task, attempt domain.Attempt, result *StepResult, outcome executors.ExecutionResult) error {
+	ids, err := w.persistEvidence(ctx, outcome)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return w.failExecution(ctx, nil, "", task, attempt, result, outcome, errors.New("executor returned no evidence"))
+	}
+	if _, err := w.verification.CompleteAttempt(ctx, attempt.ID, verification.CompletionManifest{EvidenceIDs: ids}); err != nil {
+		return err
+	}
+	result.Outcome = StepCompleted
+	result.EvidenceIDs = ids
+	return nil
+}
+
+func (w *Worker) failExecution(ctx context.Context, _ executors.Executor, kind string, task domain.Task, attempt domain.Attempt, result *StepResult, outcome executors.ExecutionResult, execErr error) error {
+	ids, err := w.persistEvidence(ctx, outcome)
+	if err != nil {
+		return err
+	}
+	signature := "worker:" + kind + ":" + string(task.ID)
+	if execErr != nil && strings.HasPrefix(execErr.Error(), "executor panic:") {
+		signature = "worker:panic:" + kind + ":" + string(task.ID)
+	}
+	if err := w.execution.FailAttempt(ctx, attempt.ID, domain.FailureExecution, signature, ids); err != nil {
+		return err
+	}
+	result.Outcome = StepFailed
+	result.EvidenceIDs = ids
+	return nil
 }
 
 func (w *Worker) Run(ctx context.Context, capacity CapacitySnapshot, interval time.Duration) error {
