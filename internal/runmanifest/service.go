@@ -20,6 +20,11 @@ import (
 
 const manifestVersion = 1
 
+var (
+	ErrNotFound   = errors.New("run manifest not found")
+	ErrIncomplete = errors.New("run manifest provenance is incomplete")
+)
+
 type BuildMetadata struct {
 	RuntimeVersion string `json:"runtime_version,omitempty"`
 	RuntimeCommit  string `json:"runtime_commit,omitempty"`
@@ -205,7 +210,7 @@ func (s *Service) Manifest(ctx context.Context, attemptID domain.ID) (Record, er
 		 FROM attempt_run_manifests WHERE attempt_id = ?`, attemptID,
 	).Scan(&record.AttemptID, &record.TaskID, &record.ManifestHash, &record.ManifestJSON, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Record{}, fmt.Errorf("attempt %s has no run manifest", attemptID)
+		return Record{}, fmt.Errorf("%w: attempt %s has no run manifest", ErrNotFound, attemptID)
 	}
 	if err != nil {
 		return Record{}, err
@@ -281,11 +286,13 @@ func (s *Service) Provenance(ctx context.Context, attemptID domain.ID) (Provenan
 
 func (s *Service) outputEvidenceIDs(ctx context.Context, attemptID domain.ID) ([]domain.ID, error) {
 	set := map[domain.ID]struct{}{}
+	completionFound := false
 	var completionJSON string
 	err := s.store.DB().QueryRowContext(ctx,
 		`SELECT manifest_json FROM attempt_completion_records WHERE attempt_id = ?`, attemptID,
 	).Scan(&completionJSON)
 	if err == nil {
+		completionFound = true
 		var completion struct {
 			EvidenceIDs []domain.ID `json:"evidence_ids"`
 		}
@@ -329,6 +336,9 @@ func (s *Service) outputEvidenceIDs(ctx context.Context, attemptID domain.ID) ([
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
+	}
+	if !completionFound && len(set) == 0 {
+		return nil, ErrIncomplete
 	}
 	result := make([]domain.ID, 0, len(set))
 	for id := range set {

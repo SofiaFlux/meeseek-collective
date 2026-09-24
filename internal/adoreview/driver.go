@@ -2,6 +2,7 @@ package adoreview
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,10 @@ type LookupProvider interface {
 	LookupOutcome(context.Context, operations.ProviderDispatchRequest) (operations.ProviderOutcome, error)
 }
 
+type Completions interface {
+	Provenance(context.Context, domain.ID) (runmanifest.Provenance, error)
+}
+
 type DriverConfig struct {
 	MissionID          domain.ID
 	ResourceEnvelopeID domain.ID
@@ -43,15 +48,15 @@ type Driver struct {
 	cases     *workflowcase.Service
 	execution *execution.Service
 	evidence  *evidence.Store
-	manifests *runmanifest.Service
+	manifests Completions
 	config    DriverConfig
 }
 
 type driverAssessment struct {
-	workID           domain.ID
-	decisionID       domain.ID
-	decision         ReviewDecision
-	reviewEvidenceID []domain.ID
+	workID            domain.ID
+	decisionID        domain.ID
+	decision          ReviewDecision
+	reviewEvidenceIDs []domain.ID
 }
 
 type workOnePayload struct {
@@ -62,7 +67,16 @@ type workOnePayload struct {
 	TargetCommit string `json:"targetCommit"`
 }
 
-func NewDriver(cases *workflowcase.Service, executionSvc *execution.Service, evidenceStore *evidence.Store, manifests *runmanifest.Service, config DriverConfig) (*Driver, error) {
+type terminalStateEvidence struct {
+	CaseID    domain.ID        `json:"case_id"`
+	WorkID    domain.ID        `json:"work_id"`
+	TaskID    domain.ID        `json:"task_id"`
+	AttemptID domain.ID        `json:"attempt_id,omitempty"`
+	State     domain.TaskState `json:"state"`
+	Reason    string           `json:"reason"`
+}
+
+func NewDriver(cases *workflowcase.Service, executionSvc *execution.Service, evidenceStore *evidence.Store, manifests Completions, config DriverConfig) (*Driver, error) {
 	if cases == nil || executionSvc == nil || evidenceStore == nil || manifests == nil {
 		return nil, errors.New("driver requires case, execution, evidence, and run manifest services")
 	}
@@ -209,7 +223,7 @@ func (d *Driver) discoverAssessment(ctx context.Context, c workflowcase.Case) (d
 				return driverAssessment{}, false, err
 			}
 			if object.Kind != "ado.review.decision" {
-				assessment.reviewEvidenceID = append(assessment.reviewEvidenceID, id)
+				assessment.reviewEvidenceIDs = append(assessment.reviewEvidenceIDs, id)
 				continue
 			}
 			if assessment.decisionID != "" {
@@ -240,21 +254,41 @@ func (d *Driver) orderingReady(ctx context.Context, assessment driverAssessment)
 	}
 	provenance, err := d.manifests.Provenance(ctx, task.CurrentAttemptID)
 	if err != nil {
-		if ctx.Err() != nil {
-			return domain.Task{}, false, ctx.Err()
+		if isUnavailableProvenance(err) {
+			return domain.Task{}, false, nil
 		}
-		return domain.Task{}, false, nil
+		return domain.Task{}, false, fmt.Errorf("read Work 1 provenance: %w", err)
 	}
 	output := make(map[domain.ID]struct{}, len(provenance.OutputEvidence))
 	for _, ref := range provenance.OutputEvidence {
 		output[ref.ID] = struct{}{}
 	}
-	for _, id := range assessment.reviewEvidenceID {
-		if _, ok := output[id]; ok {
-			return task, true, nil
+	seen := make(map[domain.ID]struct{}, len(assessment.reviewEvidenceIDs))
+	qualifying := make(map[domain.ID]struct{}, 1)
+	for _, id := range assessment.reviewEvidenceIDs {
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, ok := output[id]; !ok {
+			continue
+		}
+		object, _, err := d.evidence.Get(ctx, id)
+		if err != nil {
+			return domain.Task{}, false, err
+		}
+		if object.Kind == string(executors.EvidenceAgentMessage) {
+			qualifying[id] = struct{}{}
 		}
 	}
-	return domain.Task{}, false, nil
+	if len(qualifying) != 1 {
+		return domain.Task{}, false, nil
+	}
+	return task, true, nil
+}
+
+func isUnavailableProvenance(err error) bool {
+	return errors.Is(err, runmanifest.ErrNotFound) || errors.Is(err, runmanifest.ErrIncomplete) || errors.Is(err, sql.ErrNoRows)
 }
 
 func decodeWorkOnePayload(raw json.RawMessage) (workOnePayload, error) {
@@ -284,7 +318,10 @@ func (d *Driver) resolveProject(ctx context.Context, payload workOnePayload) (st
 	if err != nil {
 		return "", fmt.Errorf("resolve ADO project: %w", err)
 	}
-	project := adoProjectField(raw)
+	project, err := adoProjectField(raw)
+	if err != nil {
+		return "", fmt.Errorf("resolve ADO project: %w", err)
+	}
 	if project == "" {
 		project = d.config.Project
 	}
@@ -294,24 +331,42 @@ func (d *Driver) resolveProject(ctx context.Context, payload workOnePayload) (st
 	return project, nil
 }
 
-func adoProjectField(raw any) string {
+func adoProjectField(raw any) (string, error) {
 	pr, ok := raw.(map[string]any)
 	if !ok {
-		return ""
+		return "", errors.New("PR get response is not an object")
 	}
 	for _, key := range []string{"project", "projectName"} {
-		if value, ok := pr[key].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+		value, present := pr[key]
+		if !present {
+			continue
 		}
-		if value, ok := pr[key].(map[string]any); ok {
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) == "" {
+				return "", fmt.Errorf("PR get response field %s is malformed", key)
+			}
+			return strings.TrimSpace(typed), nil
+		case map[string]any:
 			for _, nameKey := range []string{"name", "projectName"} {
-				if name, ok := value[nameKey].(string); ok && strings.TrimSpace(name) != "" {
-					return strings.TrimSpace(name)
+				rawName, exists := typed[nameKey]
+				if !exists {
+					continue
+				}
+				name, ok := rawName.(string)
+				if !ok {
+					return "", fmt.Errorf("PR get response field %s.%s is malformed", key, nameKey)
+				}
+				if strings.TrimSpace(name) != "" {
+					return strings.TrimSpace(name), nil
 				}
 			}
+			return "", fmt.Errorf("PR get response field %s is malformed", key)
+		default:
+			return "", fmt.Errorf("PR get response field %s is malformed", key)
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func (d *Driver) verifyPublication(ctx context.Context, c workflowcase.Case, task domain.Task, payload PublishPayload, decision ReviewDecision, result *DriverResult) error {
@@ -446,7 +501,11 @@ func (d *Driver) hold(ctx context.Context, c workflowcase.Case, task domain.Task
 		}
 	}
 	if len(filtered) == 0 {
-		filtered = []string{string(task.ID)}
+		evidenceID, err := d.persistTerminalEvidence(ctx, c, task, reason)
+		if err != nil {
+			return err
+		}
+		filtered = []string{string(evidenceID)}
 	}
 	_, err := d.cases.Assess(ctx, workflowcase.AssessmentRequest{
 		CaseID: c.ID, WorkID: c.CurrentWorkID, RemainingBudget: c.RemainingBudget,
@@ -458,6 +517,45 @@ func (d *Driver) hold(ctx context.Context, c workflowcase.Case, task domain.Task
 	}
 	result.Blocked = append(result.Blocked, c.ID)
 	return nil
+}
+
+func (d *Driver) persistTerminalEvidence(ctx context.Context, c workflowcase.Case, task domain.Task, reason string) (domain.ID, error) {
+	if task.CurrentAttemptID != "" {
+		provenance, err := d.manifests.Provenance(ctx, task.CurrentAttemptID)
+		if err == nil {
+			var latestID domain.ID
+			var latestAt time.Time
+			for _, ref := range provenance.OutputEvidence {
+				object, _, err := d.evidence.Get(ctx, ref.ID)
+				if err != nil {
+					return "", fmt.Errorf("read terminal evidence %s: %w", ref.ID, err)
+				}
+				if latestID == "" || object.CreatedAt.After(latestAt) {
+					latestID = ref.ID
+					latestAt = object.CreatedAt
+				}
+			}
+			if latestID != "" {
+				return latestID, nil
+			}
+		} else if !isUnavailableProvenance(err) {
+			return "", fmt.Errorf("read terminal task provenance: %w", err)
+		}
+	}
+	body, err := json.Marshal(terminalStateEvidence{
+		CaseID: c.ID, WorkID: c.CurrentWorkID, TaskID: task.ID, AttemptID: task.CurrentAttemptID,
+		State: task.State, Reason: reason,
+	})
+	if err != nil {
+		return "", err
+	}
+	object, err := d.evidence.Put(ctx, strings.NewReader(string(body)), evidence.Metadata{
+		MediaType: "application/json", Kind: "ado.workflow.terminal",
+	})
+	if err != nil {
+		return "", fmt.Errorf("store terminal workflow evidence: %w", err)
+	}
+	return object.ID, nil
 }
 
 func (d *Driver) configured() error {
