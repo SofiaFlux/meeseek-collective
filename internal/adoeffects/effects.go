@@ -136,7 +136,7 @@ func (p *CommentProvider) AdapterVersion() string { return "ado-effects-v1" }
 
 func (p *CommentProvider) AdapterVersionSemanticallyRelevant() bool { return false }
 
-func (p *VoteProvider) Name() string { return "ado-pr-approve" }
+func (p *VoteProvider) Name() string { return "ado-pr-vote" }
 
 func (p *VoteProvider) Capability() string { return "ado.pr.approve" }
 
@@ -215,11 +215,13 @@ func (p *VoteProvider) CostProfile(descriptor operations.IntentDescriptor) (oper
 		return operations.CostProfile{}, err
 	}
 	return operations.CostProfile{MaxExposure: 1, Enforceability: resources.Enforceability{
-		CostControl: resources.CostTechnicallyCapped, RequireHardCap: false, Source: "ado pr approve",
+		CostControl: resources.CostTechnicallyCapped, RequireHardCap: false, Source: "ado pr vote",
 	}}, nil
 }
 
-// Dispatch writes the comment, then returns CONFIRMED_EFFECT. Outcome
+// Dispatch writes the comment, then returns CONFIRMED_EFFECT. CONFIRMED
+// means transport-accepted; LookupOutcome is the source of read-back truth
+// (reconciler re-checks). Outcome
 // semantics mirror internal/fieldfeedback Dispatch: the service settles
 // CONFIRMED_EFFECT / CONFIRMED_NO_EFFECT and marks anything else (including
 // OUTCOME_UNKNOWN) unknown, so Dispatch returns the confirmed state directly
@@ -258,7 +260,9 @@ func (p *CommentProvider) Dispatch(ctx context.Context, request operations.Provi
 }
 
 // Dispatch casts the approval vote, then returns CONFIRMED_EFFECT with the
-// same outcome semantics as CommentProvider.Dispatch.
+// same outcome semantics as CommentProvider.Dispatch. CONFIRMED means
+// transport-accepted; LookupOutcome is the source of read-back truth
+// (reconciler re-checks).
 func (p *VoteProvider) Dispatch(ctx context.Context, request operations.ProviderDispatchRequest) (operations.ProviderOutcome, error) {
 	intent, err := decodeVoteIntent(request.CanonicalIntent)
 	if err != nil {

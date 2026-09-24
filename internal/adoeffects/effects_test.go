@@ -377,3 +377,99 @@ func TestCommentHarnessRoundTripWithSlotDedup(t *testing.T) {
 		t.Fatalf("dial calls = %d, want exactly 1 (slot dedup)", len(commentDial.calls))
 	}
 }
+
+func TestVoteHarnessRoundTripWithSlotDedup(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 15, 16, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	ledger := resources.New(store, clk)
+	approvalSvc := approvals.New(store, clk)
+
+	voteDial := &fakeDial{pages: []map[string]any{{"id": "vote-1"}}}
+	provider, err := NewVoteProvider(Config{Command: "/bin/true", Organization: "Contoso"}, func(context.Context, string, any) (any, error) {
+		return map[string]any{"reviewers": []any{map[string]any{"vote": float64(10)}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.dial = voteDial.dial
+
+	collectiveID := domain.ID("collective_test")
+	svc := operations.New(store, clk, execSvc, allowPolicy{}, ledger, approvalSvc, collectiveID, provider)
+
+	now := clk.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO policy_sets(
+			policy_set_id, version, module_name, module, policy_hash, capabilities_hash, active, created_at
+		) VALUES ('policy_test', 1, 'test.rego', 'package test', 'policy-v1', 'caps_test', 1, ?)`, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	envelopeID := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, 1000, ?)`,
+		envelopeID, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	taskID := domain.NewID("task")
+	if _, err := store.DB().ExecContext(ctx, `
+		INSERT INTO tasks(
+			task_id, purpose_kind, purpose_id, state, current_fence,
+			acceptance_criteria_json, required_capabilities_json, required_enforcement,
+			authority_ceiling_json, resource_envelope_id, priority, created_at, updated_at
+		) VALUES (?, 'OWNER_DIRECTIVE', 'owner-test', 'ELIGIBLE', 0, '[]', '[]', 'ENFORCED', ?, ?, 0, ?, ?)`,
+		taskID, `["`+provider.Capability()+`"]`, envelopeID, now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := execSvc.StartAttempt(ctx, taskID, "test-executor", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	intent := VoteIntent{Project: "proj", Repository: "shop", PR: 7, Vote: 10}
+	op, err := svc.Prepare(ctx, operations.PrepareRequest{
+		AttemptID:      attempt.ID,
+		Provider:       provider.Name(),
+		TrustedSlotKey: "vote-primary",
+		Intent:         intent,
+		Risk:           "LOW",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled, err := svc.Dispatch(ctx, op.ID, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.State != domain.OperationConfirmedEffect {
+		t.Fatalf("state = %s, want CONFIRMED_EFFECT", settled.State)
+	}
+
+	again, err := svc.Prepare(ctx, operations.PrepareRequest{
+		AttemptID:      attempt.ID,
+		Provider:       provider.Name(),
+		TrustedSlotKey: "vote-primary",
+		Intent:         intent,
+		Risk:           "LOW",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != op.ID {
+		t.Fatalf("second prepare minted %s, want slot-deduped %s", again.ID, op.ID)
+	}
+	resettled, err := svc.Dispatch(ctx, again.ID, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resettled.State != domain.OperationConfirmedEffect {
+		t.Fatalf("state = %s, want CONFIRMED_EFFECT", resettled.State)
+	}
+	if len(voteDial.calls) != 1 {
+		t.Fatalf("dial calls = %d, want exactly 1 (slot dedup)", len(voteDial.calls))
+	}
+}
