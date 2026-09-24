@@ -154,6 +154,25 @@ func (s *Service) Ensure(ctx context.Context, observation Observation) (Case, er
 	return result, nil
 }
 
+func (s *Service) Find(ctx context.Context, missionID domain.ID, source, objectID, revisionID string) (Case, bool, error) {
+	if s == nil || s.store == nil {
+		return Case{}, false, errors.New("workflow case service is not configured")
+	}
+	row := s.store.DB().QueryRowContext(ctx, `SELECT case_id, mission_id, source, object_id, revision_id,
+		observation_evidence_id, state, current_work_id, next_work_json, grant_json,
+		completed_steps, max_steps, remaining_budget, progress_signature, initial_request_json
+		FROM workflow_cases WHERE mission_id = ? AND source = ? AND object_id = ? AND revision_id = ?`,
+		missionID, source, objectID, revisionID)
+	c, _, err := scanCase(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Case{}, false, nil
+	}
+	if err != nil {
+		return Case{}, false, fmt.Errorf("find workflow case: %w", err)
+	}
+	return c, true, nil
+}
+
 type rowScanner interface{ Scan(...any) error }
 
 func scanCase(row rowScanner) (Case, string, error) {
