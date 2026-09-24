@@ -34,8 +34,6 @@ type PublishConfig struct {
 	Mode           PublishMode
 	Operations     PublishOps
 	Evidence       *evidence.Store
-	Comment        *adoeffects.CommentProvider
-	Vote           *adoeffects.VoteProvider
 	OwnerApprovals []domain.ID
 	RiskComment    string
 	RiskApprove    string

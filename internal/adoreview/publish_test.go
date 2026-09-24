@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -40,6 +41,58 @@ func (f *fakePublishOps) Dispatch(_ context.Context, operationID, _ domain.ID) (
 		op.State = domain.OperationConfirmedEffect
 	}
 	return op, nil
+}
+
+func newPublishTestEvidenceStore(t *testing.T) *evidence.Store {
+	t.Helper()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC))
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evidenceStore
+}
+
+func TestPublishConfigDoesNotHoldProviderObjects(t *testing.T) {
+	configType := reflect.TypeOf(PublishConfig{})
+	for _, name := range []string{"Comment", "Vote"} {
+		if _, exists := configType.FieldByName(name); exists {
+			t.Errorf("PublishConfig.%s must not be defined", name)
+		}
+	}
+}
+
+func TestNewPublisherRequiresOperationsAndEvidence(t *testing.T) {
+	evidenceStore := newPublishTestEvidenceStore(t)
+	tests := []struct {
+		name   string
+		config PublishConfig
+	}{
+		{name: "operations", config: PublishConfig{Mode: PublishNone, Evidence: evidenceStore}},
+		{name: "evidence", config: PublishConfig{Mode: PublishNone, Operations: &fakePublishOps{}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewPublisher(test.config); err == nil {
+				t.Fatal("NewPublisher succeeded without required service")
+			}
+		})
+	}
+}
+
+func TestNewPublisherAllRequiresApproveRisk(t *testing.T) {
+	for _, risk := range []string{"", " \t"} {
+		_, err := NewPublisher(PublishConfig{
+			Mode:        PublishAll,
+			Operations:  &fakePublishOps{},
+			Evidence:    newPublishTestEvidenceStore(t),
+			RiskApprove: risk,
+		})
+		if err == nil {
+			t.Fatalf("NewPublisher accepted blank approve risk %q", risk)
+		}
+	}
 }
 
 func putDecision(t *testing.T, store *evidence.Store, ctx context.Context, decision ReviewDecision) domain.ID {
