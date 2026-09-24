@@ -206,7 +206,21 @@ func TestCommentLookupFindsMarker(t *testing.T) {
 
 func TestVoteLookupConfirmsMatchingVote(t *testing.T) {
 	intent := VoteIntent{Project: "proj", Repository: "shop", PR: 7, Vote: 10}
-	matching := mustVoteProvider(t, func(context.Context, string, any) (any, error) {
+	assertVoteRead := func(t *testing.T, capability string, request any) {
+		t.Helper()
+		if capability != "ado.pr.get" {
+			t.Fatalf("capability = %q, want ado.pr.get", capability)
+		}
+		args, ok := request.(map[string]any)
+		if !ok {
+			t.Fatalf("request type = %T, want map[string]any", request)
+		}
+		if args["action"] != "get" {
+			t.Fatalf("action = %v, want get", args["action"])
+		}
+	}
+	matching := mustVoteProvider(t, func(_ context.Context, capability string, request any) (any, error) {
+		assertVoteRead(t, capability, request)
 		return map[string]any{"reviewers": []any{map[string]any{"vote": float64(10)}}}, nil
 	})
 	canonical, err := matching.CanonicalIntent(intent)
@@ -225,7 +239,8 @@ func TestVoteLookupConfirmsMatchingVote(t *testing.T) {
 		t.Fatalf("state = %q, want CONFIRMED_EFFECT", outcome.State)
 	}
 
-	zero := mustVoteProvider(t, func(context.Context, string, any) (any, error) {
+	zero := mustVoteProvider(t, func(_ context.Context, capability string, request any) (any, error) {
+		assertVoteRead(t, capability, request)
 		return map[string]any{"reviewers": []any{map[string]any{"vote": float64(0)}}}, nil
 	})
 	outcome, err = zero.LookupOutcome(context.Background(), request)
@@ -236,7 +251,8 @@ func TestVoteLookupConfirmsMatchingVote(t *testing.T) {
 		t.Fatalf("state = %q, want OUTCOME_UNKNOWN", outcome.State)
 	}
 
-	failing := mustVoteProvider(t, func(context.Context, string, any) (any, error) {
+	failing := mustVoteProvider(t, func(_ context.Context, capability string, request any) (any, error) {
+		assertVoteRead(t, capability, request)
 		return nil, errors.New("transport boom")
 	})
 	outcome, err = failing.LookupOutcome(context.Background(), request)

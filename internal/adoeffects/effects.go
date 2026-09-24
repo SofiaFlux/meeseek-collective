@@ -309,15 +309,16 @@ func (p *CommentProvider) LookupOutcome(ctx context.Context, request operations.
 	return operations.ProviderOutcome{State: domain.OperationOutcomeUnknown}, nil
 }
 
-// LookupOutcome reconciles an approval vote the same way: any reviewer
-// carrying the intended vote confirms the effect (server-identity-agnostic:
-// the write executes as one identity), otherwise unknown.
+// LookupOutcome reconciles an approval vote via the existing ado.pr.get
+// reviewers array: any reviewer carrying the intended vote confirms the
+// effect (server-identity-agnostic: the write executes as one identity),
+// otherwise unknown. A read error yields OUTCOME_UNKNOWN with nil error.
 func (p *VoteProvider) LookupOutcome(ctx context.Context, request operations.ProviderDispatchRequest) (operations.ProviderOutcome, error) {
 	intent, err := decodeVoteIntent(request.CanonicalIntent)
 	if err != nil {
 		return operations.ProviderOutcome{}, err
 	}
-	raw, err := p.read(ctx, "ado.pr.reviewers", map[string]any{"action": "list", "project": intent.Project, "repository": intent.Repository, "pullRequestId": intent.PR})
+	raw, err := p.read(ctx, "ado.pr.get", map[string]any{"action": "get", "project": intent.Project, "repository": intent.Repository, "pullRequestId": intent.PR})
 	if err != nil {
 		return operations.ProviderOutcome{State: domain.OperationOutcomeUnknown}, nil
 	}
