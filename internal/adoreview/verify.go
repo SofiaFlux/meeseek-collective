@@ -149,32 +149,48 @@ func (v *FinalVerifier) Run(ctx context.Context, interval time.Duration) error {
 }
 
 func (v *FinalVerifier) stepCase(ctx context.Context, c workflowcase.Case) (finalVerificationDisposition, error) {
-	assessment, found, err := discoverPublicationAssessment(ctx, v.cases, v.evidence, c, false)
+	publication, found, err := discoverPublicationAssessment(ctx, v.cases, v.evidence, c, false)
 	if err != nil || !found {
 		return finalVerificationHeld, err
 	}
-	completionIDs, contents, reason := v.loadCompletionEvidence(ctx, assessment.evidenceIDs)
+	completionIDs, contents, reason := v.loadCompletionEvidence(ctx, publication.evidenceIDs)
 	if reason != "" {
 		return v.reject(ctx, c, reason, completionIDs)
 	}
-	task, found, err := v.execution.FindByIdempotencyKey(ctx, string(assessment.workID))
+	workID := publication.workID
+	if workID == "" || publication.requestWorkID != workID {
+		return v.reject(ctx, c, "producing assessment WorkID does not match case current work", completionIDs)
+	}
+	producingCase := c
+	producingCase.CurrentWorkID = workID
+	producing, found, err := discoverPublicationAssessment(ctx, v.cases, v.evidence, producingCase, true)
+	if err != nil {
+		return finalVerificationHeld, err
+	}
+	if !found || producing.workID == "" || producing.requestWorkID != producing.workID || producing.caseWorkID != workID {
+		return v.reject(ctx, c, "producing assessment WorkID does not match case current work", completionIDs)
+	}
+	task, found, err := v.execution.FindByIdempotencyKey(ctx, string(workID))
 	if err != nil {
 		return finalVerificationHeld, err
 	}
 	if !found {
 		return v.reject(ctx, c, "Work 2 task not found for producing assessment", completionIDs)
 	}
-	if err := validateFinalTask(c, assessment.workID, task); err != nil {
+	if err := validateFinalTask(c, workID, task); err != nil {
 		return v.reject(ctx, c, err.Error(), completionIDs)
 	}
 	payload, err := decodePublishPayload(task.PayloadJSON)
 	if err != nil {
 		return v.reject(ctx, c, "invalid Work 2 payload: "+err.Error(), completionIDs)
 	}
-	if err := bindFinalPayload(c, assessment.workID, payload); err != nil {
+	if err := bindFinalPayload(c, workID, payload); err != nil {
 		return v.reject(ctx, c, err.Error(), completionIDs)
 	}
-	decisionID := domain.ID(payload.Decision)
+	decisionID := producing.decisionID
+	if payload.Decision != string(decisionID) {
+		return v.reject(ctx, c, "Work 2 payload decision identity does not match producing assessment", append(append([]domain.ID(nil), completionIDs...), decisionID))
+	}
 	decisionObject, decisionData, err := v.evidence.Get(ctx, decisionID)
 	if err != nil {
 		return v.reject(ctx, c, "read review decision: "+err.Error(), completionIDs)
@@ -213,7 +229,7 @@ func (v *FinalVerifier) stepCase(ctx context.Context, c workflowcase.Case) (fina
 	if err != nil || !proceed {
 		return finalVerificationHeld, err
 	}
-	if err := v.close(ctx, c, assessment.workID, intents, verdicts, decisionID, completionIDs); err != nil {
+	if err := v.close(ctx, c, workID, intents, verdicts, decisionID, completionIDs); err != nil {
 		return finalVerificationHeld, err
 	}
 	return finalVerificationClosed, nil
@@ -236,7 +252,11 @@ func discoverPublicationAssessment(ctx context.Context, cases *workflowcase.Serv
 		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {
 			return driverAssessment{}, false, fmt.Errorf("decode assessment %s request: %w", record.ID, err)
 		}
-		assessment := driverAssessment{workID: domain.ID(record.WorkID)}
+		assessment := driverAssessment{
+			workID:        domain.ID(record.WorkID),
+			requestWorkID: request.WorkID,
+			caseWorkID:    stored.Case.CurrentWorkID,
+		}
 		decisionCount := 0
 		var decisionData []byte
 		for _, rawID := range request.Assessment.EvidenceIDs {
@@ -284,8 +304,8 @@ func (v *FinalVerifier) loadCompletionEvidence(ctx context.Context, rawIDs []dom
 		if err != nil {
 			return ids, contents, "read Work 2 completion evidence: " + err.Error()
 		}
-		ids = append(ids, id)
 		if object.Kind == string(executors.EvidenceAgentMessage) {
+			ids = append(ids, id)
 			contents = append(contents, data)
 		}
 	}
@@ -341,21 +361,8 @@ func bindPublisherEntries(intents []publishIntent, entries []publishEvidenceEntr
 		observed[slot] = entry
 	}
 	for _, intent := range intents {
-		entry, ok := observed[intent.slot]
-		if !ok {
+		if _, ok := observed[intent.slot]; !ok {
 			return nil, "missing slot " + intent.slot
-		}
-		if entry.Skipped {
-			return nil, "skipped slot " + intent.slot
-		}
-		if entry.RecordedOnly {
-			return nil, "recorded-only slot " + intent.slot
-		}
-		if entry.Operation == "" {
-			return nil, "slot " + intent.slot + " has no operation"
-		}
-		if entry.State != domain.OperationConfirmedEffect {
-			return nil, fmt.Sprintf("slot %s is %s", intent.slot, entry.State)
 		}
 	}
 	for slot := range observed {
@@ -435,20 +442,19 @@ func (v *FinalVerifier) close(ctx context.Context, c workflowcase.Case, workID d
 		return err
 	}
 	digest := sha256.Sum256(body)
-	verificationEvidence, err := v.evidence.Put(ctx, strings.NewReader(string(body)), evidence.Metadata{
-		MediaType: "application/json", Kind: "ado.workflow.verification",
-	})
-	if err != nil {
-		return fmt.Errorf("store final verification evidence: %w", err)
-	}
-	evidenceIDs := make([]domain.ID, 0, len(completionIDs)+2)
+	evidenceIDs := make([]domain.ID, 0, len(completionIDs)+1)
 	evidenceIDs = append(evidenceIDs, completionIDs...)
-	evidenceIDs = append(evidenceIDs, decisionID, verificationEvidence.ID)
-	_, err = v.cases.Close(ctx, workflowcase.VerificationRequest{
+	evidenceIDs = append(evidenceIDs, decisionID)
+	request := workflowcase.VerificationRequest{
 		CaseID: c.ID, VerifierID: v.config.VerifierID, VerifierType: v.config.VerifierType,
 		SnapshotHash: hex.EncodeToString(digest[:]), SnapshotJSON: string(body), EvidenceIDs: evidenceIDs,
-	})
-	return err
+	}
+	_, err = v.cases.Close(ctx, request)
+	if !errors.Is(err, domain.ErrIntentConflict) {
+		return err
+	}
+	_, replayErr := v.cases.Close(ctx, request)
+	return replayErr
 }
 
 func (v *FinalVerifier) reject(ctx context.Context, c workflowcase.Case, reason string, evidenceIDs []domain.ID) (finalVerificationDisposition, error) {

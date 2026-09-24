@@ -1,15 +1,19 @@
 package adoreview
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/SofiaFlux/summa42/internal/domain"
 	"github.com/SofiaFlux/summa42/internal/evidence"
 	"github.com/SofiaFlux/summa42/internal/executors"
+	"github.com/SofiaFlux/summa42/internal/operations"
 	"github.com/SofiaFlux/summa42/internal/verification"
 	"github.com/SofiaFlux/summa42/internal/workflowcase"
 )
@@ -162,6 +166,83 @@ func requireFinalEvidence(t *testing.T, ids []domain.ID, wanted ...domain.ID) {
 	}
 }
 
+func updateFinalVerifierTaskPayload(t *testing.T, h *driverHarness, taskID domain.ID, update func(*PublishPayload)) {
+	t.Helper()
+	task, err := h.execution.Task(h.ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload PublishPayload
+	if err := json.Unmarshal(task.PayloadJSON, &payload); err != nil {
+		t.Fatal(err)
+	}
+	update(&payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.DB().ExecContext(h.ctx,
+		`UPDATE tasks SET payload_json = ? WHERE task_id = ?`, string(body), taskID,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func updateFinalVerifierAssessmentWorkID(t *testing.T, h *driverHarness, caseID, workID domain.ID) {
+	t.Helper()
+	records, err := h.cases.ListAssessments(h.ctx, caseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.WorkID != string(workID) {
+			continue
+		}
+		var request workflowcase.AssessmentRequest
+		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {
+			t.Fatal(err)
+		}
+		request.WorkID = domain.NewID("mismatched-assessment-work")
+		body, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.store.DB().ExecContext(h.ctx,
+			`UPDATE workflow_assessments SET request_json = ? WHERE assessment_id = ?`, string(body), record.ID,
+		); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatalf("assessment for work %s not found", workID)
+}
+
+type gatedLookupProvider struct {
+	delegate LookupProvider
+	mu       sync.Mutex
+	calls    int
+	release  chan struct{}
+}
+
+func (p *gatedLookupProvider) Name() string { return p.delegate.Name() }
+
+func (p *gatedLookupProvider) LookupOutcome(ctx context.Context, request operations.ProviderDispatchRequest) (operations.ProviderOutcome, error) {
+	p.mu.Lock()
+	p.calls++
+	if p.calls == 2 {
+		close(p.release)
+	}
+	p.mu.Unlock()
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return operations.ProviderOutcome{}, ctx.Err()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.delegate.LookupOutcome(ctx, request)
+}
+
 func TestFinalVerifierClosesConfirmedCase(t *testing.T) {
 	f := setupReadyFinalVerifier(t,
 		ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"},
@@ -192,27 +273,19 @@ func TestFinalVerifierClosesConfirmedCase(t *testing.T) {
 	if record.VerifierID != finalVerifierTestID || record.VerifierType != finalVerifierTestType {
 		t.Fatalf("verification identity = %q/%q", record.VerifierID, record.VerifierType)
 	}
-	if len(record.EvidenceIDs) != 3 {
-		t.Fatalf("verification evidence = %v, want decision, completion, and read-back evidence", record.EvidenceIDs)
+	if len(record.EvidenceIDs) != 2 {
+		t.Fatalf("verification evidence = %v, want decision and completion evidence", record.EvidenceIDs)
 	}
 	requireFinalEvidence(t, record.EvidenceIDs, f.decisionID, f.completionEvidence)
-	var verificationEvidence domain.ID
 	for _, id := range record.EvidenceIDs {
-		object, data, err := f.evidence.Get(f.ctx, id)
+		object, _, err := f.evidence.Get(f.ctx, id)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if object.Kind == "ado.workflow.verification" {
-			verificationEvidence = id
-			if string(data) != record.SnapshotJSON {
-				t.Fatalf("verification evidence = %s, snapshot = %s", data, record.SnapshotJSON)
-			}
+			t.Fatalf("verification record cited transient verification evidence %s", id)
 		}
 	}
-	if verificationEvidence == "" {
-		t.Fatal("verification record omitted ado.workflow.verification evidence")
-	}
-	requireFinalEvidence(t, record.EvidenceIDs, verificationEvidence)
 	var snapshot struct {
 		CaseID   string   `json:"caseID"`
 		Revision string   `json:"revision"`
@@ -424,5 +497,143 @@ func TestFinalVerifierHandlesAcceptedTaskReplay(t *testing.T) {
 	}
 	if count := finalVerificationCount(t, f.driverHarness, f.caseID); count != 1 {
 		t.Fatalf("verification count = %d, want 1", count)
+	}
+}
+
+func TestFinalVerifierRejectsAssessmentWorkIDMismatch(t *testing.T) {
+	f := setupReadyFinalVerifier(t,
+		ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"},
+		publishEvidenceEntry{
+			Slot: "ado.pr.approve:proj/shop#1:a:b", Operation: "op-1", State: domain.OperationConfirmedEffect,
+		},
+	)
+	updateFinalVerifierAssessmentWorkID(t, f.driverHarness, f.caseID, f.workID)
+
+	result, err := f.verifier.StepOnce(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Blocked) != 1 || result.Blocked[0] != f.caseID {
+		t.Fatalf("result = %+v, want blocked case %s", result, f.caseID)
+	}
+	blocked, err := f.cases.Get(f.ctx, f.caseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked.State != workflowcase.Blocked {
+		t.Fatalf("case state = %q, want BLOCKED", blocked.State)
+	}
+	record := finalVerificationRecord(t, f.driverHarness, f.caseID)
+	if record.VerifierType != "REJECT" || !strings.Contains(record.SnapshotJSON, "assessment WorkID") {
+		t.Fatalf("rejection record = %+v, want assessment WorkID mismatch", record)
+	}
+}
+
+func TestFinalVerifierRejectsDecisionIDMismatch(t *testing.T) {
+	f := setupReadyFinalVerifier(t,
+		ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"},
+		publishEvidenceEntry{
+			Slot: "ado.pr.approve:proj/shop#1:a:b", Operation: "op-1", State: domain.OperationConfirmedEffect,
+		},
+	)
+	otherDecision := putDecision(t, f.evidence, f.ctx, ReviewDecision{
+		Action: DecisionApproveAction, Vote: "approve", Reason: "other",
+	})
+	updateFinalVerifierTaskPayload(t, f.driverHarness, f.taskID, func(payload *PublishPayload) {
+		payload.Decision = string(otherDecision)
+	})
+
+	result, err := f.verifier.StepOnce(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Blocked) != 1 || result.Blocked[0] != f.caseID {
+		t.Fatalf("result = %+v, want blocked case %s", result, f.caseID)
+	}
+	blocked, err := f.cases.Get(f.ctx, f.caseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked.State != workflowcase.Blocked {
+		t.Fatalf("case state = %q, want BLOCKED", blocked.State)
+	}
+	record := finalVerificationRecord(t, f.driverHarness, f.caseID)
+	if record.VerifierType != "REJECT" || !strings.Contains(record.SnapshotJSON, "decision identity") {
+		t.Fatalf("rejection record = %+v, want decision identity mismatch", record)
+	}
+}
+
+func TestFinalVerifierUsesIndependentLookupOutcome(t *testing.T) {
+	f := setupReadyFinalVerifier(t,
+		ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"},
+		publishEvidenceEntry{
+			Slot: "ado.pr.approve:proj/shop#1:a:b", Operation: "op-1", State: domain.OperationConfirmedEffect,
+		},
+	)
+	replaceFinalVerifierEvidence(t, f.driverHarness, f.completionEvidence, driverPublisherContent(t, publishEvidenceEntry{
+		Slot: "ado.pr.approve:proj/shop#1:a:b", Operation: "op-1",
+		State: domain.OperationOutcomeUnknown, RecordedOnly: true,
+	}))
+
+	result, err := f.verifier.StepOnce(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Closed) != 1 || result.Closed[0] != f.caseID {
+		t.Fatalf("result = %+v, want closed case %s", result, f.caseID)
+	}
+	if state := finalTaskState(t, f.driverHarness, f.workID); state != domain.TaskSucceeded {
+		t.Fatalf("task state = %q, want SUCCEEDED", state)
+	}
+	if len(f.vote.requests) != 1 {
+		t.Fatalf("independent lookup count = %d, want 1", len(f.vote.requests))
+	}
+}
+
+func TestFinalVerifierConcurrentCloseReplay(t *testing.T) {
+	f := setupReadyFinalVerifier(t,
+		ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"},
+		publishEvidenceEntry{
+			Slot: "ado.pr.approve:proj/shop#1:a:b", Operation: "op-1", State: domain.OperationConfirmedEffect,
+		},
+	)
+	provider := &gatedLookupProvider{delegate: f.vote, release: make(chan struct{})}
+	f.verifier.config.Vote = provider
+	ctx, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	results := make(chan struct {
+		result FinalVerifierResult
+		err    error
+	}, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			result, err := f.verifier.StepOnce(ctx)
+			results <- struct {
+				result FinalVerifierResult
+				err    error
+			}{result: result, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	closed := 0
+	for outcome := range results {
+		if outcome.err != nil {
+			t.Fatal(outcome.err)
+		}
+		closed += len(outcome.result.Closed)
+	}
+	if closed == 0 {
+		t.Fatal("concurrent verification closed no case")
+	}
+	if count := finalVerificationCount(t, f.driverHarness, f.caseID); count != 1 {
+		t.Fatalf("concurrent verification count = %d, want 1", count)
 	}
 }

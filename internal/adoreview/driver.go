@@ -53,6 +53,8 @@ type Driver struct {
 
 type driverAssessment struct {
 	workID            domain.ID
+	requestWorkID     domain.ID
+	caseWorkID        domain.ID
 	decisionID        domain.ID
 	decision          ReviewDecision
 	reviewEvidenceIDs []domain.ID
