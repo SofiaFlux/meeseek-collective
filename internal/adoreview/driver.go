@@ -56,6 +56,7 @@ type driverAssessment struct {
 	decisionID        domain.ID
 	decision          ReviewDecision
 	reviewEvidenceIDs []domain.ID
+	evidenceIDs       []domain.ID
 }
 
 type workOnePayload struct {
@@ -208,53 +209,7 @@ func (d *Driver) stepCase(ctx context.Context, c workflowcase.Case, result *Driv
 }
 
 func (d *Driver) discoverAssessment(ctx context.Context, c workflowcase.Case) (driverAssessment, bool, error) {
-	records, err := d.cases.ListAssessments(ctx, c.ID)
-	if err != nil {
-		return driverAssessment{}, false, err
-	}
-	for _, record := range records {
-		var stored workflowcase.AssessmentResult
-		if err := json.Unmarshal([]byte(record.ResultJSON), &stored); err != nil {
-			return driverAssessment{}, false, fmt.Errorf("decode assessment %s result: %w", record.ID, err)
-		}
-		if stored.Case.CurrentWorkID != c.CurrentWorkID {
-			continue
-		}
-		var request workflowcase.AssessmentRequest
-		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {
-			return driverAssessment{}, false, fmt.Errorf("decode assessment %s request: %w", record.ID, err)
-		}
-		assessment := driverAssessment{workID: domain.ID(record.WorkID)}
-		decisionCount := 0
-		var decisionData []byte
-		for _, rawID := range request.Assessment.EvidenceIDs {
-			id := domain.ID(strings.TrimSpace(rawID))
-			if id == "" {
-				continue
-			}
-			object, data, err := d.evidence.Get(ctx, id)
-			if err != nil {
-				return driverAssessment{}, false, err
-			}
-			if object.Kind == "ado.review.decision" {
-				decisionCount++
-				if decisionCount == 1 {
-					assessment.decisionID = id
-					decisionData = data
-				}
-				continue
-			}
-			assessment.reviewEvidenceIDs = append(assessment.reviewEvidenceIDs, id)
-		}
-		if decisionCount != 1 {
-			return driverAssessment{}, false, nil
-		}
-		if err := json.Unmarshal(decisionData, &assessment.decision); err != nil {
-			return driverAssessment{}, false, fmt.Errorf("decode review decision %s: %w", assessment.decisionID, err)
-		}
-		return assessment, true, nil
-	}
-	return driverAssessment{}, false, nil
+	return discoverPublicationAssessment(ctx, d.cases, d.evidence, c, true)
 }
 
 func (d *Driver) orderingReady(ctx context.Context, assessment driverAssessment) (domain.Task, bool, error) {
