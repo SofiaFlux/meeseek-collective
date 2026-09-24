@@ -141,7 +141,7 @@ var copilotReadTools = map[string]struct{}{
     "repo_file": {}, "pipelines_build": {}, "core_list_projects": {}, "wit_work_item": {},
 }
 
-var copilotForbiddenToolFragments = []string{"shell", "write", "url", "memory", "read", "allow-all"}
+var copilotForbiddenToolFragments = []string{"shell", "write", "url", "memory", "allow-all"}
 
 var copilotEnvironmentAllowlist = map[string]struct{}{
     "PATH": {}, "COPILOT_MODEL": {}, "COPILOT_GITHUB_TOKEN": {}, "GH_TOKEN": {}, "GITHUB_TOKEN": {},

@@ -45,7 +45,10 @@ repo_file, pipelines_build, core_list_projects, wit_work_item
 ```
 
 Constructor rejects: blank entries, anything containing `(`, `shell`, `write`,
-`url`, `memory`, `read`, `allow-all` in any form. The executor qualifies each
+`url`, `memory`, `allow-all` in any form, plus anything outside the 7-member
+read set (exact membership — bare `read`/`glob` fail closed here, and `read`
+is deliberately NOT a forbidden fragment because `repo_pull_request_thread`
+contains it). The executor qualifies each
 as `<server>(<tool>)` using `CopilotConfig.MCPServer` (syntactic check:
 `^[A-Za-z0-9_-]+$`), emitted as the `--available-tools`/`--allow-tool` CSVs.
 Empty tools or blank server → constructor error (explicit opt-in, no silent
