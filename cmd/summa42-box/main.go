@@ -34,6 +34,12 @@ import (
 
 const controlShutdownTimeout = 5 * time.Second
 
+const (
+	publishExecutorKind      = "ado-publish"
+	publishCommentCapability = "ado.pr.comment"
+	publishApproveCapability = "ado.pr.approve"
+)
+
 type controlLifecycle interface {
 	Serve(net.Listener) error
 	Close(context.Context) error
@@ -487,13 +493,18 @@ func splitWorkspaceRootArg(args []string) (workspaceRoot string, rest []string, 
 }
 
 func workerCapacity(box *summa42runtime.Box) (scheduler.CapacitySnapshot, error) {
-	caps := make(map[string]scheduler.CapabilityCapacity, len(box.Executors))
+	caps := make(map[string]scheduler.CapabilityCapacity, len(box.Executors)+2)
 	for kind := range box.Executors {
 		kind = strings.TrimSpace(kind)
 		if kind == "" {
 			continue
 		}
 		caps[kind] = scheduler.CapabilityCapacity{Accessible: true, Enforcement: domain.EnforcementEnforced}
+	}
+	if _, registered := caps[publishExecutorKind]; registered {
+		for _, capability := range []string{publishCommentCapability, publishApproveCapability} {
+			caps[capability] = scheduler.CapabilityCapacity{Accessible: true, Enforcement: domain.EnforcementEnforced}
+		}
 	}
 	if len(caps) == 0 {
 		return scheduler.CapacitySnapshot{}, errors.New("run-worker has no schedulable capabilities: the Box executor registry is empty, so there is no capability source to advertise")
@@ -593,7 +604,7 @@ func runWorker(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("construct ado-publish executor: %w", err)
 		}
-		box.Executors["ado-publish"] = publisher
+		box.Executors[publishExecutorKind] = publisher
 	}
 	if err := assessConfiguredProviders(ctx, box.Capabilities, adoProvider); err != nil {
 		return fmt.Errorf("assess configured ADO capability provider: %w", err)

@@ -146,19 +146,27 @@ func (p *Publisher) Start(ctx context.Context, envelope executors.AttemptEnvelop
 			},
 			RequiredApprovals: append([]domain.ID(nil), p.config.OwnerApprovals...),
 		})
+		if op.State == domain.OperationOutcomeUnknown {
+			entries = append(entries, publishEvidenceEntry{
+				Slot: intent.slot, Operation: op.ID, State: op.State, Reference: op.ProviderReference,
+			})
+			return publishExecutionResult(entries)
+		}
 		if err != nil {
-			return executors.ExecutionResult{}, fmt.Errorf("prepare %s: %w", intent.slot, err)
+			return publishExecutionFailure(entries, fmt.Errorf("prepare %s: %w", intent.slot, err))
 		}
 		settled, dispatchErr := p.config.Operations.Dispatch(ctx, op.ID, envelope.AttemptID)
 		if settled.State == domain.OperationOutcomeUnknown {
-			entries = append(entries, publishEvidenceEntry{Slot: intent.slot, Operation: op.ID, State: settled.State})
+			entries = append(entries, publishEvidenceEntry{
+				Slot: intent.slot, Operation: op.ID, State: settled.State, Reference: settled.ProviderReference,
+			})
 			return publishExecutionResult(entries)
 		}
 		if dispatchErr != nil {
-			return executors.ExecutionResult{}, fmt.Errorf("dispatch %s: %w", intent.slot, dispatchErr)
+			return publishExecutionFailure(entries, fmt.Errorf("dispatch %s: %w", intent.slot, dispatchErr))
 		}
 		if settled.State != domain.OperationConfirmedEffect && settled.State != domain.OperationConfirmedNoEffect {
-			return executors.ExecutionResult{}, fmt.Errorf("dispatch %s returned unsupported state %s", intent.slot, settled.State)
+			return publishExecutionFailure(entries, fmt.Errorf("dispatch %s returned unsupported state %s", intent.slot, settled.State))
 		}
 		entries = append(entries, publishEvidenceEntry{
 			Slot: intent.slot, Operation: op.ID, State: settled.State, Reference: settled.ProviderReference,
@@ -186,6 +194,9 @@ func decodePublishPayload(raw json.RawMessage) (PublishPayload, error) {
 }
 
 func buildPublishIntents(payload PublishPayload, decision ReviewDecision) ([]publishIntent, error) {
+	if err := validatePublishDecision(decision); err != nil {
+		return nil, err
+	}
 	marker := "[summa42:" + payload.CaseID + ":" + payload.WorkID + "]"
 	intents := make([]publishIntent, 0, len(decision.Comments)+1)
 	for index, comment := range decision.Comments {
@@ -203,13 +214,7 @@ func buildPublishIntents(payload PublishPayload, decision ReviewDecision) ([]pub
 			},
 		})
 	}
-	if decision.Action == DecisionCommentAction && len(decision.Comments) == 0 {
-		return nil, errors.New("comment review decision requires comments")
-	}
-	if decision.Action == DecisionApproveAction && decision.Vote != "approve" {
-		return nil, errors.New("approve review decision requires approve vote")
-	}
-	if decision.Vote == "approve" {
+	if decision.Action == DecisionApproveAction {
 		intents = append(intents, publishIntent{
 			slot:     fmt.Sprintf("ado.pr.approve:%s/%s#%d:%s", payload.Project, payload.Repo, payload.PR, payload.Revision),
 			provider: voteProviderName,
@@ -224,10 +229,47 @@ func buildPublishIntents(payload PublishPayload, decision ReviewDecision) ([]pub
 	return intents, nil
 }
 
-func publishExecutionResult(entries []publishEvidenceEntry) (executors.ExecutionResult, error) {
-	raw, err := json.Marshal(entries)
-	if err != nil {
-		return executors.ExecutionResult{}, fmt.Errorf("encode publish evidence: %w", err)
+func validatePublishDecision(decision ReviewDecision) error {
+	switch decision.Action {
+	case DecisionCommentAction:
+		if len(decision.Comments) == 0 {
+			return errors.New("comment review decision requires comments")
+		}
+		if decision.Vote == "approve" {
+			return errors.New("comment review decision must not carry approve vote")
+		}
+	case DecisionApproveAction:
+		if decision.Vote != "approve" {
+			return errors.New("approve review decision requires approve vote")
+		}
+		if len(decision.Comments) != 0 {
+			return errors.New("approve review decision must not carry comments")
+		}
+	default:
+		return fmt.Errorf("invalid review decision action %q", decision.Action)
 	}
-	return executors.ExecutionResult{Evidence: []executors.Evidence{{Kind: executors.EvidenceAgentMessage, Content: string(raw)}}}, nil
+	return nil
+}
+
+func publishExecutionFailure(entries []publishEvidenceEntry, err error) (executors.ExecutionResult, error) {
+	result, evidenceErr := publishExecutionResult(entries)
+	if evidenceErr != nil {
+		return result, errors.Join(err, evidenceErr)
+	}
+	return result, err
+}
+
+func publishExecutionResult(entries []publishEvidenceEntry) (executors.ExecutionResult, error) {
+	var content strings.Builder
+	for index, entry := range entries {
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			return executors.ExecutionResult{}, fmt.Errorf("encode publish evidence: %w", err)
+		}
+		if index > 0 {
+			content.WriteByte('\n')
+		}
+		content.Write(raw)
+	}
+	return executors.ExecutionResult{Evidence: []executors.Evidence{{Kind: executors.EvidenceAgentMessage, Content: content.String()}}}, nil
 }

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,12 +24,23 @@ type fakePublishOps struct {
 	ops           map[domain.ID]domain.ExternalOperation
 	nextID        int
 	dispatchState domain.OperationState
+	prepareErrAt  int
+	prepareErr    error
+	prepareState  domain.OperationState
+	dispatchErrAt int
+	dispatchErr   error
 }
 
 func (f *fakePublishOps) Prepare(_ context.Context, request operations.PrepareRequest) (domain.ExternalOperation, error) {
 	f.prepared = append(f.prepared, request)
+	if f.prepareErrAt == len(f.prepared) {
+		return domain.ExternalOperation{}, f.prepareErr
+	}
 	f.nextID++
-	op := domain.ExternalOperation{ID: domain.ID(fmt.Sprintf("op-%d", f.nextID))}
+	op := domain.ExternalOperation{ID: domain.ID(fmt.Sprintf("op-%d", f.nextID)), State: f.prepareState}
+	if f.ops == nil {
+		f.ops = make(map[domain.ID]domain.ExternalOperation)
+	}
 	f.ops[op.ID] = op
 	return op, nil
 }
@@ -39,6 +52,10 @@ func (f *fakePublishOps) Dispatch(_ context.Context, operationID, _ domain.ID) (
 		op.State = f.dispatchState
 	} else {
 		op.State = domain.OperationConfirmedEffect
+	}
+	f.ops[operationID] = op
+	if f.dispatchErrAt == len(f.dispatched) {
+		return op, f.dispatchErr
 	}
 	return op, nil
 }
@@ -121,6 +138,19 @@ func publishPayload(t *testing.T, decision domain.ID) json.RawMessage {
 	return raw
 }
 
+func assertPublishEvidence(t *testing.T, result executors.ExecutionResult, want string) {
+	t.Helper()
+	if len(result.Evidence) != 1 {
+		t.Fatalf("evidence entries = %d, want 1", len(result.Evidence))
+	}
+	if result.Evidence[0].Kind != executors.EvidenceAgentMessage {
+		t.Fatalf("evidence kind = %q, want %q", result.Evidence[0].Kind, executors.EvidenceAgentMessage)
+	}
+	if result.Evidence[0].Content != want {
+		t.Fatalf("evidence content = %q, want %q", result.Evidence[0].Content, want)
+	}
+}
+
 func TestPublishNoneRecordsWithoutPrepare(t *testing.T) {
 	ctx := context.Background()
 	store := testutil.OpenStore(t)
@@ -140,12 +170,10 @@ func TestPublishNoneRecordsWithoutPrepare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Evidence) == 0 {
-		t.Fatal("no evidence recorded")
-	}
+	assertPublishEvidence(t, result, `{"slot":"ado.pr.approve:proj/shop#1:a:b","recorded-only":true}`)
 }
 
-func TestPublishCommentsDispatchesAndSkipsApprove(t *testing.T) {
+func TestPublishCommentsDispatchesComments(t *testing.T) {
 	ctx := context.Background()
 	store := testutil.OpenStore(t)
 	clk := testutil.NewClock(time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC))
@@ -153,7 +181,7 @@ func TestPublishCommentsDispatchesAndSkipsApprove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := putDecision(t, evidenceStore, ctx, ReviewDecision{Action: DecisionCommentAction, Vote: "approve", Reason: "mixed",
+	id := putDecision(t, evidenceStore, ctx, ReviewDecision{Action: DecisionCommentAction, Reason: "mixed",
 		Comments: []DecisionComment{{Path: "a.go", Line: 1, Body: "a.go:1: nit"}, {Path: "b.go", Line: 0, Body: "b.go: nit"}}})
 	ops := &fakePublishOps{ops: map[domain.ID]domain.ExternalOperation{}}
 	publisher, err := NewPublisher(PublishConfig{Mode: PublishComments, Operations: ops, Evidence: evidenceStore, OwnerApprovals: []domain.ID{"owner-1"}, RiskComment: "LOW"})
@@ -162,7 +190,8 @@ func TestPublishCommentsDispatchesAndSkipsApprove(t *testing.T) {
 	}
 	envelope := publishEnvelope("task-1", "attempt-1", t.TempDir())
 	envelope.PayloadJSON = publishPayload(t, id)
-	if _, err := publisher.Start(ctx, envelope); err != nil {
+	result, err := publisher.Start(ctx, envelope)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ops.prepared) != 2 {
@@ -179,6 +208,33 @@ func TestPublishCommentsDispatchesAndSkipsApprove(t *testing.T) {
 			t.Fatalf("approvals = %v", ops.prepared[i].RequiredApprovals)
 		}
 	}
+	assertPublishEvidence(t, result, "{\"slot\":\"ado.pr.comment:proj/shop#1:a:b:0\",\"operation\":\"op-1\",\"state\":\"CONFIRMED_EFFECT\"}\n{\"slot\":\"ado.pr.comment:proj/shop#1:a:b:1\",\"operation\":\"op-2\",\"state\":\"CONFIRMED_EFFECT\"}")
+}
+
+func TestPublishCommentsSkipsApprove(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC))
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := putDecision(t, evidenceStore, ctx, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
+	ops := &fakePublishOps{ops: map[domain.ID]domain.ExternalOperation{}}
+	publisher, err := NewPublisher(PublishConfig{Mode: PublishComments, Operations: ops, Evidence: evidenceStore, RiskComment: "LOW"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := publishEnvelope("task-1", "attempt-1", t.TempDir())
+	envelope.PayloadJSON = publishPayload(t, id)
+	result, err := publisher.Start(ctx, envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops.prepared) != 0 {
+		t.Fatalf("prepared = %d, want 0", len(ops.prepared))
+	}
+	assertPublishEvidence(t, result, `{"slot":"ado.pr.approve:proj/shop#1:a:b","skipped":true}`)
 }
 
 func TestPublishAllDispatchesVote(t *testing.T) {
@@ -197,7 +253,8 @@ func TestPublishAllDispatchesVote(t *testing.T) {
 	}
 	envelope := publishEnvelope("task-1", "attempt-1", t.TempDir())
 	envelope.PayloadJSON = publishPayload(t, id)
-	if _, err := publisher.Start(ctx, envelope); err != nil {
+	result, err := publisher.Start(ctx, envelope)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ops.prepared) != 1 {
@@ -207,9 +264,10 @@ func TestPublishAllDispatchesVote(t *testing.T) {
 	if got.Provider != "ado-pr-vote" || got.TrustedSlotKey != "ado.pr.approve:proj/shop#1:a:b" || got.Risk != "OWNER" {
 		t.Fatalf("prepared = %+v", got)
 	}
+	assertPublishEvidence(t, result, `{"slot":"ado.pr.approve:proj/shop#1:a:b","operation":"op-1","state":"CONFIRMED_EFFECT"}`)
 }
 
-func TestPublishUnknownRecordedAndStops(t *testing.T) {
+func TestPublishDispatchUnknownRecordedAndStops(t *testing.T) {
 	ctx := context.Background()
 	store := testutil.OpenStore(t)
 	clk := testutil.NewClock(time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC))
@@ -233,9 +291,137 @@ func TestPublishUnknownRecordedAndStops(t *testing.T) {
 	if len(ops.prepared) != 1 {
 		t.Fatalf("prepared = %d, want 1 (stop after UNKNOWN)", len(ops.prepared))
 	}
-	if len(result.Evidence) == 0 {
-		t.Fatal("no evidence recorded")
+	if len(ops.dispatched) != 1 {
+		t.Fatalf("dispatched = %d, want 1", len(ops.dispatched))
 	}
+	assertPublishEvidence(t, result, `{"slot":"ado.pr.comment:proj/shop#1:a:b:0","operation":"op-1","state":"OUTCOME_UNKNOWN"}`)
+}
+
+func TestPublishRejectsContradictoryDecisionBeforePrepare(t *testing.T) {
+	tests := []struct {
+		name     string
+		decision ReviewDecision
+	}{
+		{
+			name: "comment with approve vote",
+			decision: ReviewDecision{
+				Action: DecisionCommentAction, Vote: "approve",
+				Comments: []DecisionComment{{Path: "a.go", Line: 1, Body: "nit"}},
+			},
+		},
+		{
+			name: "approve with comments",
+			decision: ReviewDecision{
+				Action: DecisionApproveAction, Vote: "approve",
+				Comments: []DecisionComment{{Path: "a.go", Line: 1, Body: "nit"}},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			evidenceStore := newPublishTestEvidenceStore(t)
+			id := putDecision(t, evidenceStore, ctx, test.decision)
+			ops := &fakePublishOps{ops: map[domain.ID]domain.ExternalOperation{}}
+			publisher, err := NewPublisher(PublishConfig{Mode: PublishAll, Operations: ops, Evidence: evidenceStore, RiskApprove: "OWNER"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope := publishEnvelope("task-1", "attempt-1", t.TempDir())
+			envelope.PayloadJSON = publishPayload(t, id)
+			if _, err := publisher.Start(ctx, envelope); err == nil {
+				t.Fatal("accepted contradictory decision")
+			} else if !strings.Contains(err.Error(), "review decision") {
+				t.Fatalf("error = %q, want decision validation error", err)
+			}
+			if len(ops.prepared) != 0 {
+				t.Fatalf("prepared = %d, want 0", len(ops.prepared))
+			}
+		})
+	}
+}
+
+func TestPublishReturnsAccumulatedEvidenceOnPrepareFailure(t *testing.T) {
+	ctx := context.Background()
+	evidenceStore := newPublishTestEvidenceStore(t)
+	id := putDecision(t, evidenceStore, ctx, ReviewDecision{Action: DecisionCommentAction, Comments: []DecisionComment{
+		{Path: "a.go", Line: 1, Body: "first"},
+		{Path: "b.go", Line: 2, Body: "second"},
+	}})
+	ops := &fakePublishOps{
+		ops:          map[domain.ID]domain.ExternalOperation{},
+		prepareErrAt: 2,
+		prepareErr:   errors.New("prepare failed"),
+	}
+	publisher, err := NewPublisher(PublishConfig{Mode: PublishComments, Operations: ops, Evidence: evidenceStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := publishEnvelope("task-1", "attempt-1", t.TempDir())
+	envelope.PayloadJSON = publishPayload(t, id)
+	result, err := publisher.Start(ctx, envelope)
+	if err == nil || !strings.Contains(err.Error(), "prepare") {
+		t.Fatalf("error = %v, want prepare failure", err)
+	}
+	if len(ops.dispatched) != 1 {
+		t.Fatalf("dispatched = %d, want 1", len(ops.dispatched))
+	}
+	assertPublishEvidence(t, result, `{"slot":"ado.pr.comment:proj/shop#1:a:b:0","operation":"op-1","state":"CONFIRMED_EFFECT"}`)
+}
+
+func TestPublishReturnsAccumulatedEvidenceOnDispatchFailure(t *testing.T) {
+	ctx := context.Background()
+	evidenceStore := newPublishTestEvidenceStore(t)
+	id := putDecision(t, evidenceStore, ctx, ReviewDecision{Action: DecisionCommentAction, Comments: []DecisionComment{
+		{Path: "a.go", Line: 1, Body: "first"},
+		{Path: "b.go", Line: 2, Body: "second"},
+	}})
+	ops := &fakePublishOps{
+		ops:           map[domain.ID]domain.ExternalOperation{},
+		dispatchErrAt: 2,
+		dispatchErr:   errors.New("dispatch failed"),
+	}
+	publisher, err := NewPublisher(PublishConfig{Mode: PublishComments, Operations: ops, Evidence: evidenceStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := publishEnvelope("task-1", "attempt-1", t.TempDir())
+	envelope.PayloadJSON = publishPayload(t, id)
+	result, err := publisher.Start(ctx, envelope)
+	if err == nil || !strings.Contains(err.Error(), "dispatch") {
+		t.Fatalf("error = %v, want dispatch failure", err)
+	}
+	if len(ops.dispatched) != 2 {
+		t.Fatalf("dispatched = %d, want 2", len(ops.dispatched))
+	}
+	assertPublishEvidence(t, result, `{"slot":"ado.pr.comment:proj/shop#1:a:b:0","operation":"op-1","state":"CONFIRMED_EFFECT"}`)
+}
+
+func TestPublishPrepareUnknownRecordedAndStops(t *testing.T) {
+	ctx := context.Background()
+	evidenceStore := newPublishTestEvidenceStore(t)
+	id := putDecision(t, evidenceStore, ctx, ReviewDecision{Action: DecisionCommentAction, Comments: []DecisionComment{
+		{Path: "a.go", Line: 1, Body: "first"},
+		{Path: "b.go", Line: 2, Body: "second"},
+	}})
+	ops := &fakePublishOps{ops: map[domain.ID]domain.ExternalOperation{}, prepareState: domain.OperationOutcomeUnknown}
+	publisher, err := NewPublisher(PublishConfig{Mode: PublishComments, Operations: ops, Evidence: evidenceStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := publishEnvelope("task-1", "attempt-1", t.TempDir())
+	envelope.PayloadJSON = publishPayload(t, id)
+	result, err := publisher.Start(ctx, envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops.prepared) != 1 {
+		t.Fatalf("prepared = %d, want 1", len(ops.prepared))
+	}
+	if len(ops.dispatched) != 0 {
+		t.Fatalf("dispatched = %d, want 0", len(ops.dispatched))
+	}
+	assertPublishEvidence(t, result, `{"slot":"ado.pr.comment:proj/shop#1:a:b:0","operation":"op-1","state":"OUTCOME_UNKNOWN"}`)
 }
 
 func TestPublishRejectsBadPayload(t *testing.T) {
@@ -263,7 +449,8 @@ func TestPublishRejectsBadPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ops.prepared) != 0 || len(result.Evidence) == 0 {
-		t.Fatalf("prepared = %d evidence = %d, want 0 and >0", len(ops.prepared), len(result.Evidence))
+	if len(ops.prepared) != 0 {
+		t.Fatalf("prepared = %d, want 0", len(ops.prepared))
 	}
+	assertPublishEvidence(t, result, `{"slot":"hold","recorded-only":true}`)
 }
