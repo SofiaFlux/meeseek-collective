@@ -3,79 +3,100 @@
 ## Intent
 
 Close the orchestration gap between Work 1 assessment and Work 2 publication:
-materialize the publish Task when a case carries a publish decision, and assess
-the completed publication (Assessment 2) so the case either becomes ready for
-final verification or holds.
+materialize the publish Task for cases carrying a publish decision, then assess
+the completed publication (Assessment 2) with verified effects, so the case
+either becomes ready for final verification or holds.
 
 ## Approaches considered
 
 1. **Driver step in `adoreview` (selected):** one bounded pass per tick over
-   active cases; idempotent materialization via the case Work ID; Assessment 2
-   through the existing `Assess` contract.
-2. **Assessment/verification worker (final design):** a generic assessor
-   process — larger, and Work 2 must exist first. This is the concrete ADO
-   driver; generic extraction is follow-on.
-3. **Publisher executor self-assesses:** executors do not write case state;
-   assessment is a separate durable decision. Rejected.
+   active ADO cases; idempotent materialization via the case Work ID;
+   Assessment 2 through the existing `Assess` contract.
+2. **Generic assessor process (final design direction):** right long-term shape,
+   but Work 2 must exist first; extraction is follow-on.
+3. **Publisher executor self-assesses:** executors do not write case state.
+   Rejected.
+
+## Cross-cutting fix: ADO result decoding
+
+`adomcp.Provider.Call` returns the raw `*mcp.CallToolResult`, but every
+consumer (assessor gates, driver, adoeffects read funcs) asserts
+`map[string]any`. Fix at the boundary: `Call` decodes the SDK result to
+`map[string]any` (structured content first, text-JSON fallback), and errors
+fail closed when neither carries an object. One decoder, all callers.
 
 ## APIs added
 
-- `workflowcase.ListActive(ctx) ([]Case, error)` — ACTIVE cases ordered by ID.
-- `execution.FindByIdempotencyKey(ctx, key) (Task, bool, error)` — Work-ID
-  lookup; the driver uses it to find the current Work Task without a
-  second index.
+- `workflowcase.ListActive(ctx, missionID) ([]Case, error)` — ACTIVE cases of
+  one mission, ordered by ID.
+- `workflowcase.ListAssessments(ctx, caseID) ([]AssessmentRecord, error)` with
+  `{ID, WorkID, RequestJSON, ResultJSON, CreatedAt}`; the driver selects the
+  assessment whose stored result's `Case.CurrentWorkID` equals the case's
+  current Work ID (the Continue that produced it) and extracts the
+  `ado.review.decision` evidence ID from its request.
+- `execution.FindByIdempotencyKey(ctx, key) (Task, bool, error)`.
+- `workflowcase.Assessment(ctx, workID) (CompletionEvidence...)` — no; Work
+  completion evidence is read through `runmanifest.Provenance(attemptID)`
+  (existing: completion manifest → evidence IDs), not a new API.
 
-Both are thin, tested, and mirror the existing store-scan patterns.
+## StepOnce flow (per active case, `Source == "ado"`, `NextWork.Kind ==
+"publish-decision"`)
 
-## StepOnce flow
-
-For every active case with `NextWork.Kind == "publish-decision"`:
-
-1. **Guard:** the Work 1 assessment must propose a publish decision. The case
-   only reaches this state via the assessor, so a hold (UNKNOWN) never lands
-   here; a defensive check skips non-publish kinds and cases with
-   `CurrentWorkID == ""`.
-2. **Project resolution:** the Work 1 Task payload carries repo/PR/commits; if
-   `project` is absent the driver calls `ado.pr.get` once and records it in the
-   Work 2 payload (fail-closed on error).
-3. **Work 2 Task:** `MaterializeTask(case.ID, case.CurrentWorkID, template)`
-   with the Work 2 payload and recipe objective/acceptance/envelope. The Work
-   ID is the idempotency key, so repeated ticks never duplicate the Task.
-4. **Assessment 2:** when the Work 2 Task is `AWAITING_VERIFICATION`, read its
-   completion evidence (completion manifest → `evidence.Get`, kind
-   `AGENT_MESSAGE` from the publisher). All entries confirmed →
-   `Assess(Ready)` (case becomes `READY_FOR_VERIFICATION` for final
-   verification). Any `unknown`/`skipped`/`recorded-only` → `Assess(Unknown)`
-   with a reason (hold). Unreadable evidence → hold.
-5. **Budget:** `RemainingBudget` passes the case budget through unchanged;
-   real spend is enforced by the resource envelope at schedule/lease time.
+1. **Decision discovery:** find the producing assessment (above); require its
+   decision evidence object of kind `ado.review.decision`; skip (not error)
+   when absent — the case simply is not ready for Work 2 yet.
+2. **Ordering guard:** the assessed Work 1 Task must be
+   `AWAITING_VERIFICATION` and its completion manifest (via
+   `runmanifest.Provenance(attemptID).OutputEvidence`) must contain the
+   review evidence cited by the assessment. Otherwise skip.
+3. **Project resolution:** Work 1 payload carries repo/PR/commits; missing
+   project → one `ado.pr.get` call, fail closed on error.
+4. **Materialize Work 2:** `MaterializeTask(case.ID, case.CurrentWorkID, …)`
+   with payload `{decision, caseID, workID, project, repo, pr, revision}` —
+   Work ID idempotency makes repeated ticks no-ops.
+5. **Task-state matrix for the Work 2 Task:**
+   - `ELIGIBLE`/`EXECUTING` → wait (skip).
+   - `AWAITING_VERIFICATION` → Assessment 2.
+   - `BLOCKED`/`CHALLENGED`/`CANCELLED`/`EXPIRED` → `Assess(Unknown, "work2
+     <state>")` hold; a `FAILED` attempt with the Task back in `ELIGIBLE`
+     repeats the same signature until the Task blocks.
+6. **Assessment 2 (verified effects):** read the Work 2 completion evidence;
+   each publisher entry is re-verified read-only through the matching
+   adoeffects provider's `LookupOutcome` (never `Dispatch`). All intents
+   confirmed AND the expected slot set matches the decision exactly →
+   `Assess(Ready)` (case → `READY_FOR_VERIFICATION`). Any missing slot,
+   unknown, skipped, or recorded-only entry → `Assess(Unknown)` with reason.
+   `Assess` replays idempotently for identical requests.
+7. **Budget:** case budget passes through unchanged; effect exposure is
+   reserved by `operations.Prepare` (not by the scheduler).
 
 ## Loop and CLI
 
-`Driver.Run(ctx, interval)` ticks `StepOnce`; context cancellation stops
-cleanly (mid-step context errors are suppressed like worker/observer). A step
-error aborts visibly for supervisor restart. `run-driver` in
-`cmd/summa42-box` wires `--mission`, `--envelope`, `--budget`, `--interval`
-and optional `--project` fallback through the existing runtime composition.
+`Driver.Run(ctx, interval)` ticks `StepOnce`; cancellation stops cleanly
+(mid-step context errors suppressed like worker/observer); step errors abort
+visibly. `run-driver` wires `--mission`, `--envelope`, `--poll-interval`
+(plus optional `--project` fallback) and uses the ADO provider readers for
+verification lookups.
 
 ## Testing
 
-Full testutil stack with fakes: Work 2 materialization from a published case;
-idempotent re-tick (same Task ID, one evidence); Assessment 2 ready path
-(all confirmed) and hold paths (unknown entry, unreadable evidence); project
-resolution via `ado.pr.get`; guard against non-publish cases; Run cancellation.
+Full testutil stack with fakes: decision discovery; ordering guard (early
+assessment, unbound evidence); materialization idempotence; project
+resolution; task-state matrix (wait, ready, blocked hold); Assessment 2
+verified-effect paths (all-confirmed ready; unknown/skip hold; extra/missing
+slot hold); Run cancellation; adomcp decoder (structured + text fallback).
 No live credentials.
 
 ## Scope boundary
 
-No final verification (next slice), no UNKNOWN reconciliation loop (operations
-service owns it), no ADO-specific branches outside `adoreview`. Shadow posture
-holds: the driver only orchestrates; publishing is gated by the publisher mode.
+No final verification (next slice), no UNKNOWN reconciliation loop
+(operations service owns it), no ADO branches outside `adoreview`/`adomcp`.
+Shadow posture holds: the driver orchestrates; publishing stays mode-gated.
 
 ## Acceptance criteria
 
-- A published Work 1 decision produces exactly one Work 2 Task, and repeated
-  driver ticks are idempotent.
-- Completed publication moves the case to `READY_FOR_VERIFICATION` only when
-  every effect confirmed; anything else holds with a reason.
-- Driver never publishes by itself and never runs effects.
+- A published Work 1 decision produces exactly one Work 2 Task; repeated ticks
+  are idempotent.
+- The case reaches `READY_FOR_VERIFICATION` only when every effect verifies
+  by read-back; every other path holds with a reason.
+- The driver never dispatches and never publishes by itself.
