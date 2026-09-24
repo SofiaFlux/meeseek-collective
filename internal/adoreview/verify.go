@@ -23,7 +23,10 @@ import (
 )
 
 type FinalVerifierConfig struct {
-	MissionID    domain.ID
+	MissionID domain.ID
+	// Project limits verification to ready cases whose Work 2 payload has the same project.
+	// An empty value is mission-wide; scoped cases without a resolvable project are skipped.
+	Project      string
 	Comment      LookupProvider
 	Vote         LookupProvider
 	VerifierID   domain.ID
@@ -71,6 +74,7 @@ func NewFinalVerifier(cases *workflowcase.Service, executionSvc *execution.Servi
 		return nil, errors.New("final verifier requires case, execution, evidence, and verification services")
 	}
 	config.MissionID = domain.ID(strings.TrimSpace(string(config.MissionID)))
+	config.Project = strings.TrimSpace(config.Project)
 	config.VerifierID = domain.ID(strings.TrimSpace(string(config.VerifierID)))
 	config.VerifierType = strings.TrimSpace(config.VerifierType)
 	if config.MissionID == "" || config.VerifierID == "" || config.VerifierType == "" {
@@ -179,6 +183,18 @@ func (v *FinalVerifier) stepCase(ctx context.Context, c workflowcase.Case) (fina
 	}
 	if !found {
 		return v.reject(ctx, c, "Work 2 task not found for producing assessment", completionIDs)
+	}
+	if v.config.Project != "" {
+		var projectPayload struct {
+			Project string `json:"project"`
+		}
+		if err := json.Unmarshal(task.PayloadJSON, &projectPayload); err != nil {
+			return finalVerificationHeld, nil
+		}
+		project := strings.TrimSpace(projectPayload.Project)
+		if project == "" || project != v.config.Project {
+			return finalVerificationHeld, nil
+		}
 	}
 	if err := validateFinalTask(c, workID, task); err != nil {
 		return v.reject(ctx, c, err.Error(), completionIDs)

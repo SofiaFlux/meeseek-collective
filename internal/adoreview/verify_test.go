@@ -12,9 +12,11 @@ import (
 
 	"github.com/SofiaFlux/summa42/internal/domain"
 	"github.com/SofiaFlux/summa42/internal/evidence"
+	"github.com/SofiaFlux/summa42/internal/execution"
 	"github.com/SofiaFlux/summa42/internal/executors"
 	"github.com/SofiaFlux/summa42/internal/operations"
 	"github.com/SofiaFlux/summa42/internal/verification"
+	"github.com/SofiaFlux/summa42/internal/workflow"
 	"github.com/SofiaFlux/summa42/internal/workflowcase"
 )
 
@@ -65,6 +67,80 @@ func setupReadyFinalVerifier(t *testing.T, decision ReviewDecision, entries ...p
 	return &finalVerifierFixture{
 		driverHarness: h, verifier: verifier, caseID: c.ID, workID: c.CurrentWorkID,
 		taskID: task.ID, decisionID: h.decision, completionEvidence: completion.ID,
+	}
+}
+
+func setupAdditionalReadyFinalVerifier(t *testing.T, h *driverHarness, objectID, revisionID, project string, pr int64, entries ...publishEvidenceEntry) *finalVerifierFixture {
+	t.Helper()
+	repo, _, ok := strings.Cut(objectID, "#")
+	if !ok || repo == "" || pr <= 0 {
+		t.Fatalf("invalid additional case identity %q and pull request %d", objectID, pr)
+	}
+	grant := workflow.Grant{
+		Capabilities: []string{"read", effectCommentCapability, effectApproveCapability},
+		Actions:      []string{effectCommentCapability, effectApproveCapability},
+	}
+	initial, err := h.cases.Ensure(h.ctx, workflowcase.Observation{
+		MissionID: h.mission, Source: "ado", ObjectID: objectID, RevisionID: revisionID,
+		EvidenceID: string(domain.NewID("review-observation")),
+		FirstWork: workflow.WorkProposal{
+			Kind: "ado.pr.review", RequiredCapabilities: []string{"read"}, AuthorityCeiling: []string{"read"},
+		},
+		Grant: grant, MaxSteps: 3, RemainingBudget: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work1Payload, err := json.Marshal(workOnePayload{
+		Project: project, Repo: repo, PR: pr, SourceCommit: "source", TargetCommit: "target",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work1, err := h.cases.MaterializeTask(h.ctx, h.execution, initial.ID, initial.CurrentWorkID, execution.TaskRequest{
+		Objective:          "Review ADO PR " + objectID,
+		PayloadJSON:        work1Payload,
+		AcceptanceCriteria: []string{"review evidence recorded for " + revisionID},
+		ResourceEnvelopeID: h.work1Task.ResourceEnvelopeID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewEvidence := putDriverEvidence(t, h.evidence, "review completed for "+objectID, "text/plain", executors.EvidenceAgentMessage)
+	completeDriverTask(t, h, work1, reviewEvidence.ID)
+	decision := putDecision(t, h.evidence, h.ctx, ReviewDecision{
+		Action: DecisionApproveAction, Vote: "approve", Reason: "clean",
+	})
+	assessed, err := h.cases.Assess(h.ctx, workflowcase.AssessmentRequest{
+		CaseID: initial.ID, WorkID: initial.CurrentWorkID, RemainingBudget: 9,
+		ProgressSignature: "review-complete-" + objectID,
+		Assessment: workflow.Assessment{
+			Verdict: workflow.Continue, EvidenceIDs: []string{string(reviewEvidence.ID), string(decision)},
+			Next: &workflow.WorkProposal{
+				Kind: "publish-decision", RequiredCapabilities: []string{effectApproveCapability},
+				AuthorityCeiling: []string{effectApproveCapability}, ProposedActions: []string{effectApproveCapability},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := materializeDriverWork2(t, h, assessed.Case)
+	completion := putDriverEvidence(t, h.evidence, driverPublisherContent(t, entries...), "text/plain", executors.EvidenceAgentMessage)
+	completeDriverTask(t, h, task, completion.ID)
+	if _, err := h.driver.StepOnce(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := h.cases.Get(h.ctx, assessed.Case.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.State != workflowcase.ReadyForVerification {
+		t.Fatalf("additional fixture case state = %q, want READY_FOR_VERIFICATION", ready.State)
+	}
+	return &finalVerifierFixture{
+		driverHarness: h, caseID: ready.ID, workID: ready.CurrentWorkID, taskID: task.ID,
+		decisionID: decision, completionEvidence: completion.ID,
 	}
 }
 
@@ -361,6 +437,86 @@ func TestFinalVerifierClosesConfirmedCase(t *testing.T) {
 	if active != 1 {
 		t.Fatalf("Mission active = %d, want 1", active)
 	}
+}
+
+func TestFinalVerifierScopesByProject(t *testing.T) {
+	decision := ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"}
+	firstEntry := publishEvidenceEntry{
+		Slot: "ado.pr.approve:proj/shop#1:a:b", Operation: "op-1", State: domain.OperationConfirmedEffect,
+	}
+	secondEntry := publishEvidenceEntry{
+		Slot: "ado.pr.approve:other-proj/warehouse#2:c:d", Operation: "op-2", State: domain.OperationConfirmedEffect,
+	}
+	tests := []struct {
+		name        string
+		project     string
+		wantFirst   workflowcase.State
+		wantSecond  workflowcase.State
+		wantLookups int
+	}{
+		{name: "project scope", project: "proj", wantFirst: workflowcase.Closed, wantSecond: workflowcase.ReadyForVerification, wantLookups: 1},
+		{name: "no project scope", wantFirst: workflowcase.Closed, wantSecond: workflowcase.Closed, wantLookups: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first := setupReadyFinalVerifier(t, decision, firstEntry)
+			second := setupAdditionalReadyFinalVerifier(t, first.driverHarness, "warehouse#2", "c:d", "other-proj", 2, secondEntry)
+			first.comment.requests = nil
+			first.vote.requests = nil
+			verifier, err := NewFinalVerifier(first.cases, first.execution, first.evidence, first.verification, FinalVerifierConfig{
+				MissionID: first.mission, Project: test.project, Comment: first.comment, Vote: first.vote,
+				VerifierID: finalVerifierTestID, VerifierType: finalVerifierTestType,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := verifier.StepOnce(first.ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Blocked) != 0 {
+				t.Fatalf("result = %+v, want no blocked cases", result)
+			}
+			if len(result.Closed) != countClosedStates(test.wantFirst, test.wantSecond) {
+				t.Fatalf("closed result = %v, want %d cases", result.Closed, countClosedStates(test.wantFirst, test.wantSecond))
+			}
+			for _, check := range []struct {
+				fixture *finalVerifierFixture
+				want    workflowcase.State
+			}{
+				{fixture: first, want: test.wantFirst},
+				{fixture: second, want: test.wantSecond},
+			} {
+				stored, err := first.cases.Get(first.ctx, check.fixture.caseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stored.State != check.want {
+					t.Fatalf("case %s state = %q, want %q", check.fixture.caseID, stored.State, check.want)
+				}
+				wantRecords := 0
+				if check.want == workflowcase.Closed {
+					wantRecords = 1
+				}
+				if count := finalVerificationCount(t, first.driverHarness, check.fixture.caseID); count != wantRecords {
+					t.Fatalf("case %s verification count = %d, want %d", check.fixture.caseID, count, wantRecords)
+				}
+			}
+			if len(first.vote.requests) != test.wantLookups {
+				t.Fatalf("vote lookup count = %d, want %d", len(first.vote.requests), test.wantLookups)
+			}
+		})
+	}
+}
+
+func countClosedStates(states ...workflowcase.State) int {
+	count := 0
+	for _, state := range states {
+		if state == workflowcase.Closed {
+			count++
+		}
+	}
+	return count
 }
 
 func TestFinalVerifierReusesExistingVerificationBlob(t *testing.T) {

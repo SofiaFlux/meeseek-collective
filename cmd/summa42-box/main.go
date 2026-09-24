@@ -969,6 +969,7 @@ func runFinalVerifier(ctx context.Context, args []string) error {
 	cases := workflowcase.New(box.Store, box.Clock, box.Purpose)
 	verifier, err := adoreview.NewFinalVerifier(cases, box.Execution, box.Evidence, box.Verification, adoreview.FinalVerifierConfig{
 		MissionID:    verifierCfg.MissionID,
+		Project:      verifierCfg.Project,
 		Comment:      operationProviders[0],
 		Vote:         operationProviders[1],
 		VerifierID:   verifierCfg.VerifierID,
