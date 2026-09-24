@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SofiaFlux/summa42/internal/adomcp"
+	"github.com/SofiaFlux/summa42/internal/adoreview"
 	"github.com/SofiaFlux/summa42/internal/capabilities"
 	"github.com/SofiaFlux/summa42/internal/control"
 	"github.com/SofiaFlux/summa42/internal/domain"
@@ -24,6 +25,8 @@ import (
 	summa42runtime "github.com/SofiaFlux/summa42/internal/runtime"
 	"github.com/SofiaFlux/summa42/internal/scheduler"
 	state "github.com/SofiaFlux/summa42/internal/state/sqlite"
+	"github.com/SofiaFlux/summa42/internal/workflow"
+	"github.com/SofiaFlux/summa42/internal/workflowcase"
 )
 
 const controlShutdownTimeout = 5 * time.Second
@@ -305,6 +308,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "run-observer" {
+		if err := runObserver(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -433,4 +443,126 @@ func runWorker(ctx context.Context, args []string) error {
 		return err
 	}
 	return worker.Run(ctx, capacity, pollInterval)
+}
+
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	if s == nil {
+		return ""
+	}
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSlice) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+func parseObserverFlags(args []string) (adoreview.Config, time.Duration, error) {
+	var cfg adoreview.Config
+	var mission, reviewer, envelope string
+	var grantCaps, grantActions, workCaps stringSlice
+	var maxSteps int
+	var remainingBudget int64
+	var pollInterval time.Duration
+	flags := flag.NewFlagSet("run-observer", flag.ContinueOnError)
+	flags.StringVar(&mission, "mission", "", "mission ID to attach observed review cases to")
+	flags.StringVar(&reviewer, "reviewer-id", "", "ADO reviewer identity to observe")
+	flags.Var(&grantCaps, "grant-capability", "capability granted to review work (repeatable)")
+	flags.Var(&grantActions, "grant-action", "action granted to review work (repeatable)")
+	flags.Var(&workCaps, "work-capability", "required work capability (repeatable, defaults to grant capabilities)")
+	flags.StringVar(&envelope, "envelope", "", "resource envelope ID for materialized review tasks")
+	flags.IntVar(&maxSteps, "max-steps", 0, "maximum steps for observed review cases")
+	flags.Int64Var(&remainingBudget, "remaining-budget", 0, "remaining budget for observed review cases")
+	flags.StringVar(&cfg.Project, "project", "", "ADO project scope (empty uses org-active scope)")
+	flags.StringVar(&cfg.Repository, "repository", "", "ADO repository scope")
+	flags.DurationVar(&pollInterval, "poll-interval", 5*time.Minute, "interval between observer polls")
+	if err := flags.Parse(args); err != nil {
+		return adoreview.Config{}, 0, err
+	}
+	if strings.TrimSpace(mission) == "" {
+		return adoreview.Config{}, 0, errors.New("run-observer requires --mission")
+	}
+	if strings.TrimSpace(reviewer) == "" {
+		return adoreview.Config{}, 0, errors.New("run-observer requires --reviewer-id")
+	}
+	if len(grantCaps) == 0 {
+		return adoreview.Config{}, 0, errors.New("run-observer requires at least one --grant-capability (refusing to observe with an empty grant)")
+	}
+	if strings.TrimSpace(envelope) == "" {
+		return adoreview.Config{}, 0, errors.New("run-observer requires --envelope")
+	}
+	if maxSteps <= 0 {
+		return adoreview.Config{}, 0, errors.New("run-observer requires a positive --max-steps")
+	}
+	if remainingBudget <= 0 {
+		return adoreview.Config{}, 0, errors.New("run-observer requires a positive --remaining-budget")
+	}
+	if pollInterval <= 0 {
+		return adoreview.Config{}, 0, errors.New("run-observer requires a positive --poll-interval")
+	}
+	cfg.MissionID = domain.ID(mission)
+	cfg.ReviewerID = reviewer
+	cfg.Grant = workflow.Grant{Capabilities: []string(grantCaps), Actions: []string(grantActions)}
+	cfg.WorkCapabilities = []string(workCaps)
+	cfg.ResourceEnvelopeID = domain.ID(envelope)
+	cfg.MaxSteps = maxSteps
+	cfg.RemainingBudget = remainingBudget
+	return cfg, pollInterval, nil
+}
+
+func runObserver(ctx context.Context, args []string) error {
+	if ctx == nil {
+		return errors.New("Box context is required")
+	}
+	observerCfg, pollInterval, err := parseObserverFlags(args)
+	if err != nil {
+		return err
+	}
+	home, err := localconfig.ResolveHome("")
+	if err != nil {
+		return err
+	}
+	cfg, err := localconfig.Load(home)
+	if err != nil {
+		return fmt.Errorf("load initialized Collective: %w", err)
+	}
+	material, err := loadStartupMaterial(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	feedbackSink, err := buildFeedbackSink(cfg)
+	if err != nil {
+		return err
+	}
+	adoProvider, err := buildADOProviderFromEnv()
+	if err != nil {
+		return err
+	}
+	if adoProvider == nil {
+		return errors.New("run-observer requires ADO MCP configuration (SUMMA42_ADO_MCP_COMMAND and SUMMA42_ADO_ORGANIZATION)")
+	}
+	var capabilityProviders []capabilities.Provider
+	capabilityProviders = append(capabilityProviders, adoProvider)
+
+	box, err := summa42runtime.Open(ctx, summa42runtime.Config{
+		StatePath:           cfg.DatabasePath,
+		EvidencePath:        cfg.EvidencePath,
+		CollectiveID:        cfg.CollectiveID,
+		OwnerPrincipalID:    cfg.OwnerPrincipalID,
+		FieldFeedback:       cfg.FieldFeedback,
+		FeedbackSink:        feedbackSink,
+		PolicyEngine:        material.policyEngine,
+		CapabilityProviders: capabilityProviders,
+	})
+	if err != nil {
+		return fmt.Errorf("open Box runtime: %w", err)
+	}
+	defer box.Close()
+	if err := assessConfiguredProviders(ctx, box.Capabilities, adoProvider); err != nil {
+		return fmt.Errorf("assess configured ADO capability provider: %w", err)
+	}
+	cases := workflowcase.New(box.Store, box.Clock, box.Purpose)
+	return adoreview.Run(ctx, adoProvider, cases, box.Execution, box.Evidence, observerCfg, pollInterval)
 }

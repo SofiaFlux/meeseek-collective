@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/SofiaFlux/summa42/internal/domain"
 	"github.com/SofiaFlux/summa42/internal/evidence"
@@ -56,6 +57,33 @@ func (c Config) workCapabilities() []string {
 		return append([]string(nil), c.WorkCapabilities...)
 	}
 	return append([]string(nil), c.Grant.Capabilities...)
+}
+
+func Run(ctx context.Context, caller PRCaller, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg Config, interval time.Duration) error {
+	if interval <= 0 {
+		return errors.New("observer requires a positive poll interval")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
+	if _, err := ObserveOnce(ctx, caller, cases, execSvc, evidenceStore, cfg); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := ctx.Err(); err != nil {
+				return nil
+			}
+			if _, err := ObserveOnce(ctx, caller, cases, execSvc, evidenceStore, cfg); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func ObserveOnce(ctx context.Context, caller PRCaller, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg Config) (ObserveResult, error) {

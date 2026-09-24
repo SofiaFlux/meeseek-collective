@@ -2,6 +2,7 @@ package adoreview
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -150,5 +151,103 @@ func TestObserveOnceExcludesAndRepairsPartialCase(t *testing.T) {
 	}
 	if len(result.Failed) != 0 {
 		t.Fatalf("failed = %+v, want empty", result.Failed)
+	}
+}
+
+func TestRunStopsOnCancelWithoutNewPoll(t *testing.T) {
+	ctx, _, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	_ = ctx
+	caller := &fakeCaller{pages: []any{map[string]any{"prs": []any{}}}}
+	runCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := Run(runCtx, caller, cases, execSvc, evidenceStore, cfg, time.Minute); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if len(caller.calls) != 0 {
+		t.Fatalf("caller calls = %d, want 0 (cancelled before first poll)", len(caller.calls))
+	}
+}
+
+func TestRunPollsThenStops(t *testing.T) {
+	ctx, store, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	_ = ctx
+	page := map[string]any{"prs": []any{goodPRItem()}}
+	caller := &fakeCaller{pages: []any{page, page}}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(runCtx, caller, cases, execSvc, evidenceStore, cfg, 5*time.Millisecond)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	sawSecondTick := false
+	for {
+		if len(caller.calls) >= 2 {
+			sawSecondTick = true
+		}
+		foundCase, found, err := cases.Find(context.Background(), cfg.MissionID, "ado", "shop#1", "a:b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found && sawSecondTick {
+			var taskID domain.ID
+			var state string
+			err := store.DB().QueryRowContext(context.Background(),
+				`SELECT task_id, state FROM tasks WHERE idempotency_key = ?`, string(foundCase.CurrentWorkID)).Scan(&taskID, &state)
+			if err == nil {
+				task, err := execSvc.Task(context.Background(), taskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if task.State == domain.TaskEligible {
+					break
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for ELIGIBLE task (calls=%d found=%v secondTick=%v)", len(caller.calls), found, sawSecondTick)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for Run to stop")
+	}
+	if len(caller.calls) == 0 {
+		t.Fatal("caller was never called, want at least one poll")
+	}
+	if after := snapshotCount(t, store, context.Background()); after != 1 {
+		t.Fatalf("evidence snapshots = %d, want 1 (second tick must reuse the case)", after)
+	}
+}
+
+func TestRunAbortsOnObserveError(t *testing.T) {
+	ctx, _, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	_ = ctx
+	caller := &fakeCaller{err: errors.New("ado unavailable")}
+	if err := Run(context.Background(), caller, cases, execSvc, evidenceStore, cfg, time.Minute); err == nil {
+		t.Fatal("expected Run to return the ObserveOnce error")
+	} else if !errors.Is(err, caller.err) && err.Error() != "ado unavailable" {
+		t.Fatalf("Run = %v, want the caller error", err)
+	}
+	if len(caller.calls) != 1 {
+		t.Fatalf("caller calls = %d, want 1 (abort after first failed poll)", len(caller.calls))
+	}
+}
+
+func TestRunRejectsNonPositiveInterval(t *testing.T) {
+	ctx, _, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	_ = ctx
+	caller := &fakeCaller{pages: []any{map[string]any{"prs": []any{}}}}
+	if err := Run(context.Background(), caller, cases, execSvc, evidenceStore, cfg, 0); err == nil {
+		t.Fatal("expected error for non-positive poll interval")
+	}
+	if len(caller.calls) != 0 {
+		t.Fatalf("caller calls = %d, want 0 (interval guard before first poll)", len(caller.calls))
 	}
 }
