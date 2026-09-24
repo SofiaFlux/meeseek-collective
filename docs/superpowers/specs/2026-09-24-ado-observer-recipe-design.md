@@ -3,9 +3,9 @@
 ## Intent
 
 Turn reviewer-assigned Azure DevOps pull requests into durable review Tasks:
-periodic discovery through the new read-only PR capabilities, one workflow case
-per PR revision, and a materialized Work 1 review Task the worker loop can
-execute. Assessment of review output and Work 2 effects are later slices.
+periodic discovery through the read-only PR capabilities, one workflow case per
+(mission, source, object, revision), and a materialized Work 1 review Task.
+Assessment of review output and Work 2 effects are later slices.
 
 ## Approaches considered
 
@@ -24,63 +24,107 @@ New package `internal/adoreview` (adomcp untouched):
   (`Call(ctx, capability, request) (any, error)`, satisfied by `adomcp.Provider`),
   defensive parsing, exclusion filter with reasons.
 - `observe.go`: `Config`, `ObserveOnce`, `Run`, `ObserveResult`.
-- CLI `run-observer` in `cmd/summa42-box` reuses `buildADOProviderFromEnv`.
+- New `workflowcase.Find(missionID, source, objectID, revisionID)` lookup over
+  the existing `UNIQUE (mission_id, source, object_id, revision_id)` index.
+- CLI `run-observer` in `cmd/summa42-box` reuses `buildADOProviderFromEnv` and
+  mirrors `runWorker` store wiring.
 
 ## Data flow
 
 ```text
 Run(ctx, cfg, interval) → ObserveOnce(ctx, cfg) per tick
-  pr.org_active (or pr.list with --project/--repository)
+  ado.pr.org_active (nil or filter map, NEVER an action key)
+    or ado.pr.list {"action":"list", project?, repository?, ...} when
+    --project/--repository are set; page loop until empty page/absent token
   parse → exclude (draft/self/group-only/unclear, each with reason)
-  per-PR canonical JSON blob → evidence ID
-  workflowcase.Ensure(source=ado, object=repo#n, revision=sourceCommit:targetCommit)
-  workflowcase.MaterializeTask(review template)
-  → ObserveResult{Ensured, Materialized, Excluded[{PR, Reason}]}
+  workflowcase.Find(mission, "ado", repo#n, sourceCommit:targetCommit)
+    hit  → reuse case, no new evidence row; Materialize (repairs case-no-Task)
+    miss → Put canonical PR JSON (application/json, ado.pr.snapshot)
+           → Ensure → MaterializeTask
+  → ObserveResult{Ensured, Materialized, Excluded[{PR, Reason}], Failed[{PR, Error}]}
 ```
 
-Parser requires PR identity and both commits; unknown fields ignored. Result
-shapes follow the MCP TOOLSET; live validation happens in the smoke follow-on.
-Unclear reviewer assignment excludes conservatively with reason
-`cannot-confirm-direct-assignment`.
+Find-first is load-bearing: `Ensure` compares the full initial request
+including `EvidenceID`, so a fresh `Put` per tick would turn re-polls into
+conflict errors instead of idempotent reuse. `Failed` covers Ensure-ok /
+Materialize-failed (case exists, Task missing) for retry next tick.
 
-## Review Work 1 template
+## Review Work 1 contract
 
-`FirstWork{Kind: "ado.pr.review"}`; required capabilities from
-`--work-capability` (default: grant capabilities), ceiling from the grant.
-Task template: objective `Review ADO PR <repo>#<n>`, payload
-`{repo, pr, sourceCommit, targetCommit}`, acceptance
-`review evidence recorded for <rev>`, envelope from `--envelope`.
-Mission, grant, limits and reviewer come from CLI flags.
+`--work-capability` (repeatable, default: grant capabilities) plus the grant
+populate `Observation.FirstWork{Kind: "ado.pr.review", RequiredCapabilities,
+AuthorityCeiling}`, with `ProposedActions` nil (Work 1 proposes no actions).
+This must pass the `Decide` subset gates: ceiling ⊆ grant capabilities,
+required ⊆ ceiling, actions ⊆ grant actions.
+
+`MaterializeTask(ctx, execSvc, case.ID, case.CurrentWorkID, TaskRequest{
+Objective, PayloadJSON, AcceptanceCriteria, ResourceEnvelopeID, ...})`.
+The case overwrites Purpose, TaskClass (= NextWork.Kind), RequiredCapabilities,
+AuthorityCeiling and IdempotencyKey (= CurrentWorkID) — do not set those five
+on the template. Template preserves objective `Review ADO PR <repo>#<n>`,
+payload `{repo, pr, sourceCommit, targetCommit}`, acceptance
+`review evidence recorded for <rev>`, and the envelope.
+
+## Flags
+
+| Flag | Maps to |
+|---|---|
+| `--mission` (required) | `Observation.MissionID` (must satisfy `ValidatePurposeTx`) |
+| `--reviewer-id` (required) | self/group-only filter identity |
+| `--grant-capability/--grant-action` (repeatable) | `Grant{Capabilities, Actions}` |
+| `--work-capability` (repeatable, default grant caps) | `FirstWork.RequiredCapabilities` |
+| `--envelope` (required) | Task `ResourceEnvelopeID` |
+| `--max-steps`, `--remaining-budget` (positive, required) | `Observation` limits + `Decide` |
+| `--project`, `--repository` (optional pair) | `ado.pr.list` instead of `ado.pr.org_active` |
+| `--poll-interval` (positive, required) | `Run` tick |
+
+## Parser and paging
+
+- `PullRequest{Repository, Number, Title, IsDraft, AuthorID, Reviewers[{ID,
+  IsGroup}], SourceCommit, TargetCommit}`. Required: repository, number, both
+  commits; missing → exclusion reason `unparseable-pr` (fail closed, visible).
+- Canonical blob example (what gets Put, not the MCP wire shape):
+  `{"repo":"shop","pr":42,"sourceCommit":"abc","targetCommit":"def",
+  "draft":false,"author":"u1","reviewers":["u2"]}`.
+- MCP wire-field mapping is plan-level detail; shapes follow the MCP TOOLSET
+  and are confirmed in the live smoke follow-on. Unknown wire fields ignored.
+- Paging: repeat the list call with identical filters plus the continuation
+  token from the previous response while present; stop on empty page. Exact
+  token field names confirmed live; the loop shape is fixed.
 
 ## Error handling
 
-- `Run` aborts visibly on `ObserveOnce` error (supervisor restarts, same as the
-  worker loop); cancellation stops cleanly with no new poll.
-- Per-PR failures (parse, evidence, Ensure, Materialize) are collected into the
-  result as exclusions with reasons where the PR is known, otherwise returned
-  as the tick error. No partial case without evidence.
+- List-call or evidence-store failure: tick error, `Run` aborts visibly
+  (supervisor restarts, same as the worker loop); cancellation stops cleanly.
+- Per-PR `Ensure` failure: exclusion with reason (PR identity known).
+- `Ensure`-ok / `Materialize`-failed: `Failed` entry, retried next tick via
+  Find-first. No partial state is silent.
 - No `operations.Service` dispatches; the observer only reads ADO and writes
   evidence/cases/Tasks.
 
 ## Testing
 
-Fake `PRCaller` plus testutil stack: discovery maps PRs to cases, revision
-change creates a new case, same revision reuses it (idempotent), each exclusion
-class yields its reason, template fields land on the materialized Task, tick
-error aborts `Run`, cancellation stops it. Full `go test ./...` and `go vet`
-pass with no live credentials.
+Fake `PRCaller` plus testutil stack: discovery maps PRs to cases; revision
+change opens a new case; re-poll reuses the case with no new evidence row;
+partial case gains its Task on re-poll; each exclusion class yields its reason;
+template/authority fields land per the contract above; tick error aborts `Run`;
+cancellation stops it. Full `go test ./...` and `go vet` pass, no credentials.
 
 ## Scope boundary
 
 No assessment of review output, no Work 2 (comments/votes), no Copilot
-executor, no durable exclusion ledger (reasons live in the result for now), no
+executor, no durable exclusion ledger (reasons live in the result), no
 least-privilege narrowing beyond work-vs-grant capabilities. Shadow posture
-holds: nothing publishes.
+holds: nothing publishes. Executor registration for `ado.pr.review` (needed
+before the worker loop can lease these Tasks unattended) belongs to the
+Copilot executor slice, not this one.
 
 ## Acceptance criteria
 
-- One active case per PR revision; re-poll reuses it; new commits open a new one.
-- Every discovered PR is either materialized or excluded with a stated reason.
-- Materialized Task carries objective/payload/acceptance/envelope from the recipe
-  and authority from the case step; worker loop can lease it unattended.
+- One active case per (mission, source, object, revision); re-poll reuses it
+  with zero new evidence rows; new commits open a new case.
+- Every discovered PR ends materialized, excluded with reason, or failed with
+  error — none silent.
+- Materialized Task is `ELIGIBLE` with recipe objective/payload/acceptance/
+  envelope and case-derived purpose/class/capabilities/authority.
 - `Run` polls until cancelled and never dispatches external effects.
