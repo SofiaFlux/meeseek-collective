@@ -527,7 +527,7 @@ func (panicExecutor) Start(context.Context, executors.AttemptEnvelope) (executor
     }
 ```
 
-Mirror the same branch in `failExecution` around `FailAttempt`. Add a test `TestStepOnceToleratesStaleLeaseOnComplete`: lease the task manually via `schedSvc.Lease`, advance the test clock past the one-minute lease with `clk.Advance(2 * time.Minute)` (`testutil.Clock` has `Advance`), then `StepOnce` must return `FAILED` without error.
+Mirror the same branch in `failExecution` around `FailAttempt`. Add a test `TestStepOnceToleratesStaleLeaseOnComplete`: use an executor that calls `clk.Advance(2 * time.Minute)` inside `Start` before returning success, expiring the one-minute lease the worker just took; then `StepOnce` must return `FAILED` without error. (A manual `Lease` before `StepOnce` does not work: the leased task is `EXECUTING`, so `Next` yields `IDLE`.)
 
 - [ ] **Step 5: Run scheduler tests, expect PASS.** Run: `GOCACHE=/tmp/summa42-full-go-cache go test ./internal/scheduler -count=1`. Expected: PASS.
 - [ ] **Step 6: Commit.** `git add internal/scheduler/worker.go internal/scheduler/worker_test.go && git commit -m "feat: harden worker failure and stale-lease paths"`.
