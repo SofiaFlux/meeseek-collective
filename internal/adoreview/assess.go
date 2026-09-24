@@ -77,6 +77,10 @@ func AssessReview(ctx context.Context, cases *workflowcase.Service, evidenceStor
 	revisionID := input.SourceCommit + ":" + input.TargetCommit
 	signature := "ado:" + objectID + ":" + revisionID + ":" + string(input.Review.Verdict)
 
+	// Replay story (honest): Assess idempotency is exact-request-JSON equality;
+	// retries must be byte-identical (same evidence IDs, budget, signature).
+	// EvidenceIDs embed random decision blob IDs so re-Put breaks equality;
+	// the Slice 3 driver is single-pass by construction.
 	finish := func(verdict workflow.Verdict, proposedActions []string, decision ReviewDecision) (workflowcase.AssessmentResult, ReviewDecision, error) {
 		canonical, err := json.Marshal(decision)
 		if err != nil {
@@ -118,7 +122,7 @@ func AssessReview(ctx context.Context, cases *workflowcase.Service, evidenceStor
 	}
 	rawPR, err := input.Caller.Call(ctx, "ado.pr.get", getArgs)
 	if err != nil {
-		return workflowcase.AssessmentResult{}, empty, fmt.Errorf("fetch PR state: %w", err)
+		return hold(fmt.Sprintf("stale-review: %v", err))
 	}
 	prMap, ok := rawPR.(map[string]any)
 	if !ok {
@@ -135,6 +139,15 @@ func AssessReview(ctx context.Context, cases *workflowcase.Service, evidenceStor
 	}
 	if !contains(input.Review.ReviewedCommits, liveSource) {
 		return hold(fmt.Sprintf("stale-review: review did not cover current source commit %s", liveSource))
+	}
+
+	// Verdict-level checks run before path-membership consistency so the more
+	// diagnostic reason wins (both hold; only the reason string changes).
+	if input.Review.Verdict == executors.ReviewUncertain {
+		return hold(fmt.Sprintf("uncertain-review: review of %s %s is inconclusive", objectID, revisionID))
+	}
+	if input.Review.Verdict == executors.ReviewClean && len(input.Review.Findings) > 0 {
+		return hold("verdict-findings-mismatch: CLEAN verdict carries findings")
 	}
 
 	files := make(map[string]struct{}, len(input.Review.ReviewedFiles))
@@ -160,7 +173,7 @@ func AssessReview(ctx context.Context, cases *workflowcase.Service, evidenceStor
 		}
 		rawBuild, err := input.Caller.Call(ctx, "ado.build.status", map[string]any{"action": "get_status", "buildId": buildID})
 		if err != nil {
-			return workflowcase.AssessmentResult{}, empty, fmt.Errorf("fetch build status: %w", err)
+			return hold(fmt.Sprintf("ci-unknown: %v", err))
 		}
 		status := ""
 		if buildMap, ok := rawBuild.(map[string]any); ok {

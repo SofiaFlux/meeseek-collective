@@ -152,3 +152,27 @@ func TestGetUnknownIDErrors(t *testing.T) {
 		t.Fatal("expected error for unknown evidence ID")
 	}
 }
+
+func TestGetCorruptShortHashErrorsWithoutPanic(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := state.Open(ctx, filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.DB().Close()
+	clk := testutil.NewClock(time.Date(2026, 9, 15, 14, 0, 0, 0, time.UTC))
+	evidenceStore, err := New(store, filepath.Join(dir, "evidence"), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := domain.NewID("evidence")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO evidence_objects(evidence_id, content_hash, media_type, kind, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, "ab", "application/json", "ado.review.decision", 1, "2026-09-24T08:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := evidenceStore.Get(ctx, id); err == nil {
+		t.Fatal("expected error for corrupt short content hash")
+	}
+}

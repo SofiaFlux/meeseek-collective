@@ -151,6 +151,12 @@ func (s *Store) Get(ctx context.Context, id domain.ID) (EvidenceObject, []byte, 
 	if object.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
 		return EvidenceObject{}, nil, fmt.Errorf("parse evidence timestamp: %w", err)
 	}
+	if len(object.ContentHash) != 64 {
+		return EvidenceObject{}, nil, fmt.Errorf("evidence %q has invalid content hash length %d", id, len(object.ContentHash))
+	}
+	if _, err := hex.DecodeString(object.ContentHash); err != nil {
+		return EvidenceObject{}, nil, fmt.Errorf("evidence %q has invalid content hash: %w", id, err)
+	}
 	path := filepath.Join(s.root, "blobs", "sha256", object.ContentHash[:2], object.ContentHash)
 	data, err := os.ReadFile(path)
 	if err != nil {

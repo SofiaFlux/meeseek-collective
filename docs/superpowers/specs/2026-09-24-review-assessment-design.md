@@ -24,7 +24,10 @@ ReviewInput{
     WorkID    domain.ID
     Review    executors.ReviewResult  // parsed, in memory; driver holds it
     ReviewEvidenceID domain.ID       // blob ID of the canonical review JSON
-    Payload   CopilotReviewPayload  // repo, pr, source/target commits
+    Repo string // flattened Payload.Repo (CopilotReviewPayload.Repo)
+    PR int64 // flattened Payload.PR (CopilotReviewPayload.PR)
+    SourceCommit string // flattened Payload.SourceCommit
+    TargetCommit string // flattened Payload.TargetCommit
     Project   string                 // ADO project for pr.get/file calls
     Caller    PRCaller               // ado.pr.get, ado.build.status
     RequireCI bool                   // driver sets from grant (see below)
@@ -34,7 +37,10 @@ ReviewInput{
 ```
 
 The assessor does not fetch the review JSON itself; the driver (Slice 3) reads
-it via the new `evidence.Get` and passes both value and blob ID. Order inside
+it via the new `evidence.Get` and passes both value and blob ID. Flattened
+payload mapping (blessed): `Repo`↔`CopilotReviewPayload.Repo`,
+`PR`↔`CopilotReviewPayload.PR`, `SourceCommit`↔`Payload.SourceCommit`,
+`TargetCommit`↔`Payload.TargetCommit`. Order inside
 `AssessReview`: validate input → run gates → `Put` decision blob
 (`application/json`, `ado.review.decision`) → `Assess` with
 `EvidenceIDs=[ReviewEvidenceID, decisionID]` (satisfies the non-empty rule).

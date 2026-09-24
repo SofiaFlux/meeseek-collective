@@ -51,17 +51,25 @@ func ensureReviewCase(t *testing.T, ctx context.Context, cases *workflowcase.Ser
 }
 
 type gateCaller struct {
-	pr    map[string]any
-	build map[string]any
-	calls []string
+	pr       map[string]any
+	build    map[string]any
+	prErr    error
+	buildErr error
+	calls    []string
 }
 
 func (g *gateCaller) Call(_ context.Context, capability string, _ any) (any, error) {
 	g.calls = append(g.calls, capability)
 	switch capability {
 	case "ado.pr.get":
+		if g.prErr != nil {
+			return nil, g.prErr
+		}
 		return g.pr, nil
 	case "ado.build.status":
+		if g.buildErr != nil {
+			return nil, g.buildErr
+		}
 		return g.build, nil
 	default:
 		return nil, errors.New("unexpected capability " + capability)
@@ -132,6 +140,29 @@ func assertBlocked(t *testing.T, ctx context.Context, cases *workflowcase.Servic
 	}
 }
 
+func assertAssessBinding(t *testing.T, ctx context.Context, store *state.Store, input ReviewInput, decisionObject evidence.EvidenceObject, wantSignature string) {
+	t.Helper()
+	var requestJSON string
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT request_json FROM workflow_assessments WHERE case_id = ? AND work_id = ?`, input.Case.ID, input.WorkID).Scan(&requestJSON); err != nil {
+		t.Fatalf("load assessment request: %v", err)
+	}
+	var request workflowcase.AssessmentRequest
+	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
+		t.Fatal(err)
+	}
+	wantEvidence := []string{string(input.ReviewEvidenceID), string(decisionObject.ID)}
+	if len(request.Assessment.EvidenceIDs) != 2 || request.Assessment.EvidenceIDs[0] != wantEvidence[0] || request.Assessment.EvidenceIDs[1] != wantEvidence[1] {
+		t.Fatalf("EvidenceIDs = %v, want %v", request.Assessment.EvidenceIDs, wantEvidence)
+	}
+	if request.RemainingBudget != input.RemainingBudget {
+		t.Fatalf("RemainingBudget = %d, want %d", request.RemainingBudget, input.RemainingBudget)
+	}
+	if request.ProgressSignature != wantSignature {
+		t.Fatalf("ProgressSignature = %q, want %q", request.ProgressSignature, wantSignature)
+	}
+}
+
 func TestAssessReviewCleanApproves(t *testing.T) {
 	ctx, store, cases, evidenceStore, mission := setupAssess(t, defaultReviewGrant())
 	c := ensureReviewCase(t, ctx, cases, mission, defaultReviewGrant())
@@ -139,7 +170,8 @@ func TestAssessReviewCleanApproves(t *testing.T) {
 	review := executors.ReviewResult{
 		Verdict: executors.ReviewClean, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
 	}
-	result, decision, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, caller, review))
+	input := newReviewInput(c, caller, review)
+	result, decision, err := AssessReview(ctx, cases, evidenceStore, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +194,7 @@ func TestAssessReviewCleanApproves(t *testing.T) {
 	if stored.CurrentWorkID == "" || stored.CurrentWorkID == c.CurrentWorkID {
 		t.Fatalf("current work = %q, want a new work ID (was %q)", stored.CurrentWorkID, c.CurrentWorkID)
 	}
-	blob, _ := latestDecision(t, ctx, store, evidenceStore)
+	blob, decisionObject := latestDecision(t, ctx, store, evidenceStore)
 	if blob.Action != DecisionApproveAction {
 		t.Fatalf("blob action = %q, want approve", blob.Action)
 	}
@@ -175,6 +207,7 @@ func TestAssessReviewCleanApproves(t *testing.T) {
 	if decision.Action != DecisionApproveAction {
 		t.Fatalf("decision action = %q, want approve", decision.Action)
 	}
+	assertAssessBinding(t, ctx, store, input, decisionObject, "ado:shop#1:a:b:CLEAN")
 }
 
 func TestAssessReviewFindingsComment(t *testing.T) {
@@ -222,15 +255,17 @@ func TestAssessReviewUncertainHolds(t *testing.T) {
 		Verdict: executors.ReviewUncertain, ReviewedCommits: []string{"a"},
 		ReviewedFiles: []string{"main.go"}, Reason: "cannot see the diff",
 	}
-	result, _, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, caller, review))
+	input := newReviewInput(c, caller, review)
+	result, _, err := AssessReview(ctx, cases, evidenceStore, input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertBlocked(t, ctx, cases, c, result, "uncertain-review")
-	blob, _ := latestDecision(t, ctx, store, evidenceStore)
+	blob, decisionObject := latestDecision(t, ctx, store, evidenceStore)
 	if blob.Action != DecisionHoldAction {
 		t.Fatalf("blob action = %q, want hold", blob.Action)
 	}
+	assertAssessBinding(t, ctx, store, input, decisionObject, "ado:shop#1:a:b:UNCERTAIN")
 }
 
 func TestAssessReviewStaleHolds(t *testing.T) {
@@ -432,4 +467,151 @@ func TestAssessReviewCIMissingBuildIDHolds(t *testing.T) {
 	if len(caller.calls) != 1 || caller.calls[0] != "ado.pr.get" {
 		t.Fatalf("calls = %v, want only [ado.pr.get] (no build call without a build ID)", caller.calls)
 	}
+}
+
+func TestAssessReviewPRGetErrorHolds(t *testing.T) {
+	ctx, store, cases, evidenceStore, mission := setupAssess(t, defaultReviewGrant())
+	c := ensureReviewCase(t, ctx, cases, mission, defaultReviewGrant())
+	caller := &gateCaller{prErr: errors.New("boom")}
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewClean, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
+	}
+	result, decision, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, caller, review))
+	if err != nil {
+		t.Fatalf("transport error should hold, not error: %v", err)
+	}
+	assertBlocked(t, ctx, cases, c, result, "stale-review")
+	if !strings.Contains(result.Decision.Reason, "boom") {
+		t.Fatalf("reason = %q, want transport error text", result.Decision.Reason)
+	}
+	if decision.Action != DecisionHoldAction {
+		t.Fatalf("decision action = %q, want hold", decision.Action)
+	}
+	blob, _ := latestDecision(t, ctx, store, evidenceStore)
+	if blob.Action != DecisionHoldAction {
+		t.Fatalf("blob action = %q, want hold", blob.Action)
+	}
+	if result.Decision.Outcome != workflow.OutcomeBlocked {
+		t.Fatalf("outcome = %q, want BLOCKED", result.Decision.Outcome)
+	}
+}
+
+func TestAssessReviewBuildStatusErrorHolds(t *testing.T) {
+	ctx, store, cases, evidenceStore, mission := setupAssess(t, defaultReviewGrant())
+	c := ensureReviewCase(t, ctx, cases, mission, defaultReviewGrant())
+	caller := &gateCaller{
+		pr:       map[string]any{"sourceCommit": "a", "targetCommit": "b", "mergeBuildId": "build-1"},
+		buildErr: errors.New("timeout"),
+	}
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewClean, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
+	}
+	input := newReviewInput(c, caller, review)
+	input.RequireCI = true
+	result, decision, err := AssessReview(ctx, cases, evidenceStore, input)
+	if err != nil {
+		t.Fatalf("transport error should hold, not error: %v", err)
+	}
+	assertBlocked(t, ctx, cases, c, result, "ci-unknown")
+	if !strings.Contains(result.Decision.Reason, "timeout") {
+		t.Fatalf("reason = %q, want transport error text", result.Decision.Reason)
+	}
+	if decision.Action != DecisionHoldAction {
+		t.Fatalf("decision action = %q, want hold", decision.Action)
+	}
+	blob, _ := latestDecision(t, ctx, store, evidenceStore)
+	if blob.Action != DecisionHoldAction {
+		t.Fatalf("blob action = %q, want hold", blob.Action)
+	}
+}
+
+func TestAssessReviewZeroBudgetHolds(t *testing.T) {
+	ctx, _, cases, evidenceStore, mission := setupAssess(t, defaultReviewGrant())
+	c := ensureReviewCase(t, ctx, cases, mission, defaultReviewGrant())
+	caller := greenGateCaller()
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewClean, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
+	}
+	input := newReviewInput(c, caller, review)
+	input.RemainingBudget = 0
+	result, _, err := AssessReview(ctx, cases, evidenceStore, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBlocked(t, ctx, cases, c, result, "remaining budget exhausted")
+}
+
+func TestAssessReviewDecideReplayAndNoProgress(t *testing.T) {
+	// Slice 3 driver is single-pass by construction, so no-progress BLOCKED
+	// arises only on genuine repeats (successive works with equal signatures);
+	// a second Assess with byte-identical request replays the stored result.
+	ctx, _, cases, evidenceStore, mission := setupAssess(t, defaultReviewGrant())
+	c := ensureReviewCase(t, ctx, cases, mission, defaultReviewGrant())
+	caller := greenGateCaller()
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewClean, ReviewedCommits: []string{"a"}, ReviewedFiles: []string{"main.go"},
+	}
+	input := newReviewInput(c, caller, review)
+	first, _, err := AssessReview(ctx, cases, evidenceStore, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Decision.Outcome != workflow.OutcomeContinue {
+		t.Fatalf("first outcome = %q, want CONTINUE", first.Decision.Outcome)
+	}
+	// Equal-signature Decide check: same signature as previous blocks.
+	stored, err := cases.Get(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := workflow.Decide(workflow.Input{
+		Assessment:                workflow.Assessment{Verdict: workflow.Continue, EvidenceIDs: []string{"e1"}, Next: first.Decision.Next},
+		Grant:                     defaultReviewGrant(),
+		Limits:                    workflow.Limits{MaxSteps: 3, RemainingBudget: 9},
+		CompletedSteps:            1,
+		ProgressSignature:         "ado:shop#1:a:b:CLEAN",
+		PreviousProgressSignature: stored.ProgressSignature,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.Outcome != workflow.OutcomeBlocked || !strings.Contains(dec.Reason, "no progress") {
+		t.Fatalf("equal-signature decide = %+v, want no-progress BLOCKED", dec)
+	}
+}
+
+func TestAssessReviewUncertainBeatsUncoveredFinding(t *testing.T) {
+	ctx, _, cases, evidenceStore, mission := setupAssess(t, defaultReviewGrant())
+	c := ensureReviewCase(t, ctx, cases, mission, defaultReviewGrant())
+	caller := greenGateCaller()
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewUncertain, ReviewedCommits: []string{"a"},
+		ReviewedFiles: []string{"main.go"},
+		Findings: []executors.ReviewFinding{
+			{Path: "other.go", Line: 1, Explanation: "outside reviewed set"},
+		},
+	}
+	result, _, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, caller, review))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBlocked(t, ctx, cases, c, result, "uncertain-review")
+}
+
+func TestAssessReviewCleanMismatchBeatsUncoveredFinding(t *testing.T) {
+	ctx, _, cases, evidenceStore, mission := setupAssess(t, defaultReviewGrant())
+	c := ensureReviewCase(t, ctx, cases, mission, defaultReviewGrant())
+	caller := greenGateCaller()
+	review := executors.ReviewResult{
+		Verdict: executors.ReviewClean, ReviewedCommits: []string{"a"},
+		ReviewedFiles: []string{"main.go"},
+		Findings: []executors.ReviewFinding{
+			{Path: "other.go", Line: 1, Explanation: "contradicts verdict and uncovered"},
+		},
+	}
+	result, _, err := AssessReview(ctx, cases, evidenceStore, newReviewInput(c, caller, review))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBlocked(t, ctx, cases, c, result, "verdict-findings-mismatch")
 }
