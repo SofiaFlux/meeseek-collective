@@ -57,6 +57,8 @@ func (p *Provider) Advertise(context.Context) ([]capabilities.Definition, error)
 	return []capabilities.Definition{
 		p.definition("ado.projects.list", "core_list_projects"),
 		p.definition("ado.work_item.read", "wit_work_item"),
+		p.definition("ado.pr.list", "repo_pull_request"),
+		p.definition("ado.pr.get", "repo_pull_request"),
 	}, nil
 }
 
@@ -112,8 +114,23 @@ func (p *Provider) Call(ctx context.Context, capability string, request any) (an
 			return nil, errors.New("work item request must be an object")
 		}
 		action, ok := m["action"].(string)
-		if !ok || !readAction(action) {
+		if !ok || !allowedAction(capability, action) {
 			return nil, fmt.Errorf("work item action %q is not read-only", action)
+		}
+		if _, bypass := m["tool"]; bypass {
+			return nil, errors.New("MCP tool override is forbidden")
+		}
+		for key, value := range m {
+			args[key] = value
+		}
+	case "ado.pr.list", "ado.pr.get":
+		m, ok := request.(map[string]any)
+		if !ok {
+			return nil, errors.New("pull request request must be an object")
+		}
+		action, ok := m["action"].(string)
+		if !ok || !allowedAction(capability, action) {
+			return nil, fmt.Errorf("pull request action %q is not allowed for %q", action, capability)
 		}
 		if _, bypass := m["tool"]; bypass {
 			return nil, errors.New("MCP tool override is forbidden")
@@ -145,18 +162,24 @@ func toolFor(capability string) (string, error) {
 		return "core_list_projects", nil
 	case "ado.work_item.read":
 		return "wit_work_item", nil
+	case "ado.pr.list", "ado.pr.get":
+		return "repo_pull_request", nil
 	default:
 		return "", fmt.Errorf("unsupported ADO capability %q", capability)
 	}
 }
 
-func readAction(action string) bool {
-	switch action {
-	case "get", "get_batch", "list_comments", "my", "list_revisions", "list_for_iteration", "get_type":
-		return true
-	default:
-		return false
-	}
+var allowedActions = map[string]map[string]bool{
+	"ado.work_item.read": {
+		"get": true, "get_batch": true, "list_comments": true, "my": true,
+		"list_revisions": true, "list_for_iteration": true, "get_type": true,
+	},
+	"ado.pr.list": {"list": true, "list_by_commits": true},
+	"ado.pr.get":  {"get": true},
+}
+
+func allowedAction(capability, action string) bool {
+	return allowedActions[capability][action]
 }
 
 func (p *Provider) hasTool(ctx context.Context, name string) (bool, error) {
