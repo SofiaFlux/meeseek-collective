@@ -402,3 +402,39 @@ func TestObserveOnceEnsureFailureYieldsExclusion(t *testing.T) {
 		t.Fatalf("result = %+v, want only the ensure-failed exclusion", result)
 	}
 }
+
+type blockingCaller struct {
+	entered chan struct{}
+}
+
+func (c *blockingCaller) Call(ctx context.Context, _ string, _ any) (any, error) {
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestRunSuppressesContextErrorMidPoll(t *testing.T) {
+	_, _, cases, execSvc, evidenceStore, cfg := setupObserve(t)
+	caller := &blockingCaller{entered: make(chan struct{}, 1)}
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(runCtx, caller, cases, execSvc, evidenceStore, cfg, time.Millisecond) }()
+	select {
+	case <-caller.entered:
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("caller was not entered")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil on cancellation mid-poll", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop after cancel")
+	}
+}

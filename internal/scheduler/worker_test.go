@@ -760,3 +760,77 @@ func TestStepOnceFailsEmptyOutputWithKindSignature(t *testing.T) {
 		t.Fatalf("failure class = %q, want %q", class, domain.FailureExecution)
 	}
 }
+
+type blockingExecutor struct {
+	entered chan struct{}
+}
+
+func (b *blockingExecutor) Start(ctx context.Context, _ executors.AttemptEnvelope) (executors.ExecutionResult, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return executors.ExecutionResult{}, ctx.Err()
+}
+
+func TestRunSuppressesContextErrorMidStep(t *testing.T) {
+	ctx := context.Background()
+	store := testutil.OpenStore(t)
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC))
+	purposes := purpose.New(store, clk)
+	execSvc := execution.New(store, clk, purposes)
+	resourceSvc := resources.New(store, clk)
+	schedSvc := scheduler.New(store, clk, purposes, execSvc, resourceSvc, time.Minute)
+	evidenceStore, err := evidence.New(store, t.TempDir(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifySvc := verification.New(store, clk, execSvc)
+	envelopeID := domain.NewID("envelope")
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO resource_envelopes(envelope_id, hard_limit, created_at) VALUES (?, ?, ?)`,
+		envelopeID, 100, clk.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execSvc.CreateTask(ctx, execution.TaskRequest{
+		Purpose:              domain.PurposeRef{Kind: domain.PurposeOwnerDirective, ID: domain.ID("owner-worker")},
+		Objective:            "review the diff",
+		PayloadJSON:          json.RawMessage(`{"pr":7}`),
+		AcceptanceCriteria:   []string{"done"},
+		RequiredCapabilities: []string{"shell"},
+		RequiredEnforcement:  domain.EnforcementEnforced,
+		AuthorityCeiling:     []string{"shell"},
+		ResourceEnvelopeID:   envelopeID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	capacity := scheduler.CapacitySnapshot{Capabilities: map[string]scheduler.CapabilityCapacity{
+		"shell": {Accessible: true, Enforcement: domain.EnforcementEnforced},
+	}}
+	blocking := &blockingExecutor{entered: make(chan struct{}, 1)}
+	worker, err := scheduler.NewWorker(schedSvc, execSvc, evidenceStore, verifySvc,
+		map[string]executors.Executor{"shell": blocking}, clk, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(runCtx, capacity, time.Millisecond) }()
+	select {
+	case <-blocking.entered:
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("executor was not entered")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil on cancellation mid-step", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop after cancel")
+	}
+}

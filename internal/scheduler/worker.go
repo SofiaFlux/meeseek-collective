@@ -229,5 +229,8 @@ func (w *Worker) stepGuarded(ctx context.Context, capacity CapacitySnapshot) err
 		return nil
 	}
 	_, err := w.StepOnce(ctx, capacity)
+	if err != nil && ctx.Err() != nil {
+		return nil
+	}
 	return err
 }

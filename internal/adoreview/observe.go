@@ -69,6 +69,9 @@ func Run(ctx context.Context, caller PRCaller, cases *workflowcase.Service, exec
 		return nil
 	}
 	if _, err := ObserveOnce(ctx, caller, cases, execSvc, evidenceStore, cfg); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	ticker := time.NewTicker(interval)
@@ -82,6 +85,9 @@ func Run(ctx context.Context, caller PRCaller, cases *workflowcase.Service, exec
 				return nil
 			}
 			if _, err := ObserveOnce(ctx, caller, cases, execSvc, evidenceStore, cfg); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return err
 			}
 		}
