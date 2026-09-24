@@ -310,6 +310,13 @@ func TestPublishRejectsContradictoryDecisionBeforePrepare(t *testing.T) {
 			},
 		},
 		{
+			name: "comment with reject vote",
+			decision: ReviewDecision{
+				Action: DecisionCommentAction, Vote: "reject",
+				Comments: []DecisionComment{{Path: "a.go", Line: 1, Body: "nit"}},
+			},
+		},
+		{
 			name: "approve with comments",
 			decision: ReviewDecision{
 				Action: DecisionApproveAction, Vote: "approve",

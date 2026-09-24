@@ -235,8 +235,8 @@ func validatePublishDecision(decision ReviewDecision) error {
 		if len(decision.Comments) == 0 {
 			return errors.New("comment review decision requires comments")
 		}
-		if decision.Vote == "approve" {
-			return errors.New("comment review decision must not carry approve vote")
+		if decision.Vote != "" {
+			return errors.New("comment review decision must not carry vote")
 		}
 	case DecisionApproveAction:
 		if decision.Vote != "approve" {
