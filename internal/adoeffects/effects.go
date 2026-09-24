@@ -5,6 +5,8 @@ package adoeffects
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -247,13 +249,10 @@ func (p *CommentProvider) Dispatch(ctx context.Context, request operations.Provi
 	if err != nil {
 		return operations.ProviderOutcome{}, err
 	}
-	reference, err := stringField(result, "threadId", "thread_id", "id")
-	if err != nil {
-		return operations.ProviderOutcome{}, fmt.Errorf("ADO comment write confirmed without a provider reference: %w", err)
-	}
+	threadID, _ := stringField(result, "threadId", "thread_id", "id")
 	return operations.ProviderOutcome{
 		State:             domain.OperationConfirmedEffect,
-		ProviderReference: reference,
+		ProviderReference: commentReference(intent, threadID),
 		ActualCost:        1,
 	}, nil
 }
@@ -280,15 +279,170 @@ func (p *VoteProvider) Dispatch(ctx context.Context, request operations.Provider
 	}
 	reference, err := stringField(result, "id", "voteId", "vote_id")
 	if err != nil {
-		// Fall back to a deterministic reference derived from the confirmed
-		// intent: the vote call returns little structured identity.
-		reference = fmt.Sprintf("ado-pr-vote:%s/%s/%d/%d", intent.Project, intent.Repository, intent.PR, intent.Vote)
+		// Deterministic fallback: the vote call returns little structured
+		// identity, so derive a stable reference from the confirmed intent.
+		reference = voteReference(intent)
 	}
 	return operations.ProviderOutcome{
 		State:             domain.OperationConfirmedEffect,
 		ProviderReference: reference,
 		ActualCost:        1,
 	}, nil
+}
+
+// LookupOutcome reconciles a comment write without repeating it: a read
+// error yields OUTCOME_UNKNOWN with a nil error (the reconciler retries the
+// lookup; transport failure is not a negative), a thread carrying the marker
+// confirms the effect, and anything else stays unknown.
+func (p *CommentProvider) LookupOutcome(ctx context.Context, request operations.ProviderDispatchRequest) (operations.ProviderOutcome, error) {
+	intent, err := decodeCommentIntent(request.CanonicalIntent)
+	if err != nil {
+		return operations.ProviderOutcome{}, err
+	}
+	raw, err := p.read(ctx, "ado.pr.threads", map[string]any{"action": "list", "project": intent.Project, "repository": intent.Repository, "pullRequestId": intent.PR})
+	if err != nil {
+		return operations.ProviderOutcome{State: domain.OperationOutcomeUnknown}, nil
+	}
+	if threadID, found := threadContainsMarker(raw, intent.Marker); found {
+		return operations.ProviderOutcome{State: domain.OperationConfirmedEffect, ProviderReference: commentReference(intent, threadID)}, nil
+	}
+	return operations.ProviderOutcome{State: domain.OperationOutcomeUnknown}, nil
+}
+
+// LookupOutcome reconciles an approval vote the same way: any reviewer
+// carrying the intended vote confirms the effect (server-identity-agnostic:
+// the write executes as one identity), otherwise unknown.
+func (p *VoteProvider) LookupOutcome(ctx context.Context, request operations.ProviderDispatchRequest) (operations.ProviderOutcome, error) {
+	intent, err := decodeVoteIntent(request.CanonicalIntent)
+	if err != nil {
+		return operations.ProviderOutcome{}, err
+	}
+	raw, err := p.read(ctx, "ado.pr.reviewers", map[string]any{"action": "list", "project": intent.Project, "repository": intent.Repository, "pullRequestId": intent.PR})
+	if err != nil {
+		return operations.ProviderOutcome{State: domain.OperationOutcomeUnknown}, nil
+	}
+	if reviewersContainVote(raw, intent.Vote) {
+		return operations.ProviderOutcome{State: domain.OperationConfirmedEffect, ProviderReference: voteReference(intent)}, nil
+	}
+	return operations.ProviderOutcome{State: domain.OperationOutcomeUnknown}, nil
+}
+
+// commentReference unifies the ProviderReference for Dispatch and
+// LookupOutcome (controller decision): the confirmed write carries the
+// thread identity when the tool result provides one, otherwise a
+// deterministic fallback (repository, PR, 8-char marker hash) so the
+// reference is always stable and non-empty.
+func commentReference(intent CommentIntent, threadID string) string {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		sum := sha256.Sum256([]byte(intent.Marker))
+		threadID = hex.EncodeToString(sum[:4])
+	}
+	return fmt.Sprintf("ado-pr-comment:%s#%d:%s", intent.Repository, intent.PR, threadID)
+}
+
+func voteReference(intent VoteIntent) string {
+	return fmt.Sprintf("ado-pr-vote:%s/%s/%d/%d", intent.Project, intent.Repository, intent.PR, intent.Vote)
+}
+
+// threadContainsMarker walks a threads payload ({"threads": [...]}, each
+// thread holding comments[].content) for a substring match of marker. It
+// returns the matched thread's identity ("" when the payload carries none)
+// and whether the marker was found.
+func threadContainsMarker(raw any, marker string) (string, bool) {
+	payload, ok := raw.(map[string]any)
+	if !ok || marker == "" {
+		return "", false
+	}
+	for _, thread := range anySlice(payload["threads"]) {
+		threadMap, ok := thread.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, comment := range anySlice(threadMap["comments"]) {
+			commentMap, ok := comment.(map[string]any)
+			if !ok {
+				continue
+			}
+			content, _ := commentMap["content"].(string)
+			if content != "" && strings.Contains(content, marker) {
+				return threadIdentity(threadMap), true
+			}
+		}
+	}
+	return "", false
+}
+
+func anySlice(value any) []any {
+	switch typed := value.(type) {
+	case []any:
+		return typed
+	case []map[string]any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, item)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func threadIdentity(thread map[string]any) string {
+	for _, key := range []string{"threadId", "thread_id", "id"} {
+		if value, ok := thread[key]; ok {
+			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" && text != "<nil>" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+// reviewersContainVote reports whether any reviewer in a reviewers payload
+// ({"reviewers": [{"vote": N}]}) carries the intended vote.
+func reviewersContainVote(raw any, vote int64) bool {
+	payload, ok := raw.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, reviewer := range anySlice(payload["reviewers"]) {
+		reviewerMap, ok := reviewer.(map[string]any)
+		if !ok {
+			continue
+		}
+		if voteEquals(reviewerMap["vote"], vote) {
+			return true
+		}
+	}
+	return false
+}
+
+// voteEquals compares a decoded reviewer vote against the intent vote,
+// tolerating the JSON number shapes a read payload may carry.
+func voteEquals(value any, want int64) bool {
+	switch typed := value.(type) {
+	case float64:
+		return typed == float64(want)
+	case float32:
+		return typed == float32(want)
+	case int:
+		return int64(typed) == want
+	case int32:
+		return int64(typed) == want
+	case int64:
+		return typed == want
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return parsed == want
+		}
+		if parsed, err := typed.Float64(); err == nil {
+			return parsed == float64(want)
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 func decodeCommentIntent(canonical []byte) (CommentIntent, error) {
