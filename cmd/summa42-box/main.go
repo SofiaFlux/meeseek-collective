@@ -449,6 +449,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "run-driver" {
+		if err := runDriver(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -743,4 +750,104 @@ func runObserver(ctx context.Context, args []string) error {
 	}
 	cases := workflowcase.New(box.Store, box.Clock, box.Purpose)
 	return adoreview.Run(ctx, adoProvider, cases, box.Execution, box.Evidence, observerCfg, pollInterval)
+}
+
+func parseDriverFlags(args []string) (adoreview.DriverConfig, time.Duration, error) {
+	var cfg adoreview.DriverConfig
+	var mission, envelope string
+	var pollInterval time.Duration
+	flags := flag.NewFlagSet("run-driver", flag.ContinueOnError)
+	flags.StringVar(&mission, "mission", "", "mission ID for driver cases")
+	flags.StringVar(&envelope, "envelope", "", "resource envelope ID for materialized publish tasks")
+	flags.StringVar(&cfg.Project, "project", "", "ADO project fallback for PR project resolution")
+	flags.DurationVar(&pollInterval, "poll-interval", 30*time.Second, "interval between driver polls")
+	if err := flags.Parse(args); err != nil {
+		return adoreview.DriverConfig{}, 0, err
+	}
+	if strings.TrimSpace(mission) == "" {
+		return adoreview.DriverConfig{}, 0, errors.New("run-driver requires --mission")
+	}
+	if strings.TrimSpace(envelope) == "" {
+		return adoreview.DriverConfig{}, 0, errors.New("run-driver requires --envelope")
+	}
+	if pollInterval <= 0 {
+		return adoreview.DriverConfig{}, 0, errors.New("run-driver requires a positive --poll-interval")
+	}
+	cfg.MissionID = domain.ID(strings.TrimSpace(mission))
+	cfg.ResourceEnvelopeID = domain.ID(strings.TrimSpace(envelope))
+	cfg.Project = strings.TrimSpace(cfg.Project)
+	return cfg, pollInterval, nil
+}
+
+func runDriver(ctx context.Context, args []string) error {
+	if ctx == nil {
+		return errors.New("Box context is required")
+	}
+	driverCfg, pollInterval, err := parseDriverFlags(args)
+	if err != nil {
+		return err
+	}
+	home, err := localconfig.ResolveHome("")
+	if err != nil {
+		return err
+	}
+	cfg, err := localconfig.Load(home)
+	if err != nil {
+		return fmt.Errorf("load initialized Collective: %w", err)
+	}
+	material, err := loadStartupMaterial(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	feedbackSink, err := buildFeedbackSink(cfg)
+	if err != nil {
+		return err
+	}
+	adoProvider, err := buildADOProviderFromEnv()
+	if err != nil {
+		return err
+	}
+	if adoProvider == nil {
+		return errors.New("run-driver requires ADO MCP configuration (SUMMA42_ADO_MCP_COMMAND and SUMMA42_ADO_ORGANIZATION)")
+	}
+	capabilityProviders := []capabilities.Provider{adoProvider}
+	operationProviders, err := buildAdoEffectProviders(adoProvider)
+	if err != nil {
+		return err
+	}
+	if len(operationProviders) != 2 {
+		return errors.New("run-driver requires ADO comment and vote providers")
+	}
+
+	box, err := summa42runtime.Open(ctx, summa42runtime.Config{
+		StatePath:           cfg.DatabasePath,
+		EvidencePath:        cfg.EvidencePath,
+		CollectiveID:        cfg.CollectiveID,
+		OwnerPrincipalID:    cfg.OwnerPrincipalID,
+		FieldFeedback:       cfg.FieldFeedback,
+		FeedbackSink:        feedbackSink,
+		PolicyEngine:        material.policyEngine,
+		OperationProviders:  operationProviders,
+		CapabilityProviders: capabilityProviders,
+	})
+	if err != nil {
+		return fmt.Errorf("open Box runtime: %w", err)
+	}
+	defer box.Close()
+	if err := assessConfiguredProviders(ctx, box.Capabilities, adoProvider); err != nil {
+		return fmt.Errorf("assess configured ADO capability provider: %w", err)
+	}
+	cases := workflowcase.New(box.Store, box.Clock, box.Purpose)
+	driver, err := adoreview.NewDriver(cases, box.Execution, box.Evidence, box.RunManifests, adoreview.DriverConfig{
+		MissionID:          driverCfg.MissionID,
+		ResourceEnvelopeID: driverCfg.ResourceEnvelopeID,
+		Comment:            operationProviders[0],
+		Vote:               operationProviders[1],
+		Caller:             adoProvider,
+		Project:            driverCfg.Project,
+	})
+	if err != nil {
+		return fmt.Errorf("construct ADO workflow driver: %w", err)
+	}
+	return driver.Run(ctx, pollInterval)
 }
