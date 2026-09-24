@@ -148,8 +148,8 @@ func (d *Driver) Run(ctx context.Context, interval time.Duration) error {
 }
 
 func (d *Driver) stepCase(ctx context.Context, c workflowcase.Case, result *DriverResult) error {
-	assessment, found, err := d.discoverAssessment(ctx, c)
-	if err != nil || !found {
+	assessment, assessmentFound, err := d.discoverAssessment(ctx, c)
+	if err != nil || !assessmentFound {
 		return err
 	}
 	work1, ready, err := d.orderingReady(ctx, assessment)
@@ -160,26 +160,39 @@ func (d *Driver) stepCase(ctx context.Context, c workflowcase.Case, result *Driv
 	if err != nil {
 		return err
 	}
-	project, err := d.resolveProject(ctx, payload)
+	var task domain.Task
+	var found bool
+	task, found, err = d.execution.FindByIdempotencyKey(ctx, string(c.CurrentWorkID))
 	if err != nil {
 		return err
 	}
-	publishPayload := PublishPayload{
-		Decision: string(assessment.decisionID), CaseID: string(c.ID), WorkID: string(c.CurrentWorkID),
-		Project: project, Repo: payload.Repo, PR: payload.PR, Revision: c.RevisionID,
-	}
-	payloadJSON, err := json.Marshal(publishPayload)
-	if err != nil {
-		return err
-	}
-	task, err := d.cases.MaterializeTask(ctx, d.execution, c.ID, c.CurrentWorkID, execution.TaskRequest{
-		Objective:          fmt.Sprintf("Publish ADO review decision for %s", c.ObjectID),
-		PayloadJSON:        payloadJSON,
-		AcceptanceCriteria: []string{"publication evidence recorded for " + c.RevisionID},
-		ResourceEnvelopeID: d.config.ResourceEnvelopeID,
-	})
-	if err != nil {
-		return err
+	var publishPayload PublishPayload
+	if found {
+		if err := json.Unmarshal(task.PayloadJSON, &publishPayload); err != nil {
+			return fmt.Errorf("decode existing Work 2 payload: %w", err)
+		}
+	} else {
+		project, err := d.resolveProject(ctx, payload)
+		if err != nil {
+			return err
+		}
+		publishPayload = PublishPayload{
+			Decision: string(assessment.decisionID), CaseID: string(c.ID), WorkID: string(c.CurrentWorkID),
+			Project: project, Repo: payload.Repo, PR: payload.PR, Revision: c.RevisionID,
+		}
+		payloadJSON, err := json.Marshal(publishPayload)
+		if err != nil {
+			return err
+		}
+		task, err = d.cases.MaterializeTask(ctx, d.execution, c.ID, c.CurrentWorkID, execution.TaskRequest{
+			Objective:          fmt.Sprintf("Publish ADO review decision for %s", c.ObjectID),
+			PayloadJSON:        payloadJSON,
+			AcceptanceCriteria: []string{"publication evidence recorded for " + c.RevisionID},
+			ResourceEnvelopeID: d.config.ResourceEnvelopeID,
+		})
+		if err != nil {
+			return err
+		}
 	}
 	result.Materialized = append(result.Materialized, task.ID)
 	switch task.State {
@@ -212,6 +225,8 @@ func (d *Driver) discoverAssessment(ctx context.Context, c workflowcase.Case) (d
 			return driverAssessment{}, false, fmt.Errorf("decode assessment %s request: %w", record.ID, err)
 		}
 		assessment := driverAssessment{workID: domain.ID(record.WorkID)}
+		decisionCount := 0
+		var decisionData []byte
 		for _, rawID := range request.Assessment.EvidenceIDs {
 			id := domain.ID(strings.TrimSpace(rawID))
 			if id == "" {
@@ -221,22 +236,21 @@ func (d *Driver) discoverAssessment(ctx context.Context, c workflowcase.Case) (d
 			if err != nil {
 				return driverAssessment{}, false, err
 			}
-			if object.Kind != "ado.review.decision" {
-				assessment.reviewEvidenceIDs = append(assessment.reviewEvidenceIDs, id)
+			if object.Kind == "ado.review.decision" {
+				decisionCount++
+				if decisionCount == 1 {
+					assessment.decisionID = id
+					decisionData = data
+				}
 				continue
 			}
-			if assessment.decisionID != "" {
-				continue
-			}
-			var decision ReviewDecision
-			if err := json.Unmarshal(data, &decision); err != nil {
-				return driverAssessment{}, false, fmt.Errorf("decode review decision %s: %w", id, err)
-			}
-			assessment.decisionID = id
-			assessment.decision = decision
+			assessment.reviewEvidenceIDs = append(assessment.reviewEvidenceIDs, id)
 		}
-		if assessment.decisionID == "" {
+		if decisionCount != 1 {
 			return driverAssessment{}, false, nil
+		}
+		if err := json.Unmarshal(decisionData, &assessment.decision); err != nil {
+			return driverAssessment{}, false, fmt.Errorf("decode review decision %s: %w", assessment.decisionID, err)
 		}
 		return assessment, true, nil
 	}
@@ -270,7 +284,7 @@ func (d *Driver) orderingReady(ctx context.Context, assessment driverAssessment)
 		}
 		seen[id] = struct{}{}
 		if _, ok := output[id]; !ok {
-			continue
+			return domain.Task{}, false, nil
 		}
 		object, _, err := d.evidence.Get(ctx, id)
 		if err != nil {
@@ -537,7 +551,7 @@ func (d *Driver) persistTerminalEvidence(ctx context.Context, c workflowcase.Cas
 			if latestID != "" {
 				return latestID, nil
 			}
-		} else if !isUnavailableProvenance(err) {
+		} else if !isUnavailableProvenance(err) && !(errors.Is(err, runmanifest.ErrIncomplete) && isTerminalTaskState(task.State)) {
 			return "", fmt.Errorf("read terminal task provenance: %w", err)
 		}
 	}
@@ -555,6 +569,15 @@ func (d *Driver) persistTerminalEvidence(ctx context.Context, c workflowcase.Cas
 		return "", fmt.Errorf("store terminal workflow evidence: %w", err)
 	}
 	return object.ID, nil
+}
+
+func isTerminalTaskState(state domain.TaskState) bool {
+	switch state {
+	case domain.TaskBlocked, domain.TaskChallenged, domain.TaskCancelled, domain.TaskExpired:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Driver) configured() error {

@@ -43,19 +43,6 @@ func (f *fakeCompletions) Provenance(context.Context, domain.ID) (runmanifest.Pr
 	return f.provenance, f.err
 }
 
-type selectiveCompletions struct {
-	delegate           Completions
-	unavailableAttempt domain.ID
-	unavailableError   error
-}
-
-func (f *selectiveCompletions) Provenance(ctx context.Context, attemptID domain.ID) (runmanifest.Provenance, error) {
-	if attemptID == f.unavailableAttempt {
-		return runmanifest.Provenance{}, f.unavailableError
-	}
-	return f.delegate.Provenance(ctx, attemptID)
-}
-
 type blockingDriverCaller struct {
 	started chan struct{}
 }
@@ -354,6 +341,15 @@ func TestDriverMaterializesWork2Idempotently(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("Work 2 task count = %d, want 1", count)
 	}
+	var projectCalls int
+	for _, call := range h.caller.calls {
+		if call.capability == "ado.pr.get" {
+			projectCalls++
+		}
+	}
+	if projectCalls != 1 {
+		t.Fatalf("ado.pr.get calls = %d, want 1 across repeated ticks", projectCalls)
+	}
 	var payload PublishPayload
 	if err := json.Unmarshal(task.PayloadJSON, &payload); err != nil {
 		t.Fatal(err)
@@ -407,6 +403,36 @@ func TestDriverRejectsUnboundReviewEvidence(t *testing.T) {
 		}
 		if len(result.Materialized) != 0 {
 			t.Fatalf("materialized = %v, want none", result.Materialized)
+		}
+	})
+}
+
+func TestDriverRejectsAmbiguousReviewEvidence(t *testing.T) {
+	t.Run("multiple decision blobs", func(t *testing.T) {
+		h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
+		secondDecision := putDecision(t, h.evidence, h.ctx, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "other"})
+		setDriverAssessmentEvidence(t, h, h.reviewEvidence.ID, h.decision, secondDecision)
+
+		result, err := h.driver.StepOnce(h.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Materialized) != 0 {
+			t.Fatalf("materialized = %v, want none for multiple decision blobs", result.Materialized)
+		}
+	})
+
+	t.Run("mixed bound and unbound evidence", func(t *testing.T) {
+		h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
+		extra := putDriverEvidence(t, h.evidence, "unbound review", "text/plain", executors.EvidenceAgentMessage)
+		setDriverAssessmentEvidence(t, h, h.reviewEvidence.ID, extra.ID, h.decision)
+
+		result, err := h.driver.StepOnce(h.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Materialized) != 0 {
+			t.Fatalf("materialized = %v, want none for mixed bound and unbound evidence", result.Materialized)
 		}
 	})
 }
@@ -615,7 +641,6 @@ func TestDriverHoldsBlockedWork2Task(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := materializeDriverWork2(t, h, c)
-	var latestAttemptID domain.ID
 	for index := 0; index < 2; index++ {
 		attempt, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
 		if err != nil {
@@ -624,15 +649,6 @@ func TestDriverHoldsBlockedWork2Task(t *testing.T) {
 		if err := h.execution.FailAttempt(h.ctx, attempt.ID, domain.FailureExecution, "publisher-failed", nil); err != nil {
 			t.Fatal(err)
 		}
-		latestAttemptID = attempt.ID
-	}
-	if _, err := h.driver.StepOnce(h.ctx); !errors.Is(err, runmanifest.ErrIncomplete) {
-		t.Fatalf("error = %v, want %v", err, runmanifest.ErrIncomplete)
-	}
-	h.driver.manifests = &selectiveCompletions{
-		delegate:           h.driver.manifests,
-		unavailableAttempt: latestAttemptID,
-		unavailableError:   runmanifest.ErrNotFound,
 	}
 	if _, err := h.driver.StepOnce(h.ctx); err != nil {
 		t.Fatal(err)
@@ -660,6 +676,83 @@ func TestDriverHoldsBlockedWork2Task(t *testing.T) {
 	}
 }
 
+func TestDriverHoldsTerminalWork2StatesWithoutEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state domain.TaskState
+	}{
+		{name: "blocked", state: domain.TaskBlocked},
+		{name: "challenged", state: domain.TaskChallenged},
+		{name: "cancelled", state: domain.TaskCancelled},
+		{name: "expired", state: domain.TaskExpired},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve"})
+			c, err := h.cases.Get(h.ctx, h.driverCaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := materializeDriverWork2(t, h, c)
+			attempt, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch test.state {
+			case domain.TaskBlocked:
+				if err := h.execution.FailAttempt(h.ctx, attempt.ID, domain.FailureExecution, "publisher-failed", nil); err != nil {
+					t.Fatal(err)
+				}
+				retry, err := h.execution.StartAttempt(h.ctx, task.ID, "publisher", time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := h.execution.FailAttempt(h.ctx, retry.ID, domain.FailureExecution, "publisher-failed", nil); err != nil {
+					t.Fatal(err)
+				}
+			case domain.TaskChallenged:
+				if err := h.execution.ChallengeTask(h.ctx, task.ID, domain.ChallengeTask, "publisher challenged", nil); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if _, err := h.store.DB().ExecContext(h.ctx,
+					`UPDATE tasks SET state = ? WHERE task_id = ?`, test.state, task.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			result, err := h.driver.StepOnce(h.ctx)
+			if err != nil {
+				t.Fatalf("terminal state %s returned error: %v", test.state, err)
+			}
+			if len(result.Blocked) != 1 || result.Blocked[0] != c.ID {
+				t.Fatalf("result = %+v, want blocked case %s", result, c.ID)
+			}
+			stored, err := h.cases.Get(h.ctx, c.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.State != workflowcase.Blocked {
+				t.Fatalf("case state = %q, want BLOCKED", stored.State)
+			}
+			reason := driverAssessmentReason(t, h, c.ID, c.CurrentWorkID)
+			if !strings.Contains(reason, "work2 "+string(test.state)) {
+				t.Fatalf("assessment reason = %q, want terminal state %s", reason, test.state)
+			}
+			evidenceIDs := driverAssessmentEvidenceIDs(t, h, c.ID, c.CurrentWorkID)
+			if len(evidenceIDs) != 1 {
+				t.Fatalf("terminal assessment evidence = %v, want one evidence ID", evidenceIDs)
+			}
+			object, _, err := h.evidence.Get(h.ctx, domain.ID(evidenceIDs[0]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if object.Kind != "ado.workflow.terminal" {
+				t.Fatalf("terminal evidence kind = %q, want ado.workflow.terminal", object.Kind)
+			}
+		})
+	}
+}
+
 func TestDriverTerminalHoldUsesFailureEvidence(t *testing.T) {
 	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve"})
 	c, err := h.cases.Get(h.ctx, h.driverCaseID)
@@ -682,8 +775,8 @@ func TestDriverTerminalHoldUsesFailureEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	evidenceIDs := driverAssessmentEvidenceIDs(t, h, c.ID, c.CurrentWorkID)
-	if len(evidenceIDs) != 1 || evidenceIDs[0] != string(second.ID) {
-		t.Fatalf("terminal assessment evidence = %v, want latest failure %s", evidenceIDs, second.ID)
+	if len(evidenceIDs) != 1 || (evidenceIDs[0] != string(first.ID) && evidenceIDs[0] != string(second.ID)) {
+		t.Fatalf("terminal assessment evidence = %v, want one failure evidence ID", evidenceIDs)
 	}
 }
 

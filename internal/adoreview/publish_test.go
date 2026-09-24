@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SofiaFlux/summa42/internal/adoeffects"
 	"github.com/SofiaFlux/summa42/internal/domain"
 	"github.com/SofiaFlux/summa42/internal/evidence"
 	"github.com/SofiaFlux/summa42/internal/executors"
@@ -209,6 +210,55 @@ func TestPublishCommentsDispatchesComments(t *testing.T) {
 		}
 	}
 	assertPublishEvidence(t, result, "{\"slot\":\"ado.pr.comment:proj/shop#1:a:b:0\",\"operation\":\"op-1\",\"state\":\"CONFIRMED_EFFECT\"}\n{\"slot\":\"ado.pr.comment:proj/shop#1:a:b:1\",\"operation\":\"op-2\",\"state\":\"CONFIRMED_EFFECT\"}")
+}
+
+func TestPublishCommentLookupUsesIndexedMarker(t *testing.T) {
+	payload := PublishPayload{CaseID: "case-1", WorkID: "work-1", Project: "proj", Repo: "shop", PR: 1, Revision: "a:b"}
+	decision := ReviewDecision{Action: DecisionCommentAction, Comments: []DecisionComment{
+		{Path: "a.go", Line: 1, Body: "first"},
+		{Path: "b.go", Line: 2, Body: "second"},
+	}}
+	intents, err := buildPublishIntents(payload, decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstMarker := "[summa42:case-1:work-1:0]"
+	provider, err := adoeffects.NewCommentProvider(adoeffects.Config{Command: "/bin/true", Organization: "Contoso"}, func(context.Context, string, any) (any, error) {
+		return map[string]any{"threads": []any{map[string]any{
+			"threadId": "thread-1",
+			"comments": []any{map[string]any{"content": "first\n" + firstMarker}},
+		}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, intent := range intents {
+		canonical, err := provider.CanonicalIntent(intent.intent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var comment adoeffects.CommentIntent
+		if err := json.Unmarshal(canonical, &comment); err != nil {
+			t.Fatal(err)
+		}
+		wantMarker := firstMarker
+		if index == 1 {
+			wantMarker = "[summa42:case-1:work-1:1]"
+		}
+		if comment.Marker != wantMarker {
+			t.Fatalf("comment[%d] marker = %q, want %q", index, comment.Marker, wantMarker)
+		}
+		outcome, err := provider.LookupOutcome(context.Background(), operations.ProviderDispatchRequest{CanonicalIntent: canonical})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 && outcome.State != domain.OperationConfirmedEffect {
+			t.Fatalf("first lookup = %q, want CONFIRMED_EFFECT", outcome.State)
+		}
+		if index == 1 && outcome.State != domain.OperationOutcomeUnknown {
+			t.Fatalf("second lookup = %q, want OUTCOME_UNKNOWN", outcome.State)
+		}
+	}
 }
 
 func TestPublishCommentsSkipsApprove(t *testing.T) {

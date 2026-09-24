@@ -197,7 +197,6 @@ func buildPublishIntents(payload PublishPayload, decision ReviewDecision) ([]pub
 	if err := validatePublishDecision(decision); err != nil {
 		return nil, err
 	}
-	marker := "[summa42:" + payload.CaseID + ":" + payload.WorkID + "]"
 	intents := make([]publishIntent, 0, len(decision.Comments)+1)
 	for index, comment := range decision.Comments {
 		path := strings.TrimSpace(comment.Path)
@@ -210,7 +209,8 @@ func buildPublishIntents(payload PublishPayload, decision ReviewDecision) ([]pub
 			provider: commentProviderName,
 			intent: adoeffects.CommentIntent{
 				Project: payload.Project, Repository: payload.Repo, PR: payload.PR,
-				Path: path, Line: comment.Line, Body: body, Marker: marker,
+				Path: path, Line: comment.Line, Body: body,
+				Marker: fmt.Sprintf("[summa42:%s:%s:%d]", payload.CaseID, payload.WorkID, index),
 			},
 		})
 	}
