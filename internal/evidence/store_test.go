@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SofiaFlux/summa42/internal/domain"
 	state "github.com/SofiaFlux/summa42/internal/state/sqlite"
 	"github.com/SofiaFlux/summa42/internal/testutil"
 )
@@ -99,5 +100,55 @@ func TestPutDeduplicatesPhysicalBlobByContentHash(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("physical blob count = %d, want 1", len(entries))
+	}
+}
+
+func TestGetRoundTripsPutContent(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := state.Open(ctx, filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.DB().Close()
+	clk := testutil.NewClock(time.Date(2026, 9, 15, 14, 0, 0, 0, time.UTC))
+	evidenceStore, err := New(store, filepath.Join(dir, "evidence"), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := evidenceStore.Put(ctx, strings.NewReader(`{"a":1}`), Metadata{MediaType: "application/json", Kind: "ado.review.decision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, data, err := evidenceStore.Get(ctx, object.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"a":1}` {
+		t.Fatalf("data = %q", data)
+	}
+	if loaded.ID != object.ID || loaded.ContentHash != object.ContentHash || loaded.MediaType != "application/json" || loaded.Kind != "ado.review.decision" || loaded.SizeBytes != object.SizeBytes {
+		t.Fatalf("loaded = %+v, want %+v", loaded, object)
+	}
+	if loaded.CreatedAt.IsZero() {
+		t.Fatal("created at is zero")
+	}
+}
+
+func TestGetUnknownIDErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := state.Open(ctx, filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.DB().Close()
+	clk := testutil.NewClock(time.Date(2026, 9, 15, 14, 0, 0, 0, time.UTC))
+	evidenceStore, err := New(store, filepath.Join(dir, "evidence"), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := evidenceStore.Get(ctx, domain.NewID("evidence")); err == nil {
+		t.Fatal("expected error for unknown evidence ID")
 	}
 }

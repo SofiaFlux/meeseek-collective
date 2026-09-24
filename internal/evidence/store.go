@@ -3,6 +3,7 @@ package evidence
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -129,6 +130,36 @@ func (s *Store) Put(ctx context.Context, r io.Reader, metadata Metadata) (Eviden
 		return EvidenceObject{}, err
 	}
 	return object, nil
+}
+
+func (s *Store) Get(ctx context.Context, id domain.ID) (EvidenceObject, []byte, error) {
+	if s == nil || s.state == nil {
+		return EvidenceObject{}, nil, errors.New("evidence store is not configured")
+	}
+	var object EvidenceObject
+	var createdAt string
+	object.ID = id
+	if err := s.state.DB().QueryRowContext(ctx,
+		`SELECT content_hash, media_type, kind, size_bytes, created_at FROM evidence_objects WHERE evidence_id = ?`, id,
+	).Scan(&object.ContentHash, &object.MediaType, &object.Kind, &object.SizeBytes, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EvidenceObject{}, nil, fmt.Errorf("evidence %q not found", id)
+		}
+		return EvidenceObject{}, nil, err
+	}
+	var err error
+	if object.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+		return EvidenceObject{}, nil, fmt.Errorf("parse evidence timestamp: %w", err)
+	}
+	path := filepath.Join(s.root, "blobs", "sha256", object.ContentHash[:2], object.ContentHash)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return EvidenceObject{}, nil, fmt.Errorf("read evidence blob: %w", err)
+	}
+	if err := verifyHash(path, object.ContentHash); err != nil {
+		return EvidenceObject{}, nil, fmt.Errorf("verify evidence blob: %w", err)
+	}
+	return object, data, nil
 }
 
 func persistBlob(tempPath, blobPath, expectedHash string, expectedSize int64) error {
