@@ -51,6 +51,23 @@ CREATE TABLE workflow_verifications (
 PRAGMA foreign_keys = ON;
 
 -- +goose Down
+CREATE TEMP TABLE IF NOT EXISTS workflow_00015_closed_case_guard (
+    closed_case_count INTEGER NOT NULL
+);
+
+-- +goose StatementBegin
+CREATE TEMP TRIGGER IF NOT EXISTS workflow_00015_closed_case_guard
+BEFORE INSERT ON workflow_00015_closed_case_guard
+WHEN EXISTS (SELECT 1 FROM workflow_cases WHERE state = 'CLOSED')
+BEGIN
+    SELECT RAISE(ABORT, 'cannot roll back 00015: closed workflow cases exist');
+END;
+-- +goose StatementEnd
+
+INSERT INTO workflow_00015_closed_case_guard (closed_case_count)
+SELECT count(*) FROM workflow_cases WHERE state = 'CLOSED';
+DROP TABLE workflow_00015_closed_case_guard;
+
 PRAGMA foreign_keys = OFF;
 DROP TABLE workflow_verifications;
 

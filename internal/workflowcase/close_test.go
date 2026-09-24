@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/SofiaFlux/summa42/internal/domain"
+	"github.com/SofiaFlux/summa42/internal/purpose"
+	state "github.com/SofiaFlux/summa42/internal/state/sqlite"
+	"github.com/SofiaFlux/summa42/internal/testutil"
 	"github.com/SofiaFlux/summa42/internal/workflow"
 )
 
@@ -53,6 +58,127 @@ func workflowVerificationCount(t *testing.T, svc *Service, ctx context.Context, 
 		t.Fatal(err)
 	}
 	return count
+}
+
+func concurrentCloseFixture(t *testing.T) (*Service, *Service, context.Context, Case) {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "concurrent-close.db")
+	firstStore, err := state.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = firstStore.DB().Close() })
+	secondStore, err := state.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = secondStore.DB().Close() })
+
+	clk := testutil.NewClock(time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC))
+	firstPurposes := purpose.New(firstStore, clk)
+	missionID, err := firstPurposes.CreateMission(ctx, "Review incoming work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := New(firstStore, clk, firstPurposes)
+	initial, err := first.Ensure(ctx, sampleObservation(missionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := first.Assess(ctx, AssessmentRequest{
+		CaseID: initial.ID, WorkID: initial.CurrentWorkID, RemainingBudget: 4, ProgressSignature: "ready",
+		Assessment: workflow.Assessment{Verdict: workflow.Ready, EvidenceIDs: []string{"ready-evidence"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := New(secondStore, clk, purpose.New(secondStore, clk))
+	return first, second, ctx, ready.Case
+}
+
+func TestCloseConcurrentReplay(t *testing.T) {
+	t.Run("same request", func(t *testing.T) {
+		first, second, ctx, ready := concurrentCloseFixture(t)
+		insertWorkflowEvidence(t, first, ctx, "verify-a", "verify-b")
+		request := closeVerificationRequest(ready)
+		start := make(chan struct{})
+		results := make(chan struct {
+			record VerificationRecord
+			err    error
+		}, 2)
+		var wg sync.WaitGroup
+		for _, svc := range []*Service{first, second} {
+			wg.Add(1)
+			go func(svc *Service) {
+				defer wg.Done()
+				<-start
+				record, err := svc.Close(ctx, request)
+				results <- struct {
+					record VerificationRecord
+					err    error
+				}{record: record, err: err}
+			}(svc)
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		var records []VerificationRecord
+		for result := range results {
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			records = append(records, result.record)
+		}
+		if len(records) != 2 || !reflect.DeepEqual(records[0], records[1]) {
+			t.Fatalf("concurrent replay records = %+v, want one identical record", records)
+		}
+		if workflowVerificationCount(t, first, ctx, ready.ID) != 1 {
+			t.Fatal("concurrent replay inserted another verification")
+		}
+	})
+
+	t.Run("snapshot drift", func(t *testing.T) {
+		first, second, ctx, ready := concurrentCloseFixture(t)
+		insertWorkflowEvidence(t, first, ctx, "verify-a", "verify-b")
+		firstRequest := closeVerificationRequest(ready)
+		secondRequest := firstRequest
+		secondRequest.SnapshotHash = "snapshot-hash-2"
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		var wg sync.WaitGroup
+		for index, request := range []VerificationRequest{firstRequest, secondRequest} {
+			wg.Add(1)
+			go func(index int, request VerificationRequest) {
+				defer wg.Done()
+				<-start
+				_, err := []*Service{first, second}[index].Close(ctx, request)
+				results <- err
+			}(index, request)
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		var successes, conflicts int
+		for err := range results {
+			switch {
+			case err == nil:
+				successes++
+			case errors.Is(err, domain.ErrIntentConflict):
+				conflicts++
+			default:
+				t.Fatalf("concurrent drift error = %v", err)
+			}
+		}
+		if successes != 1 || conflicts != 1 {
+			t.Fatalf("concurrent drift results: successes=%d conflicts=%d, want 1 each", successes, conflicts)
+		}
+		if workflowVerificationCount(t, first, ctx, ready.ID) != 1 {
+			t.Fatal("concurrent drift inserted another verification")
+		}
+	})
 }
 
 func TestCloseRecordsVerificationAndClosesCase(t *testing.T) {

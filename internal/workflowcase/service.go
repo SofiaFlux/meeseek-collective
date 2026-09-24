@@ -15,6 +15,8 @@ import (
 	"github.com/SofiaFlux/summa42/internal/purpose"
 	state "github.com/SofiaFlux/summa42/internal/state/sqlite"
 	"github.com/SofiaFlux/summa42/internal/workflow"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type Observation struct {
@@ -226,11 +228,8 @@ func (s *Service) Close(ctx context.Context, request VerificationRequest) (Verif
 
 		existing, err := scanVerification(tx.QueryRowContext(ctx, `SELECT `+verificationColumns+` FROM workflow_verifications WHERE case_id = ?`, request.CaseID))
 		if err == nil {
-			if existing.SnapshotHash != request.SnapshotHash || !equalWorkflowEvidenceIDs(existing.EvidenceIDs, evidenceIDs) {
-				return fmt.Errorf("%w: verification already exists for case %s", domain.ErrIntentConflict, request.CaseID)
-			}
-			result = existing
-			return nil
+			result, err = compareWorkflowVerification(existing, request, evidenceIDs)
+			return err
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -281,9 +280,58 @@ func (s *Service) Close(ctx context.Context, request VerificationRequest) (Verif
 		return nil
 	})
 	if err != nil {
+		if isSQLiteCloseRace(err) {
+			replayed, replayErr := s.replayWorkflowVerification(ctx, request, evidenceIDs)
+			if replayErr == nil {
+				return replayed, nil
+			}
+			if !errors.Is(replayErr, sql.ErrNoRows) {
+				return VerificationRecord{}, fmt.Errorf("close workflow case: %w", replayErr)
+			}
+		}
 		return VerificationRecord{}, fmt.Errorf("close workflow case: %w", err)
 	}
 	return result, nil
+}
+
+func compareWorkflowVerification(existing VerificationRecord, request VerificationRequest, evidenceIDs []domain.ID) (VerificationRecord, error) {
+	if existing.SnapshotHash != request.SnapshotHash || !equalWorkflowEvidenceIDs(existing.EvidenceIDs, evidenceIDs) {
+		return VerificationRecord{}, fmt.Errorf("%w: verification already exists for case %s", domain.ErrIntentConflict, request.CaseID)
+	}
+	return existing, nil
+}
+
+func (s *Service) replayWorkflowVerification(ctx context.Context, request VerificationRequest, evidenceIDs []domain.ID) (VerificationRecord, error) {
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		record, err := scanVerification(s.store.DB().QueryRowContext(ctx, `SELECT `+verificationColumns+` FROM workflow_verifications WHERE case_id = ?`, request.CaseID))
+		if err == nil {
+			return compareWorkflowVerification(record, request, evidenceIDs)
+		}
+		lastErr = err
+		if !errors.Is(err, sql.ErrNoRows) && !isSQLiteCloseRace(err) {
+			return VerificationRecord{}, err
+		}
+		timer := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return VerificationRecord{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return VerificationRecord{}, lastErr
+}
+
+func isSQLiteCloseRace(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	code := sqliteErr.Code()
+	return code&0xff == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_CONSTRAINT_UNIQUE || strings.Contains(sqliteErr.Error(), "UNIQUE constraint")
 }
 
 func (s *Service) Reject(ctx context.Context, caseID domain.ID, reason string, evidenceIDs []domain.ID) (VerificationRecord, error) {
