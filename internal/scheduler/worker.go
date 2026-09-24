@@ -169,6 +169,11 @@ func (w *Worker) completeExecution(ctx context.Context, task domain.Task, attemp
 		return w.failExecution(ctx, nil, "", task, attempt, result, outcome, errors.New("executor returned no evidence"))
 	}
 	if _, err := w.verification.CompleteAttempt(ctx, attempt.ID, verification.CompletionManifest{EvidenceIDs: ids}); err != nil {
+		if errors.Is(err, domain.ErrStaleAttempt) || errors.Is(err, domain.ErrLeaseInactive) {
+			result.Outcome = StepFailed
+			result.EvidenceIDs = ids
+			return nil
+		}
 		return err
 	}
 	result.Outcome = StepCompleted
@@ -186,6 +191,11 @@ func (w *Worker) failExecution(ctx context.Context, _ executors.Executor, kind s
 		signature = "worker:panic:" + kind + ":" + string(task.ID)
 	}
 	if err := w.execution.FailAttempt(ctx, attempt.ID, domain.FailureExecution, signature, ids); err != nil {
+		if errors.Is(err, domain.ErrStaleAttempt) || errors.Is(err, domain.ErrLeaseInactive) {
+			result.Outcome = StepFailed
+			result.EvidenceIDs = ids
+			return nil
+		}
 		return err
 	}
 	result.Outcome = StepFailed
