@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/SofiaFlux/summa42/internal/adoeffects"
 	"github.com/SofiaFlux/summa42/internal/adomcp"
 	"github.com/SofiaFlux/summa42/internal/adoreview"
 	"github.com/SofiaFlux/summa42/internal/capabilities"
@@ -22,6 +23,7 @@ import (
 	"github.com/SofiaFlux/summa42/internal/feedbackgithub"
 	"github.com/SofiaFlux/summa42/internal/fieldfeedback"
 	"github.com/SofiaFlux/summa42/internal/localconfig"
+	"github.com/SofiaFlux/summa42/internal/operations"
 	"github.com/SofiaFlux/summa42/internal/policy"
 	summa42runtime "github.com/SofiaFlux/summa42/internal/runtime"
 	"github.com/SofiaFlux/summa42/internal/scheduler"
@@ -205,6 +207,73 @@ func buildADOProviderFromEnv() (*adomcp.Provider, error) {
 		return nil, errors.New("ADO MCP requires both SUMMA42_ADO_MCP_COMMAND and SUMMA42_ADO_ORGANIZATION")
 	}
 	return adomcp.New(adomcp.Config{Command: command, Organization: organization})
+}
+
+type publishSettings struct {
+	mode        adoreview.PublishMode
+	approvers   []domain.ID
+	riskComment string
+	riskApprove string
+}
+
+func publishSettingsFromEnv() (publishSettings, error) {
+	mode := strings.TrimSpace(os.Getenv("SUMMA42_PUBLISH_MODE"))
+	if mode == "" {
+		mode = string(adoreview.PublishNone)
+	}
+	settings := publishSettings{mode: adoreview.PublishMode(mode)}
+	switch settings.mode {
+	case adoreview.PublishNone, adoreview.PublishComments, adoreview.PublishAll:
+	default:
+		return publishSettings{}, fmt.Errorf("unknown publish mode %q", mode)
+	}
+	for _, approver := range splitCSV(os.Getenv("SUMMA42_PUBLISH_APPROVERS")) {
+		settings.approvers = append(settings.approvers, domain.ID(approver))
+	}
+	settings.riskComment = strings.TrimSpace(os.Getenv("SUMMA42_PUBLISH_RISK_COMMENT"))
+	if settings.riskComment == "" {
+		settings.riskComment = "LOW"
+	}
+	settings.riskApprove = strings.TrimSpace(os.Getenv("SUMMA42_PUBLISH_RISK_APPROVE"))
+	if settings.mode == adoreview.PublishAll && settings.riskApprove == "" {
+		return publishSettings{}, errors.New("publish-all mode requires an explicit approve risk")
+	}
+	return settings, nil
+}
+
+func buildAdoEffectProviders(adoProvider *adomcp.Provider) ([]operations.Provider, error) {
+	if adoProvider == nil {
+		return nil, nil
+	}
+	config := adoeffects.Config{
+		Command:      strings.TrimSpace(os.Getenv("SUMMA42_ADO_MCP_COMMAND")),
+		Organization: strings.TrimSpace(os.Getenv("SUMMA42_ADO_ORGANIZATION")),
+	}
+	read := adoeffects.ReadFunc(adoProvider.Call)
+	commentProvider, err := adoeffects.NewCommentProvider(config, read)
+	if err != nil {
+		return nil, fmt.Errorf("construct ADO comment provider: %w", err)
+	}
+	voteProvider, err := adoeffects.NewVoteProvider(config, read)
+	if err != nil {
+		return nil, fmt.Errorf("construct ADO vote provider: %w", err)
+	}
+	return []operations.Provider{commentProvider, voteProvider}, nil
+}
+
+func buildPublishFromEnv(adoProvider *adomcp.Provider) (publishSettings, []operations.Provider, error) {
+	settings, err := publishSettingsFromEnv()
+	if err != nil {
+		return publishSettings{}, nil, err
+	}
+	if adoProvider == nil {
+		return publishSettings{}, nil, nil
+	}
+	providers, err := buildAdoEffectProviders(adoProvider)
+	if err != nil {
+		return publishSettings{}, nil, err
+	}
+	return settings, providers, nil
 }
 
 func splitCSV(raw string) []string {
@@ -471,6 +540,13 @@ func runWorker(ctx context.Context, args []string) error {
 	if adoProvider != nil {
 		capabilityProviders = append(capabilityProviders, adoProvider)
 	}
+	publishCfg, operationProviders, err := buildPublishFromEnv(adoProvider)
+	if err != nil {
+		return err
+	}
+	if adoProvider == nil {
+		fmt.Fprintln(os.Stderr, "executor kind ado-publish is not registered: SUMMA42_ADO_MCP_COMMAND and SUMMA42_ADO_ORGANIZATION are not set")
+	}
 
 	runtimeCfg := summa42runtime.Config{
 		StatePath:           cfg.DatabasePath,
@@ -480,6 +556,7 @@ func runWorker(ctx context.Context, args []string) error {
 		FieldFeedback:       cfg.FieldFeedback,
 		FeedbackSink:        feedbackSink,
 		PolicyEngine:        material.policyEngine,
+		OperationProviders:  operationProviders,
 		CapabilityProviders: capabilityProviders,
 	}
 	copilotExecutors, err := buildCopilotExecutorFromEnv()
@@ -504,6 +581,20 @@ func runWorker(ctx context.Context, args []string) error {
 		return fmt.Errorf("open Box runtime: %w", err)
 	}
 	defer box.Close()
+	if adoProvider != nil {
+		publisher, err := adoreview.NewPublisher(adoreview.PublishConfig{
+			Mode:           publishCfg.mode,
+			Operations:     box.Operations,
+			Evidence:       box.Evidence,
+			OwnerApprovals: publishCfg.approvers,
+			RiskComment:    publishCfg.riskComment,
+			RiskApprove:    publishCfg.riskApprove,
+		})
+		if err != nil {
+			return fmt.Errorf("construct ado-publish executor: %w", err)
+		}
+		box.Executors["ado-publish"] = publisher
+	}
 	if err := assessConfiguredProviders(ctx, box.Capabilities, adoProvider); err != nil {
 		return fmt.Errorf("assess configured ADO capability provider: %w", err)
 	}
