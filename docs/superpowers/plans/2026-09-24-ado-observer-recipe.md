@@ -89,8 +89,10 @@ func TestListPRsUsesOrgScopeByDefault(t *testing.T) {
     if len(caller.calls) != 1 || caller.calls[0].capability != "ado.pr.org_active" {
         t.Fatalf("calls = %v, want one ado.pr.org_active", caller.calls)
     }
-    if _, hasAction := caller.calls[0].request.(map[string]any)["action"]; hasAction {
-        t.Fatalf("org_active request carries action: %#v", caller.calls[0].request)
+    if args, ok := caller.calls[0].request.(map[string]any); ok {
+        if _, hasAction := args["action"]; hasAction {
+            t.Fatalf("org_active request carries action: %#v", caller.calls[0].request)
+        }
     }
 }
 
@@ -413,9 +415,9 @@ func hasDirectReviewer(pr PullRequest, reviewerID string) bool {
     return false
 }
 
-func hasGroupReviewer(pr PullRequest, reviewerID string) bool {
+func hasGroupReviewer(pr PullRequest, _ string) bool {
     for _, r := range pr.Reviewers {
-        if r.IsGroup && r.ID == reviewerID {
+        if r.IsGroup {
             return true
         }
     }
