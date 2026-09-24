@@ -19,7 +19,7 @@ adds PR discovery; the observer/recipe slice follows.
 | `ado.pr.org_active` | `repo_pull_request_org` | none (filter args only) |
 | `ado.pr.threads` | `repo_pull_request_thread` | `list`, `list_comments` |
 | `ado.pr.file` | `repo_file` | `get_content`, `list_directory` |
-| `ado.build.status` | `pipelines_build` | `get_status` |
+| `ado.build.status` | `pipelines_build` | `get_status` (only; `list`/`get_changes` are explicit non-goals — the recipe needs a single status signal for its gates) |
 
 Notes:
 - The current server dispatches by tool + action (like `wit_work_item`), not by
@@ -31,12 +31,25 @@ Notes:
   `ado.pr.list` is the precise per-project/repository query (e.g. reviewer filter).
   Exact filter field names are validated live later; the provider forwards them.
 
-## Read-only enforcement (existing pattern, unchanged)
+## Read-only enforcement
 
 - `toolFor` maps capability → MCP tool; anything else errors before dial.
-- `Call` validates `action` against the table above, rejects a `tool` override
-  field, and forwards remaining args untouched. No `*_write` tool is ever mapped.
+- Actions bind **per capability**, not globally: the plan must introduce
+  `map[capability][]allowedActions` (or per-capability validators) and `Call`
+  must check `request.action ∈ allowed[capability]`. The current global
+  `readAction` is work-item-only and must NOT be extended with PR/file/build
+  actions — `ado.pr.list` and `ado.pr.get` share the `repo_pull_request` tool,
+  so a global list would let `ado.pr.get` accept `action=list` and break
+  capability scoping.
+- Each `Call` branch replicates the `tool`-override rejection (`tool` key
+  present → error); the guard is per-branch, not global.
+- `ado.pr.org_active` accepts nil or a `map[string]any` with **no** `action`
+  key; any `action` present is rejected, `tool` is always rejected, remaining
+  filter args forward untouched (filter field names are not validated here;
+  live validation later).
 - `Advertise`/`Probe` gain the six capabilities; the existing two are untouched.
+- Paging: the provider performs one `CallTool` per `Call`; page iteration is the
+  observer's job via repeated `Call`s (parent requires scanning every page).
 
 ## Testing
 
