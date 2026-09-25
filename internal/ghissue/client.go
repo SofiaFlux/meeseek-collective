@@ -1,0 +1,257 @@
+package ghissue
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"runtime"
+	"strings"
+	"time"
+)
+
+const (
+	defaultAPIBaseURL = "https://api.github.com"
+	defaultAPIHost    = "api.github.com"
+	defaultTimeout    = 20 * time.Second
+	defaultMaxBytes   = 1 << 20
+	userAgent         = "summa42-ghissue/1"
+)
+
+// rejectRedirect keeps bearer credentials pinned to the configured origin:
+// any 3xx is surfaced as a non-200 response instead of being followed.
+func rejectRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// Config configures the read-only client. Zero Timeout or MaxResponseBytes
+// falls back to package defaults.
+type Config struct {
+	BaseURL          string
+	Repository       string
+	TokenFile        string
+	Timeout          time.Duration
+	MaxResponseBytes int
+}
+
+// Client performs GET requests only; no write method exists on the type.
+type Client struct {
+	baseURL          *url.URL
+	repository       string
+	tokenFile        string
+	http             *http.Client
+	maxResponseBytes int
+}
+
+func New(cfg Config) (*Client, error) {
+	repository := strings.TrimSpace(cfg.Repository)
+	if !repositoryPattern.MatchString(repository) {
+		return nil, errors.New("GitHub issues repository must be owner/name")
+	}
+	for _, part := range strings.Split(repository, "/") {
+		if part == "." || part == ".." {
+			return nil, errors.New("GitHub issues repository must be owner/name")
+		}
+	}
+	base := strings.TrimSpace(cfg.BaseURL)
+	if base == "" {
+		base = defaultAPIBaseURL
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
+		return nil, errors.New("GitHub API base URL must be an absolute HTTP(S) URL without user info")
+	}
+	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return nil, errors.New("GitHub API base URL must not carry a path, query, or fragment")
+	}
+	parsed.Path = ""
+	host := strings.TrimSpace(parsed.Hostname())
+	loopback := strings.EqualFold(host, "localhost") || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
+	if parsed.Scheme != "https" {
+		if parsed.Scheme != "http" || !loopback {
+			return nil, errors.New("GitHub API base URL must use HTTPS except for loopback test endpoints")
+		}
+	} else if !loopback && !strings.EqualFold(host, defaultAPIHost) {
+		return nil, errors.New("GitHub API base URL host must be api.github.com")
+	}
+	tokenFile := strings.TrimSpace(cfg.TokenFile)
+	if tokenFile == "" {
+		return nil, errors.New("GitHub issues token file path is required")
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	limit := cfg.MaxResponseBytes
+	if limit <= 0 {
+		limit = defaultMaxBytes
+	}
+	return &Client{
+		baseURL:          parsed,
+		repository:       repository,
+		tokenFile:        tokenFile,
+		http:             &http.Client{Timeout: timeout, CheckRedirect: rejectRedirect},
+		maxResponseBytes: limit,
+	}, nil
+}
+
+// Name returns the configured repository, used to qualify object IDs.
+func (c *Client) Name() string {
+	return c.repository
+}
+
+func (c *Client) ListIssues(ctx context.Context, cursor string) ([]any, []Unparseable, string, error) {
+	if ctx == nil {
+		return nil, nil, "", errors.New("GitHub issues context is required")
+	}
+	target, err := c.pageURL(cursor)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	token, err := readTokenFile(c.tokenFile)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("build GitHub issues request: %w", err)
+	}
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("User-Agent", userAgent)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("list GitHub issues: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, nil, "", fmt.Errorf("list GitHub issues: unexpected status %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, int64(c.maxResponseBytes)+1))
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("read GitHub issues response: %w", err)
+	}
+	if len(body) > c.maxResponseBytes {
+		return nil, nil, "", fmt.Errorf("GitHub issues response exceeds %d bytes", c.maxResponseBytes)
+	}
+	var raw []any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, nil, "", fmt.Errorf("decode GitHub issues response: %w", err)
+	}
+	if raw == nil {
+		return nil, nil, "", errors.New("decode GitHub issues response: expected a JSON array")
+	}
+	next, err := c.nextCursor(response.Header.Get("Link"))
+	if err != nil {
+		return nil, nil, "", err
+	}
+	items := make([]any, 0, len(raw))
+	var unparseable []Unparseable
+	for _, item := range raw {
+		if err := classifyWireItem(item); err != nil {
+			unparseable = append(unparseable, Unparseable{Raw: item})
+			continue
+		}
+		items = append(items, item)
+	}
+	return items, unparseable, next, nil
+}
+
+func (c *Client) pageURL(cursor string) (string, error) {
+	if strings.TrimSpace(cursor) == "" {
+		return c.baseURL.String() + "/repos/" + c.repository + "/issues?state=open&per_page=100", nil
+	}
+	parsed, err := url.Parse(cursor)
+	if err != nil || !parsed.IsAbs() {
+		return "", errors.New("GitHub issues pagination cursor is not an absolute URL")
+	}
+	if parsed.Scheme != c.baseURL.Scheme || parsed.Host != c.baseURL.Host {
+		return "", errors.New("GitHub issues pagination cursor is cross-origin")
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return "", errors.New("GitHub issues pagination cursor is malformed")
+	}
+	if parsed.Path != "/repos/"+c.repository+"/issues" {
+		return "", errors.New("GitHub issues pagination cursor targets another resource")
+	}
+	return parsed.String(), nil
+}
+
+func (c *Client) nextCursor(link string) (string, error) {
+	link = strings.TrimSpace(link)
+	if link == "" {
+		return "", nil
+	}
+	next := ""
+	for _, section := range strings.Split(link, ",") {
+		section = strings.TrimSpace(section)
+		if section == "" {
+			return "", errors.New("GitHub issues Link header has an empty section")
+		}
+		open := strings.Index(section, "<")
+		closing := strings.Index(section, ">")
+		if open != 0 || closing <= open+1 {
+			return "", errors.New("GitHub issues Link header is malformed")
+		}
+		target := section[open+1 : closing]
+		params := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(section[closing+1:]), ";"))
+		isNext := false
+		if params != "" {
+			for _, param := range strings.Split(params, ";") {
+				key, value, found := strings.Cut(strings.TrimSpace(param), "=")
+				if !found || len(value) < 2 || !strings.HasPrefix(value, `"`) || !strings.HasSuffix(value, `"`) {
+					return "", errors.New("GitHub issues Link header parameter is malformed")
+				}
+				if strings.TrimSpace(key) == "rel" && value == `"next"` {
+					isNext = true
+				}
+			}
+		}
+		if !isNext {
+			continue
+		}
+		parsed, err := url.Parse(target)
+		if err != nil || !parsed.IsAbs() {
+			return "", errors.New("GitHub issues next link is malformed")
+		}
+		if parsed.Scheme != c.baseURL.Scheme || parsed.Host != c.baseURL.Host {
+			return "", errors.New("GitHub issues next link is cross-origin")
+		}
+		if parsed.User != nil || parsed.Fragment != "" {
+			return "", errors.New("GitHub issues next link is malformed")
+		}
+		if parsed.Path != "/repos/"+c.repository+"/issues" {
+			return "", errors.New("GitHub issues next link targets another resource")
+		}
+		if next != "" {
+			return "", errors.New("GitHub issues Link header repeats rel=next")
+		}
+		next = parsed.String()
+	}
+	return next, nil
+}
+
+func readTokenFile(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat GitHub issues credential file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("GitHub issues credential path must be a regular file")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("GitHub issues credential file must not be group/world accessible")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read GitHub issues credential file: %w", err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", errors.New("GitHub issues credential file is empty")
+	}
+	return token, nil
+}
