@@ -105,7 +105,8 @@ objects with the expected string field) or the item is `unparseable` — a
 malformed field is never allowed to abort a page. `state` must be
 `open` — closed issues are excluded (token `not-open`) before any other
 maintainer filter. Items carrying `pull_request` are skipped as PRs
-(reason `is-pull-request`, counted in the result). `assignees`/`labels` are
+(counted in `ObserveResult.PullRequestsSkipped`; a PR is not a candidate and
+produces no exclusion row). `assignees`/`labels` are
 normalized to `[]`, deduplicated and sorted case-insensitively; `body`
 defaults to `""`; `updatedAt` in the snapshot is the canonical UTC revision
 string (identical to the case revision).
@@ -131,8 +132,8 @@ acceptance `triage decision recorded for <revision>`.
 
 ## Filter (reason tokens, in this precedence)
 
-1. `is-pull-request` — item carries `pull_request` (counted separately in the
-   result; never a candidate).
+1. item carries `pull_request` — counted in `ObserveResult.PullRequestsSkipped`
+   (never a candidate, no exclusion row).
 2. `unparseable-issue` — missing required fields (one exclusion per bad item;
    parsing continues for the rest of the page — mirror the ADO
    `Unparseable` split).
@@ -190,13 +191,14 @@ and an empty executor map.
 ## Testing
 
 Fake lister + full testutil stack: only maintainer issues become cases; each
-reason token (`is-pull-request`, `unparseable-issue`, `not-open`,
+reason token (`unparseable-issue`, `not-open`,
 `not-maintainer`, `already-assigned`, `held-by-label`); mixed page with
 parsed + unparseable items (both handled, processing continues); revision
 change (`+00:00` → `Z` offset) opens a second case and proves UTC
 normalization; re-poll is a no-op with unchanged snapshot count and identical
 payload (`issueSnapshot` from `Case.ObservationEvidenceID`); cross-repository
-collision test (`repo-a` and `repo-b` issue #1 are distinct cases); grant
+collision test (`owner-a/repo` and `owner-b/repo` issue #7 are distinct
+cases); grant
 validation errors; `case-not-active` for BLOCKED/READY/CLOSED; a scheduler
 test proving an unrelated executor with capacity lacking
 `github.issue.read` never claims the Task (eligible-but-unclaimed); CLI

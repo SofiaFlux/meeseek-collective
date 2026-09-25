@@ -378,6 +378,20 @@ const (
 	TriageFeature      = "feature"
 	TriageUnclassified = "unclassified"
 )
+```
+
+In the same step create `internal/ghissue/results.go` — `ExcludedIssue` is the shared result type used by both `FilterIssues` (this task) and `ObserveOnce` (Task 4), so it must exist for Task 1 to compile:
+
+```go
+package ghissue
+
+// ExcludedIssue records one issue that did not become a case, with its reason
+// token. It is defined once here and reused by observe.go.
+type ExcludedIssue struct {
+	Issue  Issue
+	Reason string
+}
+```
 
 var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
@@ -729,21 +743,8 @@ func nonNil(values []string) []string {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `GOCACHE=/tmp/summa42-full-go-cache go test ./internal/ghissue -count=1`
-Expected: FAIL only on the undefined `ExcludedIssue` type (defined in Task 4). Add a temporary compile shim is FORBIDDEN — instead define `ExcludedIssue` NOW in source.go-adjacent temporary file? No: to keep Task 1 green, move the `ExcludedIssue` definition into Task 1 (new file `internal/ghissue/results.go`) even though observe.go will own the rest of the result types in Task 4. Correct approach: create `internal/ghissue/results.go` in THIS task with exactly:
-
-```go
-package ghissue
-
-// ExcludedIssue records one issue that did not become a case, with its reason
-// token. It is defined once here and reused by observe.go.
-type ExcludedIssue struct {
-	Issue  Issue
-	Reason string
-}
-```
-
-Then re-run: `GOCACHE=/tmp/summa42-full-go-cache go test ./internal/ghissue -count=1` → PASS.
+Run: `gofmt -w internal/ghissue` then `GOCACHE=/tmp/summa42-full-go-cache go test ./internal/ghissue -count=1`
+Expected: PASS. `internal/ghissue/results.go` (created in Step 1) already defines `ExcludedIssue`, so no compile shim and no cross-task dependency is needed.
 
 - [ ] **Step 5: Commit**
 
@@ -1523,7 +1524,7 @@ Expected: FAIL — `svc.CreateTaskWithGuardInTx undefined`.
 
 - [ ] **Step 3: Implement the transaction-aware primitive** — in `internal/execution/service.go`:
 
-Replace the current `insertTask` (lines 444-544) with:
+Replace the current `insertTask` (lines 444-544) with the following three functions. The `insertTaskTx` body is elided (`// ...`) in the block below: that block is a shape reference, not a copy-paste target — the mechanical edit described in the paragraph after it is the authoritative instruction for that body.
 
 ```go
 func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request TaskRequest, guard TaskGuard) (domain.Task, error) {
@@ -1984,7 +1985,7 @@ func TestObserveOnceMissPathLinksTaskToCaseWork(t *testing.T) {
 
 Note on scope: an ADO-side rollback test is not writable without weakening `Config.validate()` (every task-insert failure reachable from a valid Config is already covered by the workflowcase rollback test); the pre-existing suite — including `TestObserveOnceExcludesAndRepairsPartialCase` (hit-path repair of legacy partial cases) and `TestObserveOnceEnsureFailureYieldsExclusion` — must stay green unchanged.
 
-- [ ] **Step 10: Migrate the ADO miss path** — in `internal/adoreview/observe.go`, inside `observeOne`, replace the miss branch (old lines 140-161: `canonical, err := json.Marshal(canonicalEvidence(pr))` … `result.Materialized = append(result.Materialized, task.ID); return nil`) with:
+- [ ] **Step 10: Migrate the ADO miss path** — in `internal/adoreview/observe.go`, inside `observeOne`, replace the miss branch (old lines 138-164: `canonical, err := json.Marshal(canonicalEvidence(pr))` … `result.Materialized = append(result.Materialized, task.ID); return nil`) with:
 
 ```go
 	canonical, err := json.Marshal(canonicalEvidence(pr))
@@ -2944,7 +2945,7 @@ Expected: PASS. If it fails, stop and report: the eligibility guarantee is a spe
 
 - [ ] **Step 5: Implement the CLI** — in `cmd/summa42-box/main.go`:
 
-Add the dispatch block right after the `run-observer` block (old lines 445-451):
+Add the dispatch block right after the `run-observer` block (old lines 446-452):
 
 ```go
 	if len(os.Args) > 1 && os.Args[1] == "run-gh-intake" {
@@ -2956,7 +2957,7 @@ Add the dispatch block right after the `run-observer` block (old lines 445-451):
 	}
 ```
 
-Add these functions after `runObserver` (old line 756):
+Add these functions after `runObserver` (old line 765):
 
 ```go
 func parseGHIntakeFlags(args []string) (ghissue.ObserveConfig, time.Duration, error) {
@@ -3002,7 +3003,7 @@ func parseGHIntakeFlags(args []string) (ghissue.ObserveConfig, time.Duration, er
 	if len(logins) == 0 {
 		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires at least one --maintainer")
 	}
-	if strings.ContainsAny(repository, "/ \t") || !strings.Contains(repository, "/") {
+	if strings.ContainsAny(repository, " \t") || !strings.Contains(repository, "/") {
 		return ghissue.ObserveConfig{}, 0, fmt.Errorf("run-gh-intake repository %q must be owner/name", repository)
 	}
 	if strings.TrimSpace(envelope) == "" {
@@ -3103,7 +3104,7 @@ func runGHIntake(ctx context.Context, args []string) error {
 }
 ```
 
-Add the import `"github.com/SofiaFlux/summa42/internal/ghissue"` to `cmd/summa42-box/main.go`.
+Add `"github.com/SofiaFlux/summa42/internal/ghissue"` to the import block of `cmd/summa42-box/main.go` in sorted position (after `internal/fieldfeedback`, before `internal/localconfig`), then run `gofmt -w cmd/summa42-box/main.go`.
 
 - [ ] **Step 6: Run focused tests to verify they pass**
 
