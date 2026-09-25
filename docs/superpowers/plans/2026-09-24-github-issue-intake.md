@@ -110,10 +110,21 @@ func TestParseIssueRejectsMissingRequiredFields(t *testing.T) {
 		"user.login": func(m map[string]any) { m["user"] = map[string]any{} },
 		"updated_at": func(m map[string]any) { delete(m, "updated_at") },
 		"html_url":   func(m map[string]any) { delete(m, "html_url") },
-		"bad number": func(m map[string]any) { m["number"] = "seven" },
-		"bad update": func(m map[string]any) { m["updated_at"] = "yesterday" },
-		"bad author": func(m map[string]any) { m["user"] = "maint" },
-		"bad labels": func(m map[string]any) { m["labels"] = "bug" },
+		"bad number":       func(m map[string]any) { m["number"] = "seven" },
+		"zero number":      func(m map[string]any) { m["number"] = float64(0) },
+		"negative number":  func(m map[string]any) { m["number"] = float64(-3) },
+		"fractional number": func(m map[string]any) { m["number"] = 1.5 },
+		"blank title":      func(m map[string]any) { m["title"] = "   " },
+		"blank state":      func(m map[string]any) { m["state"] = "" },
+		"blank url":        func(m map[string]any) { m["html_url"] = " " },
+		"blank login":      func(m map[string]any) { m["user"] = map[string]any{"login": " "} },
+		"bad update":       func(m map[string]any) { m["updated_at"] = "yesterday" },
+		"bad author":       func(m map[string]any) { m["user"] = "maint" },
+		"bad labels":       func(m map[string]any) { m["labels"] = "bug" },
+		"bad label entry":  func(m map[string]any) { m["labels"] = []any{map[string]any{"name": 7}} },
+		"bad assignees":    func(m map[string]any) { m["assignees"] = "maint" },
+		"bad assignee entry": func(m map[string]any) { m["assignees"] = []any{"maint"} },
+		"bad body":         func(m map[string]any) { m["body"] = 7 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -136,8 +147,8 @@ func TestParseIssueFlagsPullRequests(t *testing.T) {
 	}
 }
 
-func TestNormalizeNamesDeduplicatesAndSortsCaseInsensitively(t *testing.T) {
-	got := normalizeNames([]string{"Beta", "beta", " alpha ", ""})
+func TestNormalizeTokensDeduplicatesAndSortsCaseInsensitively(t *testing.T) {
+	got := normalizeTokens([]string{"Beta", "beta", " alpha ", ""})
 	if !reflect.DeepEqual(got, []string{"alpha", "Beta"}) {
 		t.Fatalf("names = %v", got)
 	}
@@ -416,7 +427,7 @@ func classifyWireItem(item any) error {
 		return err
 	}
 	for _, key := range []string{"title", "state", "updated_at", "html_url"} {
-		if _, err := stringField(object, key); err != nil {
+		if _, err := requiredString(object, key); err != nil {
 			return err
 		}
 	}
@@ -424,10 +435,20 @@ func classifyWireItem(item any) error {
 	if !ok {
 		return errors.New("issue item has no user object")
 	}
-	if _, err := stringField(author, "login"); err != nil {
+	if _, err := requiredString(author, "login"); err != nil {
 		return err
 	}
-	updated, err := stringField(object, "updated_at")
+	if raw, present := object["body"]; present && raw != nil {
+		if _, err := requiredString(object, "body"); err != nil {
+			return err
+		}
+	}
+	for _, list := range []struct{ key, field string }{{"assignees", "login"}, {"labels", "name"}} {
+		if _, err := nameList(object[list.key], list.field); err != nil {
+			return err
+		}
+	}
+	updated, err := requiredString(object, "updated_at")
 	if err != nil {
 		return err
 	}
@@ -443,11 +464,11 @@ func ParseIssue(item any, repository string) (Issue, error) {
 	}
 	object := item.(map[string]any)
 	number, _ := numberOf(object)
-	title, _ := stringField(object, "title")
-	state, _ := stringField(object, "state")
-	url, _ := stringField(object, "html_url")
-	updated, _ := stringField(object, "updated_at")
-	author, _ := stringField(object["user"].(map[string]any), "login")
+	title, _ := requiredString(object, "title")
+	state, _ := requiredString(object, "state")
+	url, _ := requiredString(object, "html_url")
+	updated, _ := requiredString(object, "updated_at")
+	author, _ := requiredString(object["user"].(map[string]any), "login")
 	body := ""
 	if raw, ok := object["body"]; ok && raw != nil {
 		value, err := stringField(object, "body")
@@ -595,18 +616,41 @@ func CanonicalSnapshot(issue Issue) ([]byte, error) {
 }
 
 func numberOf(object map[string]any) (int64, error) {
+	var number int64
 	switch value := object["number"].(type) {
 	case float64:
-		return int64(value), nil
+		number = int64(value)
+		if float64(number) != value {
+			return 0, errors.New("issue number is not an integer")
+		}
 	case int64:
-		return value, nil
+		number = value
 	case json.Number:
-		return value.Int64()
+		parsed, err := value.Int64()
+		if err != nil {
+			return 0, errors.New("issue number is not an integer")
+		}
+		number = parsed
 	default:
 		return 0, errors.New("issue number is not numeric")
 	}
+	if number <= 0 {
+		return 0, errors.New("issue number is not positive")
+	}
+	return number, nil
 }
 
+// requiredString reads a field that must be present and non-blank.
+func requiredString(object map[string]any, key string) (string, error) {
+	value, ok := object[key].(string)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("issue %q is not a non-blank string", key)
+	}
+	return value, nil
+}
+
+// stringField reads a field that must be a string but may be blank; blank
+// values are dropped by normalizeTokens.
 func stringField(object map[string]any, key string) (string, error) {
 	value, ok := object[key].(string)
 	if !ok {
@@ -635,10 +679,10 @@ func nameList(value any, key string) ([]string, error) {
 		}
 		names = append(names, name)
 	}
-	return normalizeNames(names), nil
+	return normalizeTokens(names), nil
 }
 
-func normalizeNames(values []string) []string {
+func normalizeTokens(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	out := make([]string, 0, len(values))
 	for _, value := range values {
@@ -819,8 +863,10 @@ func TestListIssuesFollowsLinkPagination(t *testing.T) {
 }
 
 func TestListIssuesSplitsUnparseableItems(t *testing.T) {
+	malformedLabels := `{"number":8,"title":"t","state":"open","user":{"login":"maint"},` +
+		`"updated_at":"2026-09-24T10:00:00Z","html_url":"https://github.com/o/r/issues/8","labels":"bug"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("[" + validIssueJSON + `,{"number":8}]`))
+		_, _ = w.Write([]byte("[" + validIssueJSON + `,{"number":8},` + malformedLabels + `]`))
 	}))
 	defer server.Close()
 	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
@@ -831,8 +877,41 @@ func TestListIssuesSplitsUnparseableItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || len(bad) != 1 || bad[0].Raw == nil {
+	if len(items) != 1 || len(bad) != 2 {
 		t.Fatalf("items=%d bad=%d", len(items), len(bad))
+	}
+	for _, entry := range bad {
+		if entry.Raw == nil {
+			t.Fatal("unparseable entry lost its raw item")
+		}
+	}
+}
+
+func TestListIssuesRejectsNonArrayBodies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("null"))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := client.ListIssues(context.Background(), ""); err == nil {
+		t.Fatal("expected error for null body")
+	}
+}
+
+func TestListIssuesRejectsRedirects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://evil.example/repos/o/r/issues", http.StatusFound)
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := client.ListIssues(context.Background(), ""); err == nil {
+		t.Fatal("expected error for redirect response")
 	}
 }
 
@@ -845,6 +924,11 @@ func TestNewRejectsUnsafeConfiguration(t *testing.T) {
 		{BaseURL: "https://user:pass@api.github.com", Repository: "o/r", TokenFile: token},
 		{BaseURL: "http://api.github.com", Repository: "o/r", TokenFile: token},
 		{BaseURL: "https://api.github.com", Repository: "o/r", TokenFile: " "},
+		{BaseURL: "https://evil.example", Repository: "o/r", TokenFile: token},
+		{BaseURL: "https://api.github.com/v3", Repository: "o/r", TokenFile: token},
+		{BaseURL: "https://api.github.com?x=1", Repository: "o/r", TokenFile: token},
+		{BaseURL: "https://api.github.com#frag", Repository: "o/r", TokenFile: token},
+		{BaseURL: "https://ghe.example", Repository: "o/r", TokenFile: token},
 	}
 	for i, cfg := range cases {
 		if _, err := New(cfg); err == nil {
@@ -918,16 +1002,20 @@ func TestListIssuesEnforcesResponseCap(t *testing.T) {
 }
 
 func TestListIssuesRejectsUnsafeLinkHeaders(t *testing.T) {
-	links := map[string]string{
-		"malformed":      `<>; rel="next"`,
-		"cross origin":   `<http://other.example/repos/o/r/issues?page=2>; rel="next"`,
-		"unquoted rel":   `<https://api.github.com/x>; rel=next`,
-		"empty section":  `,`,
-		"relative target": `</repos/o/r/issues?page=2>; rel="next"`,
+	links := map[string]func(origin string) string{
+		"malformed":        func(string) string { return `<>; rel="next"` },
+		"cross origin":     func(string) string { return `<http://other.example/repos/o/r/issues?page=2>; rel="next"` },
+		"unquoted rel":     func(origin string) string { return `<` + origin + `/repos/o/r/issues?page=2>; rel=next` },
+		"empty section":    func(string) string { return `,` },
+		"relative target":  func(string) string { return `</repos/o/r/issues?page=2>; rel="next"` },
+		"userinfo target":  func(origin string) string { return `<http://user:pass@` + strings.TrimPrefix(origin, "http://") + `/repos/o/r/issues?page=2>; rel="next"` },
+		"fragment target":  func(origin string) string { return `<` + origin + `/repos/o/r/issues?page=2#frag>; rel="next"` },
+		"foreign resource": func(origin string) string { return `<` + origin + `/repos/o/other/issues?page=2>; rel="next"` },
 	}
-	for name, link := range links {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Link", link)
+	for name, build := range links {
+		var server *httptest.Server
+		server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Link", build(server.URL))
 			_, _ = w.Write([]byte("[]"))
 		}))
 		client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
@@ -939,6 +1027,38 @@ func TestListIssuesRejectsUnsafeLinkHeaders(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: expected error", name)
 		}
+	}
+}
+
+func TestListIssuesFollowsQuotedNextLinkAndIgnoresPrev(t *testing.T) {
+	var nextCalls int
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.RawQuery, "page=2") {
+			nextCalls++
+			_, _ = w.Write([]byte("[" + validIssueJSON + "]"))
+			return
+		}
+		w.Header().Set("Link", `<`+server.URL+`/repos/o/r/issues?page=2>; rel="next", <`+server.URL+`/repos/o/r/issues?page=9>; rel="prev"`)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, cursor, err := client.ListIssues(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cursor, "page=2") {
+		t.Fatalf("cursor = %q, want page 2", cursor)
+	}
+	if _, _, _, err := client.ListIssues(context.Background(), cursor); err != nil {
+		t.Fatal(err)
+	}
+	if nextCalls != 1 {
+		t.Fatalf("next page fetches = %d, want 1", nextCalls)
 	}
 }
 
@@ -1016,10 +1136,15 @@ import (
 
 const (
 	defaultAPIBaseURL = "https://api.github.com"
+	defaultAPIHost    = "api.github.com"
 	defaultTimeout    = 20 * time.Second
 	defaultMaxBytes   = 1 << 20
 	userAgent         = "summa42-ghissue/1"
 )
+
+// rejectRedirect keeps bearer credentials pinned to the configured origin:
+// any 3xx is surfaced as a non-200 response instead of being followed.
+func rejectRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // Config configures the read-only client. Zero Timeout or MaxResponseBytes
 // falls back to package defaults.
@@ -1058,12 +1183,17 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
 		return nil, errors.New("GitHub API base URL must be an absolute HTTP(S) URL without user info")
 	}
+	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("GitHub API base URL must not carry a path, query, or fragment")
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	loopback := strings.EqualFold(host, "localhost") || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
 	if parsed.Scheme != "https" {
-		host := strings.TrimSpace(parsed.Hostname())
-		ip := net.ParseIP(host)
-		if parsed.Scheme != "http" || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
-			return nil, errors.New("GitHub API base URL must use HTTPS except for explicit loopback test endpoints")
+		if parsed.Scheme != "http" || !loopback {
+			return nil, errors.New("GitHub API base URL must use HTTPS except for loopback test endpoints")
 		}
+	} else if !loopback && !strings.EqualFold(host, defaultAPIHost) {
+		return nil, errors.New("GitHub API base URL host must be api.github.com")
 	}
 	tokenFile := strings.TrimSpace(cfg.TokenFile)
 	if tokenFile == "" {
@@ -1081,7 +1211,7 @@ func New(cfg Config) (*Client, error) {
 		baseURL:          parsed,
 		repository:       repository,
 		tokenFile:        tokenFile,
-		http:             &http.Client{Timeout: timeout},
+		http:             &http.Client{Timeout: timeout, CheckRedirect: rejectRedirect},
 		maxResponseBytes: limit,
 	}, nil
 }
@@ -1129,6 +1259,9 @@ func (c *Client) ListIssues(ctx context.Context, cursor string) ([]any, []Unpars
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, nil, "", fmt.Errorf("decode GitHub issues response: %w", err)
 	}
+	if raw == nil {
+		return nil, nil, "", errors.New("decode GitHub issues response: expected a JSON array")
+	}
 	next, err := c.nextCursor(response.Header.Get("Link"))
 	if err != nil {
 		return nil, nil, "", err
@@ -1156,6 +1289,12 @@ func (c *Client) pageURL(cursor string) (string, error) {
 	if parsed.Scheme != c.baseURL.Scheme || parsed.Host != c.baseURL.Host {
 		return "", errors.New("GitHub issues pagination cursor is cross-origin")
 	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return "", errors.New("GitHub issues pagination cursor is malformed")
+	}
+	if !strings.HasPrefix(parsed.Path, "/repos/"+c.repository+"/issues") {
+		return "", errors.New("GitHub issues pagination cursor targets another resource")
+	}
 	return parsed.String(), nil
 }
 
@@ -1178,7 +1317,10 @@ func (c *Client) nextCursor(link string) (string, error) {
 		isNext := false
 		for _, param := range strings.Split(section[closing+1:], ";") {
 			key, value, found := strings.Cut(strings.TrimSpace(param), "=")
-			if found && strings.TrimSpace(key) == "rel" && strings.Trim(strings.TrimSpace(value), `"`) == "next" {
+			if !found || len(value) < 2 || !strings.HasPrefix(value, `"`) || !strings.HasSuffix(value, `"`) {
+				return "", errors.New("GitHub issues Link header parameter is malformed")
+			}
+			if strings.TrimSpace(key) == "rel" && value == `"next"` {
 				isNext = true
 			}
 		}
@@ -1191,6 +1333,12 @@ func (c *Client) nextCursor(link string) (string, error) {
 		}
 		if parsed.Scheme != c.baseURL.Scheme || parsed.Host != c.baseURL.Host {
 			return "", errors.New("GitHub issues next link is cross-origin")
+		}
+		if parsed.User != nil || parsed.Fragment != "" {
+			return "", errors.New("GitHub issues next link is malformed")
+		}
+		if !strings.HasPrefix(parsed.Path, "/repos/"+c.repository+"/issues") {
+			return "", errors.New("GitHub issues next link targets another resource")
 		}
 		return parsed.String(), nil
 	}
@@ -1390,7 +1538,11 @@ func (s *Service) CreateTaskWithGuardInTx(ctx context.Context, tx *sql.Tx, reque
 	if tx == nil {
 		return domain.Task{}, errors.New("SQL transaction is required")
 	}
-	return s.insertTaskTx(ctx, tx, domain.ID(""), request, guard)
+	normalized, err := normalizeRootRequest(request)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return s.insertTaskTx(ctx, tx, domain.ID(""), normalized, guard)
 }
 
 func (s *Service) insertTaskTx(ctx context.Context, tx *sql.Tx, parentID domain.ID, request TaskRequest, guard TaskGuard) (domain.Task, error) {
@@ -1488,6 +1640,9 @@ func TestEnsureAndMaterializeCreatesCaseAndTask(t *testing.T) {
 	}
 	if len(task.RequiredCapabilities) != 1 || task.RequiredCapabilities[0] != "github.issue.read" {
 		t.Fatalf("capabilities = %v", task.RequiredCapabilities)
+	}
+	if task.RequiredEnforcement != domain.EnforcementUnenforced {
+		t.Fatalf("required enforcement = %q, want %q", task.RequiredEnforcement, domain.EnforcementUnenforced)
 	}
 	stored, err := cases.Get(ctx, created.ID)
 	if err != nil || stored.ObjectID != "github:o/r#7" {
@@ -1809,6 +1964,10 @@ Note on scope: an ADO-side rollback test is not writable without weakening `Conf
 		return err
 	}
 	workCaps := cfg.workCapabilities()
+	payload, err := prPayload(pr)
+	if err != nil {
+		return err
+	}
 	created, task, err := cases.EnsureAndMaterialize(ctx, execSvc, workflowcase.Observation{
 		MissionID: cfg.MissionID, Source: "ado", ObjectID: pr.ObjectID(), RevisionID: pr.RevisionID(),
 		EvidenceID: string(object.ID),
@@ -1816,7 +1975,7 @@ Note on scope: an ADO-side rollback test is not writable without weakening `Conf
 		Grant:      cfg.Grant, MaxSteps: cfg.MaxSteps, RemainingBudget: cfg.RemainingBudget,
 	}, execution.TaskRequest{
 		Objective:          fmt.Sprintf("Review ADO PR %s", pr.ObjectID()),
-		PayloadJSON:        prPayload(pr),
+		PayloadJSON:        payload,
 		AcceptanceCriteria: []string{"review evidence recorded for " + pr.RevisionID()},
 		ResourceEnvelopeID: cfg.ResourceEnvelopeID,
 	})
@@ -1832,18 +1991,20 @@ Note on scope: an ADO-side rollback test is not writable without weakening `Conf
 Add the payload helper next to the existing `materialize` function in the same file (and make `materialize` reuse it):
 
 ```go
-func prPayload(pr PullRequest) json.RawMessage {
+func prPayload(pr PullRequest) (json.RawMessage, error) {
 	payload, err := json.Marshal(map[string]any{
 		"repo": pr.Repository, "pr": pr.Number, "sourceCommit": pr.SourceCommit, "targetCommit": pr.TargetCommit,
 	})
 	if err != nil {
-		return json.RawMessage(`{}`)
+		return nil, fmt.Errorf("encode ADO review payload: %w", err)
 	}
-	return payload
+	return payload, nil
 }
 ```
 
 The hit path of `observeOne` and `MaterializeTask` stay unchanged (legacy partial-case repair keeps working).
+
+`materialize` must keep compiling after the change: replace its inline `PayloadJSON: prPayload(pr)` with a two-step `payload, err := prPayload(pr); if err != nil { return err }` before the template is built, and keep the existing test helpers in `internal/adoreview/observe_test.go` source-compatible.
 
 - [ ] **Step 11: Run ADO + affected suites**
 
@@ -2088,6 +2249,14 @@ func TestObserveOnceRejectsGrantViolations(t *testing.T) {
 			c.Maintainers = nil
 			return c
 		},
+		"blank maintainers": func(c ObserveConfig) ObserveConfig {
+			c.Maintainers = []string{"  "}
+			return c
+		},
+		"lister repository mismatch": func(c ObserveConfig) ObserveConfig {
+			c.Repository = "o/other"
+			return c
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -2098,6 +2267,33 @@ func TestObserveOnceRejectsGrantViolations(t *testing.T) {
 	}
 	if count := snapshotCount(t, f.store, f.ctx); count != 0 {
 		t.Fatalf("snapshots = %d, want 0 (validation precedes any poll)", count)
+	}
+}
+
+func TestObserveOnceNormalizesPaddedGrantTokens(t *testing.T) {
+	f := setupObserve(t)
+	lister := &stubLister{name: "o/r", pages: []stubPage{{items: []any{wireIssue()}}}}
+	cfg := f.cfg
+	cfg.Grant = workflow.Grant{Capabilities: []string{" github.issue.read ", "github.issue.read"}}
+	cfg.Maintainers = []string{" Maint "}
+	cfg.WorkCapabilities = []string{" "}
+	result, err := ObserveOnce(f.ctx, lister, f.cases, f.execSvc, f.evidenceStore, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Ensured) != 1 {
+		t.Fatalf("ensured = %d, want 1", len(result.Ensured))
+	}
+	stored, err := f.cases.Get(f.ctx, result.Ensured[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.execSvc.Task(f.ctx, stored.CurrentWorkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(task.RequiredCapabilities) != 1 || task.RequiredCapabilities[0] != readCapability {
+		t.Fatalf("required capabilities = %v", task.RequiredCapabilities)
 	}
 }
 
@@ -2206,6 +2402,22 @@ type ObserveConfig struct {
 	RemainingBudget    int64
 }
 
+// normalized trims and deduplicates every string collection so validation,
+// FirstWork.AuthorityCeiling and workflow.Decide all compare the same tokens.
+func (c ObserveConfig) normalized() ObserveConfig {
+	normalized := ObserveConfig{
+		MissionID:          domain.ID(strings.TrimSpace(string(c.MissionID))),
+		Repository:         strings.TrimSpace(c.Repository),
+		Maintainers:        normalizeTokens(c.Maintainers),
+		Grant:              workflow.Grant{Capabilities: normalizeTokens(c.Grant.Capabilities), Actions: normalizeTokens(c.Grant.Actions)},
+		WorkCapabilities:   normalizeTokens(c.WorkCapabilities),
+		ResourceEnvelopeID: domain.ID(strings.TrimSpace(string(c.ResourceEnvelopeID))),
+		MaxSteps:           c.MaxSteps,
+		RemainingBudget:    c.RemainingBudget,
+	}
+	return normalized
+}
+
 func (c ObserveConfig) validate() error {
 	if strings.TrimSpace(string(c.MissionID)) == "" {
 		return errors.New("mission is required")
@@ -2284,8 +2496,15 @@ func ObserveOnce(ctx context.Context, lister IssueLister, cases *workflowcase.Se
 	if cases == nil || execSvc == nil || evidenceStore == nil {
 		return result, errors.New("workflow case, execution and evidence services are required")
 	}
+	if lister == nil {
+		return result, errors.New("issue lister is required")
+	}
+	cfg = cfg.normalized()
 	if err := cfg.validate(); err != nil {
 		return result, err
+	}
+	if name := strings.TrimSpace(lister.Name()); !strings.EqualFold(name, cfg.Repository) {
+		return result, fmt.Errorf("issue lister repository %q does not match configured repository %q", name, cfg.Repository)
 	}
 	issues, unparseable, err := CollectIssues(ctx, lister)
 	if err != nil {
@@ -2846,6 +3065,8 @@ GOCACHE=/tmp/summa42-full-go-cache go build ./cmd/summa42 ./cmd/summa42-box
 python3 docs/superpowers/research/spikes/2026-09-14-sqlite-persistence-spike.py
 ```
 Expected: all exit 0. If the sqlite spike cannot run in this environment, report it explicitly instead of skipping silently.
+
+On Linux with Docker available, also run the OCI bypass/capability acceptance profile from `CONTRIBUTING.md` — that gate must not be replaced with a unit-test-only approximation. If Docker is unavailable, report the skipped profile explicitly in the final report.
 
 - [ ] **Step 8: Commit**
 

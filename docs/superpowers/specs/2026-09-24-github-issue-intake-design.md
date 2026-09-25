@@ -13,11 +13,10 @@ explicit configured login list — never inferred from roles or labels.
 New package `internal/ghissue` (mirrors `adoreview`):
 
 - `source.go`: `Issue`, `IssueLister`, `Unparseable`, parse + filter with
-  reason tokens, canonical snapshot. `ExcludedIssue`/`FailedIssue`/`ObserveResult`
-  are defined once in `observe.go` (results, not parsing).
+  reason tokens, canonical snapshot.
+- `results.go`: `ExcludedIssue` (shared by source filtering and the observer).
 - `observe.go`: `ObserveConfig` (distinct name — `Config` belongs to the
-  client in client.go), `ObserveResult`, `ExcludedIssue`/`FailedIssue`,
-  `ObserveOnce`, `Run`.
+  client in client.go), `ObserveResult`, `FailedIssue`, `ObserveOnce`, `Run`.
 - `client.go`: read-only GitHub transport. Reuses the exported
   `feedbackgithub.FileCredentialSource` pattern for tokens, but as a SEPARATE
   client exposing GET operations only.
@@ -26,8 +25,12 @@ New package `internal/ghissue` (mirrors `adoreview`):
   Env contract: `SUMMA42_GITHUB_TOKEN_FILE` (token file path; required —
   mirroring the feedback file-only credential, NOT an inline token) and
   `SUMMA42_GITHUB_REPOSITORY` (`owner/name`). `BaseURL` defaults to
-  `https://api.github.com`; any other scheme/host is a startup error
-  (HTTPS enforced, same-origin Link resolution only).
+  `https://api.github.com`; the host must be `api.github.com` over HTTPS, or
+  an explicit loopback endpoint for tests — any other host or scheme is a
+  startup error, so bearer credentials can never be aimed elsewhere. The base
+  URL carries no path, query or fragment; redirects are never followed, so the
+  token stays pinned to the configured origin; Link resolution is
+  same-origin only.
 
   Exported surface is exactly:
   `New(Config) (*Client, error)`, `(*Client).ListIssues(ctx, cursor string)
@@ -84,16 +87,26 @@ Find-first.
   included. STARTUP VALIDATION: every effective work capability (the merged
   set) must be listed in the grant, and the grant must contain
   `github.issue.read` — a violation is a startup error, never a per-issue
-  `Decide`/`Ensure` failure at runtime.
+  `Decide`/`Ensure` failure at runtime. Maintainer logins, grant capabilities,
+  grant actions and work capabilities are trimmed and deduplicated once
+  before validation, so the grant ceiling and the required capabilities passed
+  to `workflow.Decide` always compare identical tokens. The lister's
+  `Name()` must match the configured repository (case-insensitively) or the
+  tick fails before any write.
 
 ## Wire mapping and canonical snapshot
 
-Required per issue: `number`, `title`, `body`, `state`, `user.login`,
-`assignees[]`, `labels[].name`, `updated_at`, `html_url`. `state` must be
+Required per issue: `number` (positive integer), `title`, `state`,
+`user.login`, `updated_at` (RFC3339), `html_url` — each must be present and
+non-blank, otherwise the item is `unparseable`. `body`, `assignees` and
+`labels` may be missing or `null` and normalize to `""`/`[]`/`[]`; when
+present they must have the right shape (string, array of objects, array of
+objects with the expected string field) or the item is `unparseable` — a
+malformed field is never allowed to abort a page. `state` must be
 `open` — closed issues are excluded (token `not-open`) before any other
 maintainer filter. Items carrying `pull_request` are skipped as PRs
 (reason `is-pull-request`, counted in the result). `assignees`/`labels` are
-nil-normalized to `[]`, deduplicated and sorted case-insensitively; `body`
+normalized to `[]`, deduplicated and sorted case-insensitively; `body`
 defaults to `""`; `updatedAt` in the snapshot is the canonical UTC revision
 string (identical to the case revision).
 
