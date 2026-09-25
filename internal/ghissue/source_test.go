@@ -223,6 +223,49 @@ func TestCanonicalSnapshotKeys(t *testing.T) {
 	}
 }
 
+func TestCanonicalSnapshotCanonicalizesLists(t *testing.T) {
+	issue := Issue{
+		Repository: "o/r",
+		Number:     7,
+		Title:      "App crashes on save",
+		Body:       "steps",
+		State:      "open",
+		Author:     "Maint",
+		Assignees:  []string{"Zed", "alice", "ALICE", "", "   "},
+		Labels:     []string{"wontfix", "Bug", " bug ", "alpha", ""},
+		URL:        "https://github.com/o/r/issues/7",
+		Triage:     TriageBug,
+	}
+	snapshot, err := CanonicalSnapshot(issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Assignees []string `json:"assignees"`
+		Labels    []string `json:"labels"`
+	}
+	if err := json.Unmarshal(snapshot, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.Assignees, []string{"alice", "Zed"}) {
+		t.Fatalf("assignees = %v", decoded.Assignees)
+	}
+	if !reflect.DeepEqual(decoded.Labels, []string{"alpha", "Bug", "wontfix"}) {
+		t.Fatalf("labels = %v", decoded.Labels)
+	}
+	empty, err := CanonicalSnapshot(Issue{Repository: "o/r", Number: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blank map[string]any
+	if err := json.Unmarshal(empty, &blank); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(blank["assignees"], []any{}) || !reflect.DeepEqual(blank["labels"], []any{}) {
+		t.Fatalf("nil lists = %v %v, want []", blank["assignees"], blank["labels"])
+	}
+}
+
 func sortStrings(values []string) {
 	for i := 1; i < len(values); i++ {
 		for j := i; j > 0 && values[j] < values[j-1]; j-- {
@@ -280,6 +323,30 @@ func TestCollectIssuesWalksPagesAndKeepsUnparseable(t *testing.T) {
 	}
 }
 
+func TestCollectIssuesIsolatesUnparseableItems(t *testing.T) {
+	bad := map[string]any{"number": float64(7), "title": ""}
+	lister := &stubLister{name: "o/r", pages: []stubPage{
+		{items: []any{
+			wireIssue(),
+			bad,
+			wireIssue(func(m map[string]any) { m["number"] = float64(8) }),
+		}},
+	}}
+	issues, unparseable, err := CollectIssues(context.Background(), lister)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("issues = %d, want 2", len(issues))
+	}
+	if issues[0].ObjectID() != "github:o/r#7" || issues[1].ObjectID() != "github:o/r#8" {
+		t.Fatalf("identity = %q %q", issues[0].ObjectID(), issues[1].ObjectID())
+	}
+	if len(unparseable) != 1 || !reflect.DeepEqual(unparseable[0].Raw, bad) {
+		t.Fatalf("unparseable = %+v, want the malformed item", unparseable)
+	}
+}
+
 func TestCollectIssuesRejectsRepeatedCursor(t *testing.T) {
 	lister := &stubLister{name: "o/r", pages: []stubPage{
 		{items: []any{wireIssue()}, next: "same"},
@@ -287,6 +354,9 @@ func TestCollectIssuesRejectsRepeatedCursor(t *testing.T) {
 	}}
 	if _, _, err := CollectIssues(context.Background(), lister); err == nil {
 		t.Fatal("expected repeated cursor error")
+	}
+	if !reflect.DeepEqual(lister.calls, []string{"", "same"}) {
+		t.Fatalf("calls = %v, want the repeated cursor never refetched", lister.calls)
 	}
 }
 

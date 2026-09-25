@@ -227,7 +227,8 @@ func CollectIssues(ctx context.Context, lister IssueLister) ([]Issue, []Unparsea
 		for _, item := range items {
 			issue, err := ParseIssue(item, repository)
 			if err != nil {
-				return nil, nil, fmt.Errorf("parse issue item: %w", err)
+				unparseable = append(unparseable, Unparseable{Raw: item})
+				continue
 			}
 			issues = append(issues, issue)
 		}
@@ -260,8 +261,8 @@ func CanonicalSnapshot(issue Issue) ([]byte, error) {
 		Title:     issue.Title,
 		Body:      issue.Body,
 		Author:    issue.Author,
-		Assignees: nonNil(issue.Assignees),
-		Labels:    nonNil(issue.Labels),
+		Assignees: normalizeTokens(issue.Assignees),
+		Labels:    normalizeTokens(issue.Labels),
 		URL:       issue.URL,
 		UpdatedAt: issue.RevisionID(),
 		Triage:    issue.Triage,
@@ -366,11 +367,4 @@ func hasLabel(labels []string, wanted ...string) bool {
 		}
 	}
 	return false
-}
-
-func nonNil(values []string) []string {
-	if values == nil {
-		return []string{}
-	}
-	return values
 }
