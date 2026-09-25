@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,7 +20,7 @@ const (
 	defaultAPIBaseURL = "https://api.github.com"
 	defaultAPIHost    = "api.github.com"
 	defaultTimeout    = 20 * time.Second
-	defaultMaxBytes   = 1 << 20
+	defaultMaxBytes   = 16 << 20
 	userAgent         = "summa42-ghissue/1"
 )
 
@@ -74,8 +75,13 @@ func New(cfg Config) (*Client, error) {
 		if parsed.Scheme != "http" || !loopback {
 			return nil, errors.New("GitHub API base URL must use HTTPS except for loopback test endpoints")
 		}
-	} else if !loopback && !strings.EqualFold(host, defaultAPIHost) {
-		return nil, errors.New("GitHub API base URL host must be api.github.com")
+	} else if !loopback {
+		if !strings.EqualFold(host, defaultAPIHost) {
+			return nil, errors.New("GitHub API base URL host must be api.github.com")
+		}
+		if port := parsed.Port(); port != "" && port != "443" {
+			return nil, errors.New("GitHub API base URL must not carry a non-standard port")
+		}
 	}
 	tokenFile := strings.TrimSpace(cfg.TokenFile)
 	if tokenFile == "" {
@@ -177,6 +183,9 @@ func (c *Client) pageURL(cursor string) (string, error) {
 	if parsed.Path != "/repos/"+c.repository+"/issues" {
 		return "", errors.New("GitHub issues pagination cursor targets another resource")
 	}
+	if err := pinnedPageQuery(parsed); err != nil {
+		return "", err
+	}
 	return parsed.String(), nil
 }
 
@@ -226,12 +235,44 @@ func (c *Client) nextCursor(link string) (string, error) {
 		if parsed.Path != "/repos/"+c.repository+"/issues" {
 			return "", errors.New("GitHub issues next link targets another resource")
 		}
+		if err := pinnedPageQuery(parsed); err != nil {
+			return "", err
+		}
 		if next != "" {
 			return "", errors.New("GitHub issues Link header repeats rel=next")
 		}
 		next = parsed.String()
 	}
 	return next, nil
+}
+
+func pinnedPageQuery(parsed *url.URL) error {
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return errors.New("GitHub issues page query is malformed")
+	}
+	if len(query["state"]) != 1 || query["state"][0] != "open" {
+		return errors.New("GitHub issues page query must pin state=open")
+	}
+	if len(query["per_page"]) != 1 || query["per_page"][0] != "100" {
+		return errors.New("GitHub issues page query must pin per_page=100")
+	}
+	for key := range query {
+		if key != "state" && key != "per_page" && key != "page" {
+			return errors.New("GitHub issues page query has an unexpected parameter")
+		}
+	}
+	pages := query["page"]
+	if len(pages) > 1 {
+		return errors.New("GitHub issues page query repeats the page parameter")
+	}
+	if len(pages) == 1 {
+		number, err := strconv.Atoi(pages[0])
+		if err != nil || number < 2 {
+			return errors.New("GitHub issues page query has an invalid page parameter")
+		}
+	}
+	return nil
 }
 
 func readTokenFile(path string) (string, error) {

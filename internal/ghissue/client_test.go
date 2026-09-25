@@ -162,6 +162,7 @@ func TestNewRejectsUnsafeConfiguration(t *testing.T) {
 		{BaseURL: "http://api.github.com", Repository: "o/r", TokenFile: token},
 		{BaseURL: "https://api.github.com", Repository: "o/r", TokenFile: " "},
 		{BaseURL: "https://evil.example", Repository: "o/r", TokenFile: token},
+		{BaseURL: "https://api.github.com:8443", Repository: "o/r", TokenFile: token},
 		{BaseURL: "https://api.github.com/v3", Repository: "o/r", TokenFile: token},
 		{BaseURL: "https://api.github.com?x=1", Repository: "o/r", TokenFile: token},
 		{BaseURL: "https://api.github.com#frag", Repository: "o/r", TokenFile: token},
@@ -226,15 +227,100 @@ func TestListIssuesSanitizesHTTPFailures(t *testing.T) {
 
 func TestListIssuesEnforcesResponseCap(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
+		_, _ = w.Write([]byte(`["` + strings.Repeat("p", 4096) + `"]`))
 	}))
 	defer server.Close()
 	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit"), MaxResponseBytes: 128})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if client.maxResponseBytes != 128 {
+		t.Fatalf("maxResponseBytes = %d, want 128", client.maxResponseBytes)
+	}
 	if _, _, _, err := client.ListIssues(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "128") {
 		t.Fatalf("err = %v, want response cap error", err)
+	}
+}
+
+func TestNewDefaultsResponseCapToSixteenMiB(t *testing.T) {
+	body := []byte(`["` + strings.Repeat("p", 2<<20) + `"]`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.maxResponseBytes != 16<<20 {
+		t.Fatalf("maxResponseBytes = %d, want %d", client.maxResponseBytes, 16<<20)
+	}
+	if _, _, _, err := client.ListIssues(context.Background(), ""); err != nil {
+		t.Fatalf("2 MiB page rejected under the default cap: %v", err)
+	}
+	wide, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit"), MaxResponseBytes: 4 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wide.maxResponseBytes != 4<<20 {
+		t.Fatalf("maxResponseBytes = %d, want %d", wide.maxResponseBytes, 4<<20)
+	}
+	if _, _, _, err := wide.ListIssues(context.Background(), ""); err != nil {
+		t.Fatalf("2 MiB page rejected under an explicit 4 MiB cap: %v", err)
+	}
+}
+
+func TestListIssuesRejectsNextLinkWithUnpinnedQuery(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"closed state", "state=closed&per_page=100&page=2"},
+		{"missing state", "per_page=100&page=2"},
+		{"wrong per page", "state=open&per_page=50&page=2"},
+		{"extra parameter", "state=open&per_page=100&page=2&direction=desc"},
+		{"no query", ""},
+	}
+	for _, test := range cases {
+		var requests int
+		var server *httptest.Server
+		server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			w.Header().Set("Link", `<`+server.URL+`/repos/o/r/issues?`+test.query+`>; rel="next"`)
+			_, _ = w.Write([]byte("[]"))
+		}))
+		client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, err = client.ListIssues(context.Background(), "")
+		server.Close()
+		if err == nil {
+			t.Fatalf("%s: expected error", test.name)
+		}
+		if requests != 1 {
+			t.Fatalf("%s: requests = %d, want 1", test.name, requests)
+		}
+	}
+}
+
+func TestListIssuesRejectsCursorWithUnpinnedQuery(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := server.URL + "/repos/o/r/issues?state=closed&per_page=100&page=2"
+	if _, _, _, err := client.ListIssues(context.Background(), cursor); err == nil {
+		t.Fatal("expected error for cursor with state=closed")
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 
@@ -278,7 +364,7 @@ func TestListIssuesFollowsQuotedNextLinkAndIgnoresPrev(t *testing.T) {
 			_, _ = w.Write([]byte("[" + validIssueJSON + "]"))
 			return
 		}
-		w.Header().Set("Link", `<`+server.URL+`/repos/o/r/issues?page=2>; rel="next", <`+server.URL+`/repos/o/r/issues?page=9>; rel="prev"`)
+		w.Header().Set("Link", `<`+server.URL+`/repos/o/r/issues?state=open&per_page=100&page=2>; rel="next", <`+server.URL+`/repos/o/r/issues?page=9>; rel="prev"`)
 		_, _ = w.Write([]byte("[]"))
 	}))
 	defer server.Close()
@@ -335,14 +421,35 @@ func TestListIssuesHonorsClientTimeout(t *testing.T) {
 	}
 }
 
+func TestNewAcceptsProductionConfiguration(t *testing.T) {
+	client, err := New(Config{BaseURL: "https://api.github.com", Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client == nil {
+		t.Fatal("client = nil, want a client for the production API host")
+	}
+	if client.Name() != "o/r" || client.baseURL.Scheme != "https" || client.baseURL.Host != "api.github.com" {
+		t.Fatalf("name = %q base = %q", client.Name(), client.baseURL.String())
+	}
+}
+
 func TestClientExposesOnlyReadOperations(t *testing.T) {
-	var methods []string
+	clientType := reflect.TypeOf(&Client{})
+	var exposed []string
+	for i := 0; i < clientType.NumMethod(); i++ {
+		exposed = append(exposed, clientType.Method(i).Name)
+	}
+	if !reflect.DeepEqual(exposed, []string{"ListIssues", "Name"}) {
+		t.Fatalf("exposed methods = %v, want only ListIssues and Name", exposed)
+	}
+	var probed []string
 	for _, name := range []string{"POST", "PATCH", "PUT", "DELETE", "Create", "Update", "Delete", "Comment", "Merge", "ListIssues", "Name"} {
-		if _, ok := reflect.TypeOf(&Client{}).MethodByName(name); ok {
-			methods = append(methods, name)
+		if _, ok := clientType.MethodByName(name); ok {
+			probed = append(probed, name)
 		}
 	}
-	if !reflect.DeepEqual(methods, []string{"ListIssues", "Name"}) {
-		t.Fatalf("methods = %v, want only ListIssues and Name", methods)
+	if !reflect.DeepEqual(probed, []string{"ListIssues", "Name"}) {
+		t.Fatalf("probed methods = %v, want only ListIssues and Name", probed)
 	}
 }
