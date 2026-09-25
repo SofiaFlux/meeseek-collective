@@ -6,14 +6,15 @@ Let the Box notice GitHub issues opened by configured maintainers and register
 each eligible issue revision as a durable workflow case with a triage Task.
 First sub-project of the GitHub issue-to-PR role; planning, code writing,
 review and PR creation follow. Draft PR, human merges. Maintainer trust is an
-explicit configured ID list — never inferred from roles or labels.
+explicit configured login list — never inferred from roles or labels.
 
 ## Architecture
 
 New package `internal/ghissue` (mirrors `adoreview`):
 
-- `source.go`: `Issue`, `IssueLister`, `Unparseable`, `ExcludedIssue`,
-  parse + filter with reason tokens, canonical snapshot.
+- `source.go`: `Issue`, `IssueLister`, `Unparseable`, parse + filter with
+  reason tokens, canonical snapshot. `ExcludedIssue`/`FailedIssue`/`ObserveResult`
+  are defined once in `observe.go` (results, not parsing).
 - `observe.go`: `Config`, `ObserveResult`, `ExcludedIssue`/`FailedIssue`,
   `ObserveOnce`, `Run`.
 - `client.go`: read-only GitHub transport. Reuses the exported
@@ -41,13 +42,19 @@ New package `internal/ghissue` (mirrors `adoreview`):
 
 `Find(mission, "github", objectID, revision)` →
 - **miss:** `Put` canonical snapshot (`application/json`,
-  `github.issue.snapshot`) → `Ensure` with that evidence ID →
-  `MaterializeTask` (payload `issueSnapshot` = the new blob ID);
+  `github.issue.snapshot`) → atomic `EnsureAndMaterialize` (new
+  `workflowcase` method: case insert + Task creation in ONE transaction, so a
+  Task failure rolls the case back and leaves no unrepairable partial state);
 - **hit:** `MaterializeTask` only, with payload `issueSnapshot` =
   `existing.ObservationEvidenceID` (the case's durable pointer — the hit path
   creates NO new evidence, so this is the only correct source);
 - **hit but case state ≠ `ACTIVE`:** skip with reason `case-not-active`
   (only ACTIVE cases can materialize).
+
+`EnsureAndMaterialize(ctx, executionSvc, observation, template)` lives in
+`workflowcase` and reuses `CreateTaskWithGuard` inside the same transaction as
+the case insert (replacing the ADO observer's two-step Ensure→Materialize for
+its miss path as well, closing the same partial-case window there).
 
 A fresh `Put` per poll would break `Ensure`'s exact-request replay, hence
 Find-first.
@@ -60,9 +67,10 @@ Find-first.
   ["github.issue.read"] merged with any extra `--work-capability` values,
   AuthorityCeiling: the configured grant capabilities, ProposedActions: nil}`.
   `--work-capability` is ADDITIONAL only; `github.issue.read` is always
-  included. The grant must contain `github.issue.read` — validated at
-  startup (empty/missing grant is a startup error, never a per-issue
-  failure).
+  included. STARTUP VALIDATION: every effective work capability (the merged
+  set) must be listed in the grant, and the grant must contain
+  `github.issue.read` — a violation is a startup error, never a per-issue
+  `Decide`/`Ensure` failure at runtime.
 
 ## Wire mapping and canonical snapshot
 
@@ -103,7 +111,7 @@ acceptance `triage decision recorded for <revision>`.
    `Unparseable` split).
 3. `not-open` — `state != "open"` (belt-and-braces: the client already asks
    for open issues).
-4. `not-maintainer` — author login ∉ configured maintainer list (exact,
+4. `not-maintainer` — author login ∉ configured maintainer logins (exact,
    case-insensitive).
 5. `already-assigned` — `assignees` non-empty.
 6. `held-by-label` — label `box-hold` or `wontfix` (exact, case-insensitive).
@@ -123,7 +131,7 @@ advertise that capability explicitly.
 
 ## Configuration and CLI
 
-`run-gh-intake --mission --repo <owner/name> --maintainer-id <id>
+`run-gh-intake --mission --repo <owner/name> --maintainer <login>
 (repeatable) --grant-capability <id> (repeatable; must include
 `github.issue.read`) --work-capability <id> (additional caps only) --envelope
 --max-steps --remaining-budget --poll-interval`. Startup errors: missing
@@ -142,7 +150,8 @@ and an empty executor map.
 | list/page/transport/malformed-Link error | tick error (Run aborts) |
 | unparseable item | exclusion `unparseable-issue`, processing continues |
 | `Ensure` error (mission invalid, etc.) | exclusion `ensure-failed` |
-| Ensure ok, `MaterializeTask` error | `Failed` entry, retried next tick |
+| `EnsureAndMaterialize` error (atomic; nothing persisted) | exclusion `ensure-failed` |
+| hit path `MaterializeTask` error | `Failed` entry, retried on the next tick while the issue is still eligible |
 | `Find` error (store) | tick error |
 | `Put` error (disk) | tick error — no case without evidence |
 | hit, case state ≠ `ACTIVE` | skip `case-not-active` |
