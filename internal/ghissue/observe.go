@@ -3,6 +3,8 @@ package ghissue
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 )
 
 const readCapability = "github.issue.read"
+const snapshotKind = "github.issue.snapshot"
 
 // ObserveConfig configures issue intake. Config in client.go is the transport
 // configuration; this is the observer's.
@@ -102,7 +105,8 @@ func (c ObserveConfig) effectiveCapabilities() []string {
 	return out
 }
 
-// FailedIssue records one issue whose durable Task creation failed on the hit path.
+// FailedIssue records one issue that could not be completed durably this tick;
+// it is retried on the next tick while the issue is still eligible.
 type FailedIssue struct {
 	Issue Issue
 	Err   string
@@ -145,12 +149,14 @@ func ObserveOnce(ctx context.Context, lister IssueLister, cases *workflowcase.Se
 	kept, excluded, skipped := FilterIssues(issues, cfg.Maintainers)
 	result.PullRequestsSkipped = skipped
 	result.Excluded = append(result.Excluded, excluded...)
+	var failures []error
 	for _, issue := range kept {
 		if err := observeIssue(ctx, cases, execSvc, evidenceStore, cfg, issue, &result); err != nil {
-			return result, err
+			result.Failed = append(result.Failed, FailedIssue{Issue: issue, Err: err.Error()})
+			failures = append(failures, err)
 		}
 	}
-	return result, nil
+	return result, errors.Join(failures...)
 }
 
 func observeIssue(ctx context.Context, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, issue Issue, result *ObserveResult) error {
@@ -163,24 +169,13 @@ func observeIssue(ctx context.Context, cases *workflowcase.Service, execSvc *exe
 			result.Excluded = append(result.Excluded, ExcludedIssue{Issue: issue, Reason: ReasonCaseNotActive})
 			return nil
 		}
-		template, err := taskTemplate(cfg, issue, existing.ObservationEvidenceID)
-		if err != nil {
-			return err
-		}
-		task, err := cases.MaterializeTask(ctx, execSvc, existing.ID, existing.CurrentWorkID, template)
-		if err != nil {
-			result.Failed = append(result.Failed, FailedIssue{Issue: issue, Err: err.Error()})
-			return nil
-		}
-		result.Ensured = append(result.Ensured, existing.ID)
-		result.Materialized = append(result.Materialized, task.ID)
-		return nil
+		return materializeHit(ctx, cases, execSvc, cfg, issue, existing, result)
 	}
 	snapshot, err := CanonicalSnapshot(issue)
 	if err != nil {
 		return err
 	}
-	object, err := evidenceStore.Put(ctx, bytes.NewReader(snapshot), evidence.Metadata{MediaType: "application/json", Kind: "github.issue.snapshot"})
+	object, err := putSnapshot(ctx, evidenceStore, snapshot)
 	if err != nil {
 		return err
 	}
@@ -204,6 +199,54 @@ func observeIssue(ctx context.Context, cases *workflowcase.Service, execSvc *exe
 	result.Ensured = append(result.Ensured, created.ID)
 	result.Materialized = append(result.Materialized, task.ID)
 	return nil
+}
+
+// materializeHit rebuilds the Task of an already-registered case. The request
+// hash covers the envelope, objective and payload, so those come from the
+// already-materialized work keyed by the case's current work ID: deriving them
+// from mutable config would fail the replay and brick a live case.
+func materializeHit(ctx context.Context, cases *workflowcase.Service, execSvc *execution.Service, cfg ObserveConfig, issue Issue, existing workflowcase.Case, result *ObserveResult) error {
+	template, err := taskTemplate(cfg, issue, existing.ObservationEvidenceID)
+	if err != nil {
+		return err
+	}
+	work, materialized, err := execSvc.FindByIdempotencyKey(ctx, string(existing.CurrentWorkID))
+	if err != nil {
+		return err
+	}
+	if materialized {
+		template.Objective = work.Objective
+		template.PayloadJSON = work.PayloadJSON
+		template.ResourceEnvelopeID = work.ResourceEnvelopeID
+	}
+	task, err := cases.MaterializeTask(ctx, execSvc, existing.ID, existing.CurrentWorkID, template)
+	if err != nil {
+		current, stillThere, findErr := cases.Find(ctx, cfg.MissionID, "github", issue.ObjectID(), issue.RevisionID())
+		if findErr != nil {
+			return findErr
+		}
+		if !stillThere || current.State != workflowcase.Active {
+			result.Excluded = append(result.Excluded, ExcludedIssue{Issue: issue, Reason: ReasonCaseNotActive})
+			return nil
+		}
+		result.Failed = append(result.Failed, FailedIssue{Issue: issue, Err: err.Error()})
+		return nil
+	}
+	result.Ensured = append(result.Ensured, existing.ID)
+	result.Materialized = append(result.Materialized, task.ID)
+	return nil
+}
+
+// putSnapshot reuses the evidence row that already holds these exact snapshot
+// bytes: a rolled-back ensure would otherwise leave one orphan row per tick.
+func putSnapshot(ctx context.Context, evidenceStore *evidence.Store, snapshot []byte) (evidence.EvidenceObject, error) {
+	metadata := evidence.Metadata{MediaType: "application/json", Kind: snapshotKind}
+	digest := sha256.Sum256(snapshot)
+	existing, found, err := evidenceStore.FindByContentHash(ctx, hex.EncodeToString(digest[:]), metadata.Kind)
+	if err == nil && found {
+		return existing, nil
+	}
+	return evidenceStore.Put(ctx, bytes.NewReader(snapshot), metadata)
 }
 
 func taskTemplate(cfg ObserveConfig, issue Issue, snapshotID string) (execution.TaskRequest, error) {
@@ -230,6 +273,33 @@ func nonNil(values []string) []string {
 	return values
 }
 
+// maxObserverBackoff caps the delay after a failing tick so a persistent
+// outage neither hammers GitHub nor stops intake.
+const maxObserverBackoff = time.Minute
+
+// observeWait waits for the next poll; the observer seam tests drive.
+var observeWait = func(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func nextBackoff(backoff, interval time.Duration) time.Duration {
+	if backoff <= 0 {
+		backoff = interval
+	}
+	backoff *= 2
+	if backoff > maxObserverBackoff {
+		return maxObserverBackoff
+	}
+	return backoff
+}
+
 func Run(ctx context.Context, lister IssueLister, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, interval time.Duration) error {
 	if ctx == nil {
 		return errors.New("observer context is required")
@@ -246,19 +316,22 @@ func Run(ctx context.Context, lister IssueLister, cases *workflowcase.Service, e
 		}
 		return err
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	var backoff time.Duration
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			if _, err := ObserveOnce(ctx, lister, cases, execSvc, evidenceStore, cfg); err != nil {
-				if ctx.Err() != nil {
-					return nil
-				}
-				return err
-			}
+		wait := interval
+		if backoff > 0 {
+			wait = backoff
 		}
+		if err := observeWait(ctx, wait); err != nil {
+			return nil
+		}
+		if _, err := ObserveOnce(ctx, lister, cases, execSvc, evidenceStore, cfg); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			backoff = nextBackoff(backoff, interval)
+			continue
+		}
+		backoff = 0
 	}
 }
