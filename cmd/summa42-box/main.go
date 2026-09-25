@@ -22,6 +22,7 @@ import (
 	"github.com/SofiaFlux/summa42/internal/executors"
 	"github.com/SofiaFlux/summa42/internal/feedbackgithub"
 	"github.com/SofiaFlux/summa42/internal/fieldfeedback"
+	"github.com/SofiaFlux/summa42/internal/ghissue"
 	"github.com/SofiaFlux/summa42/internal/localconfig"
 	"github.com/SofiaFlux/summa42/internal/operations"
 	"github.com/SofiaFlux/summa42/internal/policy"
@@ -449,6 +450,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "run-gh-intake" {
+		if err := runGHIntake(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "run-driver" {
 		if err := runDriver(ctx, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -757,6 +765,149 @@ func runObserver(ctx context.Context, args []string) error {
 	}
 	cases := workflowcase.New(box.Store, box.Clock, box.Purpose)
 	return adoreview.Run(ctx, adoProvider, cases, box.Execution, box.Evidence, observerCfg, pollInterval)
+}
+
+func parseGHIntakeFlags(args []string) (ghissue.ObserveConfig, time.Duration, error) {
+	var cfg ghissue.ObserveConfig
+	var mission, envelope, repository string
+	var maintainers, grantCaps, workCaps stringSlice
+	var maxSteps int
+	var remainingBudget int64
+	var pollInterval time.Duration
+
+	flags := flag.NewFlagSet("run-gh-intake", flag.ContinueOnError)
+	flags.StringVar(&mission, "mission", "", "mission ID for GitHub issue cases")
+	flags.StringVar(&repository, "repo", "", "GitHub repository as owner/name")
+	flags.Var(&maintainers, "maintainer", "maintainer login eligible to open issues (repeatable)")
+	flags.Var(&grantCaps, "grant-capability", "capability granted to issue cases (repeatable; must include github.issue.read)")
+	flags.Var(&workCaps, "work-capability", "additional work capability (repeatable)")
+	flags.StringVar(&envelope, "envelope", "", "resource envelope ID for triage tasks")
+	flags.IntVar(&maxSteps, "max-steps", 3, "maximum workflow steps per issue case")
+	flags.Int64Var(&remainingBudget, "remaining-budget", 10, "remaining workflow budget per issue case")
+	flags.DurationVar(&pollInterval, "poll-interval", 30*time.Second, "interval between intake polls")
+	if err := flags.Parse(args); err != nil {
+		return ghissue.ObserveConfig{}, 0, err
+	}
+	if strings.TrimSpace(mission) == "" {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires --mission")
+	}
+	if strings.TrimSpace(repository) == "" {
+		repository = strings.TrimSpace(os.Getenv("SUMMA42_GITHUB_REPOSITORY"))
+	}
+	if strings.TrimSpace(repository) == "" {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires --repo or SUMMA42_GITHUB_REPOSITORY")
+	}
+	if flags.NArg() != 0 {
+		return ghissue.ObserveConfig{}, 0, fmt.Errorf("run-gh-intake takes no positional arguments, got %q", flags.Args())
+	}
+	logins := make([]string, 0, len(maintainers))
+	for _, login := range maintainers {
+		if strings.TrimSpace(login) == "" {
+			return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake --maintainer must not be blank")
+		}
+		logins = append(logins, login)
+	}
+	if len(logins) == 0 {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires at least one --maintainer")
+	}
+	if strings.ContainsAny(repository, " \t") || !strings.Contains(repository, "/") {
+		return ghissue.ObserveConfig{}, 0, fmt.Errorf("run-gh-intake repository %q must be owner/name", repository)
+	}
+	if strings.TrimSpace(envelope) == "" {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires --envelope")
+	}
+	if len(grantCaps) == 0 {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires --grant-capability github.issue.read")
+	}
+	granted := make(map[string]struct{}, len(grantCaps))
+	for _, capability := range grantCaps {
+		if trimmed := strings.TrimSpace(capability); trimmed != "" {
+			granted[trimmed] = struct{}{}
+		}
+	}
+	if _, ok := granted["github.issue.read"]; !ok {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake grant must include github.issue.read")
+	}
+	for _, capability := range workCaps {
+		if _, ok := granted[strings.TrimSpace(capability)]; !ok {
+			return ghissue.ObserveConfig{}, 0, fmt.Errorf("work capability %q is not listed in the grant", strings.TrimSpace(capability))
+		}
+	}
+	if maxSteps <= 0 {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires a positive --max-steps")
+	}
+	if remainingBudget <= 0 {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires a positive --remaining-budget")
+	}
+	if pollInterval <= 0 {
+		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires a positive --poll-interval")
+	}
+	cfg.MissionID = domain.ID(strings.TrimSpace(mission))
+	cfg.Repository = strings.TrimSpace(repository)
+	cfg.Maintainers = append([]string(nil), logins...)
+	cfg.Grant = workflow.Grant{Capabilities: append([]string(nil), grantCaps...)}
+	cfg.WorkCapabilities = append([]string(nil), workCaps...)
+	cfg.ResourceEnvelopeID = domain.ID(strings.TrimSpace(envelope))
+	cfg.MaxSteps = maxSteps
+	cfg.RemainingBudget = remainingBudget
+	return cfg, pollInterval, nil
+}
+
+// openGHIntakeBox opens the runtime with every writable component removed:
+// intake only reads GitHub, so no executor, capability provider, feedback sink,
+// or operation provider may exist in this composition.
+func openGHIntakeBox(ctx context.Context, cfg summa42runtime.Config) (*summa42runtime.Box, error) {
+	if ctx == nil {
+		return nil, errors.New("Box context is required")
+	}
+	cfg.FieldFeedback = localconfig.FieldFeedbackConfig{Enabled: false, Mode: localconfig.FeedbackModeLocalOnly}
+	cfg.FeedbackSink = nil
+	cfg.OperationProviders = nil
+	cfg.CapabilityProviders = nil
+	cfg.Executors = nil
+	return summa42runtime.Open(ctx, cfg)
+}
+
+func runGHIntake(ctx context.Context, args []string) error {
+	if ctx == nil {
+		return errors.New("Box context is required")
+	}
+	observerCfg, pollInterval, err := parseGHIntakeFlags(args)
+	if err != nil {
+		return err
+	}
+	home, err := localconfig.ResolveHome("")
+	if err != nil {
+		return err
+	}
+	cfg, err := localconfig.Load(home)
+	if err != nil {
+		return fmt.Errorf("load initialized Collective: %w", err)
+	}
+	material, err := loadStartupMaterial(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	client, err := ghissue.New(ghissue.Config{
+		Repository: observerCfg.Repository,
+		TokenFile:  strings.TrimSpace(os.Getenv("SUMMA42_GITHUB_TOKEN_FILE")),
+	})
+	if err != nil {
+		return fmt.Errorf("construct read-only GitHub issues client: %w", err)
+	}
+	box, err := openGHIntakeBox(ctx, summa42runtime.Config{
+		StatePath:        cfg.DatabasePath,
+		EvidencePath:     cfg.EvidencePath,
+		CollectiveID:     cfg.CollectiveID,
+		OwnerPrincipalID: cfg.OwnerPrincipalID,
+		PolicyEngine:     material.policyEngine,
+	})
+	if err != nil {
+		return fmt.Errorf("open read-only Box runtime: %w", err)
+	}
+	defer box.Close()
+	cases := workflowcase.New(box.Store, box.Clock, box.Purpose)
+	return ghissue.Run(ctx, client, cases, box.Execution, box.Evidence, observerCfg, pollInterval)
 }
 
 func parseDriverFlags(args []string) (adoreview.DriverConfig, time.Duration, error) {
