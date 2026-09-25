@@ -15,7 +15,8 @@ New package `internal/ghissue` (mirrors `adoreview`):
 - `source.go`: `Issue`, `IssueLister`, `Unparseable`, parse + filter with
   reason tokens, canonical snapshot. `ExcludedIssue`/`FailedIssue`/`ObserveResult`
   are defined once in `observe.go` (results, not parsing).
-- `observe.go`: `Config`, `ObserveResult`, `ExcludedIssue`/`FailedIssue`,
+- `observe.go`: `ObserveConfig` (distinct name — `Config` belongs to the
+  client in client.go), `ObserveResult`, `ExcludedIssue`/`FailedIssue`,
   `ObserveOnce`, `Run`.
 - `client.go`: read-only GitHub transport. Reuses the exported
   `feedbackgithub.FileCredentialSource` pattern for tokens, but as a SEPARATE
@@ -38,6 +39,15 @@ New package `internal/ghissue` (mirrors `adoreview`):
   header; no link ends the loop; a malformed link, a cross-origin link, or a
   repeated `next` URL is an error (fail closed).
 
+  `Name()` returns the configured repository in `owner/name` form; the
+  collector uses it to qualify object IDs. `ListIssues` splits each page: an
+  item missing a required wire field becomes one `Unparseable` (processing
+  continues), the remaining items are returned raw. The required-field check
+  is the single shared helper `classifyWireItem` in source.go, reused by
+  `ParseIssue`, so client and parser cannot disagree. Pagination loops and
+  repeated-cursor detection live in the collector (`CollectIssues`), keeping
+  the client stateless.
+
 ## Flow (exact order — evidence before Ensure)
 
 `Find(mission, "github", objectID, revision)` →
@@ -52,9 +62,13 @@ New package `internal/ghissue` (mirrors `adoreview`):
   (only ACTIVE cases can materialize).
 
 `EnsureAndMaterialize(ctx, executionSvc, observation, template)` lives in
-`workflowcase` and reuses `CreateTaskWithGuard` inside the same transaction as
-the case insert (replacing the ADO observer's two-step Ensure→Materialize for
-its miss path as well, closing the same partial-case window there).
+`workflowcase` and reuses a new transaction-aware execution primitive
+`CreateTaskWithGuardInTx(ctx, tx, request, guard)` inside the SAME transaction
+as the case insert. `CreateTaskWithGuard` keeps its own-transaction behavior
+by wrapping `CreateTaskWithGuardInTx` in `store.WithTx` — SQLite runs a single
+connection (`db.SetMaxOpenConns(1)`), so a nested `WithTx` would deadlock
+instead of composing. The ADO observer's miss path switches to
+`EnsureAndMaterialize` too, closing the same partial-case window there.
 
 A fresh `Put` per poll would break `Ensure`'s exact-request replay, hence
 Find-first.
