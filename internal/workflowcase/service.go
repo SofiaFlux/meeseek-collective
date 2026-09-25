@@ -85,6 +85,8 @@ const caseColumns = `case_id, mission_id, source, object_id, revision_id,
 const verificationColumns = `verification_id, case_id, verifier_id, verifier_type, snapshot_hash,
 		snapshot_json, evidence_ids_json, created_at`
 
+const closeRetryAttempts = 20
+
 type Service struct {
 	store    *state.Store
 	clock    clock.Clock
@@ -236,82 +238,86 @@ func (s *Service) Close(ctx context.Context, request VerificationRequest) (Verif
 	evidenceIDs := normalizeWorkflowEvidenceIDs(request.EvidenceIDs)
 
 	var result VerificationRecord
-	err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx, `SELECT `+caseColumns+` FROM workflow_cases WHERE case_id = ?`, request.CaseID)
-		current, _, err := scanCase(row)
-		if err != nil {
-			return err
-		}
-		if err := s.purposes.ValidatePurposeTx(ctx, tx, domain.PurposeRef{Kind: domain.PurposeMission, ID: current.MissionID}); err != nil {
-			return err
-		}
+	var err error
+	for attempt := 0; attempt < closeRetryAttempts; attempt++ {
+		err = s.store.WithTx(ctx, func(tx *sql.Tx) error {
+			row := tx.QueryRowContext(ctx, `SELECT `+caseColumns+` FROM workflow_cases WHERE case_id = ?`, request.CaseID)
+			current, _, err := scanCase(row)
+			if err != nil {
+				return err
+			}
+			if err := s.purposes.ValidatePurposeTx(ctx, tx, domain.PurposeRef{Kind: domain.PurposeMission, ID: current.MissionID}); err != nil {
+				return err
+			}
 
-		existing, err := scanVerification(tx.QueryRowContext(ctx, `SELECT `+verificationColumns+` FROM workflow_verifications WHERE case_id = ?`, request.CaseID))
-		if err == nil {
-			result, err = compareWorkflowVerification(existing, request, evidenceIDs)
-			return err
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if current.State != ReadyForVerification {
-			return fmt.Errorf("case %s is not ready for verification", request.CaseID)
-		}
-		if err := requireWorkflowEvidence(ctx, tx, evidenceIDs); err != nil {
-			return err
-		}
-		evidenceJSON, err := json.Marshal(evidenceIDs)
-		if err != nil {
-			return fmt.Errorf("encode verification evidence: %w", err)
-		}
-		now := s.clock.Now().UTC()
-		record := VerificationRecord{
-			ID: domain.NewID("verification"), CaseID: request.CaseID, VerifierID: request.VerifierID,
-			VerifierType: request.VerifierType, SnapshotHash: request.SnapshotHash, SnapshotJSON: request.SnapshotJSON,
-			EvidenceIDs: evidenceIDs, CreatedAt: now,
-		}
-		if _, err := tx.ExecContext(ctx, `
+			existing, err := scanVerification(tx.QueryRowContext(ctx, `SELECT `+verificationColumns+` FROM workflow_verifications WHERE case_id = ?`, request.CaseID))
+			if err == nil {
+				result, err = compareWorkflowVerification(existing, request, evidenceIDs)
+				return err
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if current.State != ReadyForVerification {
+				return fmt.Errorf("case %s is not ready for verification", request.CaseID)
+			}
+			if err := requireWorkflowEvidence(ctx, tx, evidenceIDs); err != nil {
+				return err
+			}
+			evidenceJSON, err := json.Marshal(evidenceIDs)
+			if err != nil {
+				return fmt.Errorf("encode verification evidence: %w", err)
+			}
+			now := s.clock.Now().UTC()
+			record := VerificationRecord{
+				ID: domain.NewID("verification"), CaseID: request.CaseID, VerifierID: request.VerifierID,
+				VerifierType: request.VerifierType, SnapshotHash: request.SnapshotHash, SnapshotJSON: request.SnapshotJSON,
+				EvidenceIDs: evidenceIDs, CreatedAt: now,
+			}
+			if _, err := tx.ExecContext(ctx, `
 			INSERT INTO workflow_verifications (
 				verification_id, case_id, verifier_id, verifier_type, snapshot_hash,
 				snapshot_json, evidence_ids_json, created_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			record.ID, record.CaseID, record.VerifierID, record.VerifierType, record.SnapshotHash,
-			record.SnapshotJSON, string(evidenceJSON), formatWorkflowTime(now),
-		); err != nil {
-			return err
-		}
-		updated, err := tx.ExecContext(ctx, `
+				record.ID, record.CaseID, record.VerifierID, record.VerifierType, record.SnapshotHash,
+				record.SnapshotJSON, string(evidenceJSON), formatWorkflowTime(now),
+			); err != nil {
+				return err
+			}
+			updated, err := tx.ExecContext(ctx, `
 			UPDATE workflow_cases
 			SET state = ?, current_work_id = '', next_work_json = '{}', updated_at = ?
 			WHERE case_id = ? AND state = ?`,
-			Closed, formatWorkflowTime(now), request.CaseID, ReadyForVerification,
-		)
-		if err != nil {
-			return err
-		}
-		changed, err := updated.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return errors.New("workflow case closure lost state race")
-		}
-		result = record
-		return nil
-	})
-	if err != nil {
-		if isSQLiteCloseRace(err) {
-			replayed, replayErr := s.replayWorkflowVerification(ctx, request, evidenceIDs)
-			if replayErr == nil {
-				return replayed, nil
+				Closed, formatWorkflowTime(now), request.CaseID, ReadyForVerification,
+			)
+			if err != nil {
+				return err
 			}
-			if !errors.Is(replayErr, sql.ErrNoRows) {
-				return VerificationRecord{}, fmt.Errorf("close workflow case: %w", replayErr)
+			changed, err := updated.RowsAffected()
+			if err != nil {
+				return err
 			}
+			if changed != 1 {
+				return errors.New("workflow case closure lost state race")
+			}
+			result = record
+			return nil
+		})
+		if err == nil {
+			return result, nil
 		}
-		return VerificationRecord{}, fmt.Errorf("close workflow case: %w", err)
+		if !isSQLiteCloseRace(err) {
+			return VerificationRecord{}, fmt.Errorf("close workflow case: %w", err)
+		}
+		replayed, replayErr := s.replayWorkflowVerification(ctx, request, evidenceIDs)
+		if replayErr == nil {
+			return replayed, nil
+		}
+		if !errors.Is(replayErr, sql.ErrNoRows) && !isSQLiteCloseRace(replayErr) {
+			return VerificationRecord{}, fmt.Errorf("close workflow case: %w", replayErr)
+		}
 	}
-	return result, nil
+	return VerificationRecord{}, fmt.Errorf("close workflow case: %w", err)
 }
 
 func compareWorkflowVerification(existing VerificationRecord, request VerificationRequest, evidenceIDs []domain.ID) (VerificationRecord, error) {
