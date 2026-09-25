@@ -25,11 +25,12 @@
 **Files:**
 - Create: `internal/ghissue/source.go`
 - Create: `internal/ghissue/source_test.go`
+- Create: `internal/ghissue/results.go` (Task 1; holds `ExcludedIssue` so `FilterIssues` compiles now — Task 4 adds `FailedIssue`/`ObserveResult` in observe.go).
 
 **Interfaces:**
 - Consumes: raw GitHub issue JSON objects (`[]any` per page) as decoded by `encoding/json`.
 - Produces: `repositoryPattern`, `Issue` (+`ObjectID`/`RevisionID`), `Unparseable`, `IssueLister`, `classifyWireItem`, `ParseIssue`, `ClassifyTriage`, `FilterIssues`, `CanonicalSnapshot`, `CollectIssues`, reason/triage constants — all consumed by Tasks 2, 4, 5.
-- `ExcludedIssue` is referenced by `FilterIssues` but DEFINED in observe.go (Task 4), same package.
+- `ExcludedIssue` is defined once in results.go (Task 1) and shared with observe.go (Task 4).
 
 - [ ] **Step 1: Write the failing test** — create `internal/ghissue/source_test.go`:
 
@@ -439,7 +440,7 @@ func classifyWireItem(item any) error {
 		return err
 	}
 	if raw, present := object["body"]; present && raw != nil {
-		if _, err := requiredString(object, "body"); err != nil {
+		if _, err := stringField(object, "body"); err != nil {
 			return err
 		}
 	}
@@ -520,10 +521,10 @@ func ClassifyTriage(labels []string, title string) string {
 }
 
 func FilterIssues(issues []Issue, maintainers []string) ([]Issue, []ExcludedIssue, int) {
-	allowed := make(map[string]struct{}, len(maintainers))
+	allowed := make(map[string]bool, len(maintainers))
 	for _, login := range maintainers {
 		if trimmed := strings.ToLower(strings.TrimSpace(login)); trimmed != "" {
-			allowed[trimmed] = struct{}{}
+			allowed[trimmed] = true
 		}
 	}
 	var kept []Issue
@@ -549,6 +550,9 @@ func FilterIssues(issues []Issue, maintainers []string) ([]Issue, []ExcludedIssu
 }
 
 func CollectIssues(ctx context.Context, lister IssueLister) ([]Issue, []Unparseable, error) {
+	if ctx == nil {
+		return nil, nil, errors.New("collector context is required")
+	}
 	if lister == nil {
 		return nil, nil, errors.New("issue lister is required")
 	}
@@ -1183,9 +1187,10 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
 		return nil, errors.New("GitHub API base URL must be an absolute HTTP(S) URL without user info")
 	}
-	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return nil, errors.New("GitHub API base URL must not carry a path, query, or fragment")
 	}
+	parsed.Path = ""
 	host := strings.TrimSpace(parsed.Hostname())
 	loopback := strings.EqualFold(host, "localhost") || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
 	if parsed.Scheme != "https" {
@@ -1292,7 +1297,7 @@ func (c *Client) pageURL(cursor string) (string, error) {
 	if parsed.User != nil || parsed.Fragment != "" {
 		return "", errors.New("GitHub issues pagination cursor is malformed")
 	}
-	if !strings.HasPrefix(parsed.Path, "/repos/"+c.repository+"/issues") {
+	if parsed.Path != "/repos/"+c.repository+"/issues" {
 		return "", errors.New("GitHub issues pagination cursor targets another resource")
 	}
 	return parsed.String(), nil
@@ -1303,6 +1308,7 @@ func (c *Client) nextCursor(link string) (string, error) {
 	if link == "" {
 		return "", nil
 	}
+	next := ""
 	for _, section := range strings.Split(link, ",") {
 		section = strings.TrimSpace(section)
 		if section == "" {
@@ -1314,14 +1320,17 @@ func (c *Client) nextCursor(link string) (string, error) {
 			return "", errors.New("GitHub issues Link header is malformed")
 		}
 		target := section[open+1 : closing]
+		params := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(section[closing+1:]), ";"))
 		isNext := false
-		for _, param := range strings.Split(section[closing+1:], ";") {
-			key, value, found := strings.Cut(strings.TrimSpace(param), "=")
-			if !found || len(value) < 2 || !strings.HasPrefix(value, `"`) || !strings.HasSuffix(value, `"`) {
-				return "", errors.New("GitHub issues Link header parameter is malformed")
-			}
-			if strings.TrimSpace(key) == "rel" && value == `"next"` {
-				isNext = true
+		if params != "" {
+			for _, param := range strings.Split(params, ";") {
+				key, value, found := strings.Cut(strings.TrimSpace(param), "=")
+				if !found || len(value) < 2 || !strings.HasPrefix(value, `"`) || !strings.HasSuffix(value, `"`) {
+					return "", errors.New("GitHub issues Link header parameter is malformed")
+				}
+				if strings.TrimSpace(key) == "rel" && value == `"next"` {
+					isNext = true
+				}
 			}
 		}
 		if !isNext {
@@ -1337,12 +1346,15 @@ func (c *Client) nextCursor(link string) (string, error) {
 		if parsed.User != nil || parsed.Fragment != "" {
 			return "", errors.New("GitHub issues next link is malformed")
 		}
-		if !strings.HasPrefix(parsed.Path, "/repos/"+c.repository+"/issues") {
+		if parsed.Path != "/repos/"+c.repository+"/issues" {
 			return "", errors.New("GitHub issues next link targets another resource")
 		}
-		return parsed.String(), nil
+		if next != "" {
+			return "", errors.New("GitHub issues Link header repeats rel=next")
+		}
+		next = parsed.String()
 	}
-	return "", nil
+	return next, nil
 }
 
 func readTokenFile(path string) (string, error) {
@@ -1550,14 +1562,34 @@ func (s *Service) insertTaskTx(ctx context.Context, tx *sql.Tx, parentID domain.
 	if err != nil {
 		return domain.Task{}, err
 	}
-	// ... the remainder of the previous insertTask body unchanged, starting at
-	// `var requestHash string` through the replay/validate logic, with the
-	// `s.store.WithTx(ctx, func(tx *sql.Tx) error {` wrapper and its closing
-	// `})` removed; `return task, nil` closes insertTaskTx.
+	// ... the previous insertTask body from `var requestHash string` through
+	// the replay/validate logic, with the `s.store.WithTx(ctx, func(tx *sql.Tx) error {`
+	// wrapper removed and every one-value return rewritten as shown below.
 }
 ```
 
-Implementation instruction: mechanically edit — keep every line from `var requestHash string` (old line 450) to the old line 538 (`return err` closing the replay), de-indent by one tab, drop the `err = s.store.WithTx(...)` wrapper and the trailing `if err != nil { return domain.Task{}, err }` / `return task, nil` that belonged to `insertTask` (the new `insertTask` above owns those), and keep the final `return task, nil` inside `insertTaskTx`.
+Implementation instruction: mechanically edit — keep every line from `var requestHash string` (old line 450) through the insert/replay logic, de-indent by one tab, drop the `s.store.WithTx` wrapper, and rewrite the two return sites that used to return only `error`:
+
+```go
+	if inserted == 1 {
+		if err := s.purpose.ValidatePurposeTx(ctx, tx, task.Purpose); err != nil {
+			return domain.Task{}, err
+		}
+		return task, nil
+	}
+```
+
+and the replay tail, which currently ends with `return err`:
+
+```go
+	task, err = loadTask(ctx, tx, existingID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return task, nil
+```
+
+`insertTask` keeps its own `WithTx` wrapper (shown above) and returns whatever `insertTaskTx` returns, so the existing `CreateChildTask` call path and all replay behavior stay identical.
 
 - [ ] **Step 4: Run execution tests to verify they pass**
 
@@ -1609,7 +1641,7 @@ func githubObservation(mission domain.ID) Observation {
 	return Observation{
 		MissionID: mission, Source: "github", ObjectID: "github:o/r#7",
 		RevisionID: "2026-09-24T10:00:00Z", EvidenceID: "evidence-1",
-		FirstWork: WorkProposal{Kind: "github.issue.triage", RequiredCapabilities: []string{"github.issue.read"}, AuthorityCeiling: []string{"github.issue.read"}},
+		FirstWork: workflow.WorkProposal{Kind: "github.issue.triage", RequiredCapabilities: []string{"github.issue.read"}, AuthorityCeiling: []string{"github.issue.read"}},
 		Grant:     workflow.Grant{Capabilities: []string{"github.issue.read"}}, MaxSteps: 3, RemainingBudget: 10,
 	}
 }
@@ -2004,7 +2036,14 @@ func prPayload(pr PullRequest) (json.RawMessage, error) {
 
 The hit path of `observeOne` and `MaterializeTask` stay unchanged (legacy partial-case repair keeps working).
 
-`materialize` must keep compiling after the change: replace its inline `PayloadJSON: prPayload(pr)` with a two-step `payload, err := prPayload(pr); if err != nil { return err }` before the template is built, and keep the existing test helpers in `internal/adoreview/observe_test.go` source-compatible.
+`materialize` must keep compiling after the change: it currently inlines `json.Marshal` (see `internal/adoreview/observe.go:182-195`). Replace that inline marshal with a call to the new helper so both paths share one payload builder:
+
+```go
+	payload, err := prPayload(pr)
+	if err != nil {
+		return domain.Task{}, err
+	}
+```
 
 - [ ] **Step 11: Run ADO + affected suites**
 
@@ -2104,13 +2143,15 @@ func snapshotCount(t *testing.T, store *state.Store, ctx context.Context) int {
 
 func TestObserveOnceRegistersMaintainerIssueAndClassifiesOthers(t *testing.T) {
 	f := setupObserve(t)
-	lister := &stubLister{name: "o/r", pages: []stubPage{{items: []any{
-		wireIssue(),
-		wireIssue(func(m map[string]any) { m["pull_request"] = map[string]any{"url": "x"} }),
-		map[string]any{"number": 99.0},
-		wireIssue(func(m map[string]any) { m["user"] = map[string]any{"login": "stranger"} }),
-		wireIssue(func(m map[string]any) { m["number"] = float64(8); m["labels"] = []any{map[string]any{"name": "wontfix"}} }),
-	}}}}
+	lister := &stubLister{name: "o/r", pages: []stubPage{{
+		items: []any{
+			wireIssue(),
+			wireIssue(func(m map[string]any) { m["pull_request"] = map[string]any{"url": "x"} }),
+			wireIssue(func(m map[string]any) { m["user"] = map[string]any{"login": "stranger"} }),
+			wireIssue(func(m map[string]any) { m["number"] = float64(8); m["labels"] = []any{map[string]any{"name": "wontfix"}} }),
+		},
+		bad: []Unparseable{{Raw: map[string]any{"number": float64(99)}}},
+	}}}
 	result, err := ObserveOnce(f.ctx, lister, f.cases, f.execSvc, f.evidenceStore, f.cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -2207,24 +2248,27 @@ func TestObserveOnceRepollIsNoopAndNormalizesOffsets(t *testing.T) {
 
 func TestObserveOnceKeepsRepositoriesApart(t *testing.T) {
 	f := setupObserve(t)
-	page := func() *stubLister {
-		return &stubLister{name: "repo-a", pages: []stubPage{{items: []any{wireIssue()}}}}
-	}
-	first, err := ObserveOnce(f.ctx, page(), f.cases, f.execSvc, f.evidenceStore, f.cfg)
+	firstCfg := f.cfg
+	firstCfg.Repository = "owner-a/repo"
+	secondCfg := f.cfg
+	secondCfg.Repository = "owner-b/repo"
+	first, err := ObserveOnce(f.ctx,
+		&stubLister{name: "owner-a/repo", pages: []stubPage{{items: []any{wireIssue()}}}},
+		f.cases, f.execSvc, f.evidenceStore, firstCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ObserveOnce(f.ctx, func() *stubLister {
-		return &stubLister{name: "repo-b", pages: []stubPage{{items: []any{wireIssue()}}}}
-	}(), f.cases, f.execSvc, f.evidenceStore, f.cfg)
+	second, err := ObserveOnce(f.ctx,
+		&stubLister{name: "owner-b/repo", pages: []stubPage{{items: []any{wireIssue()}}}},
+		f.cases, f.execSvc, f.evidenceStore, secondCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.Ensured[0] == second.Ensured[0] {
-		t.Fatal("cross-repository issue #1 collided")
+		t.Fatal("cross-repository issue #7 collided")
 	}
 	stored, err := f.cases.Get(f.ctx, second.Ensured[0])
-	if err != nil || stored.ObjectID != "github:repo-b#7" {
+	if err != nil || stored.ObjectID != "github:owner-b/repo#7" {
 		t.Fatalf("stored = %+v err = %v", stored, err)
 	}
 }
@@ -2284,11 +2328,7 @@ func TestObserveOnceNormalizesPaddedGrantTokens(t *testing.T) {
 	if len(result.Ensured) != 1 {
 		t.Fatalf("ensured = %d, want 1", len(result.Ensured))
 	}
-	stored, err := f.cases.Get(f.ctx, result.Ensured[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, err := f.execSvc.Task(f.ctx, stored.CurrentWorkID)
+	task, err := f.execSvc.Task(f.ctx, result.Materialized[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2457,7 +2497,7 @@ func (c ObserveConfig) validate() error {
 // effectiveCapabilities always includes github.issue.read; extra work
 // capabilities are additive only.
 func (c ObserveConfig) effectiveCapabilities() []string {
-	seen := map[string]struct{}{readCapability: {}}
+	seen := make(map[string]struct{}, len(c.WorkCapabilities)+1)
 	out := make([]string, 0, len(c.WorkCapabilities)+1)
 	for _, capability := range append([]string{readCapability}, c.WorkCapabilities...) {
 		trimmed := strings.TrimSpace(capability)
@@ -2595,6 +2635,9 @@ func taskTemplate(cfg ObserveConfig, issue Issue, snapshotID string) (execution.
 }
 
 func Run(ctx context.Context, lister IssueLister, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, interval time.Duration) error {
+	if ctx == nil {
+		return errors.New("observer context is required")
+	}
 	if interval <= 0 {
 		return errors.New("observer requires a positive poll interval")
 	}
@@ -2946,8 +2989,21 @@ func parseGHIntakeFlags(args []string) (ghissue.ObserveConfig, time.Duration, er
 	if strings.TrimSpace(repository) == "" {
 		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires --repo or SUMMA42_GITHUB_REPOSITORY")
 	}
-	if len(maintainers) == 0 {
+	if flags.NArg() != 0 {
+		return ghissue.ObserveConfig{}, 0, fmt.Errorf("run-gh-intake takes no positional arguments, got %q", flags.Args())
+	}
+	logins := make([]string, 0, len(maintainers))
+	for _, login := range maintainers {
+		if strings.TrimSpace(login) == "" {
+			return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake --maintainer must not be blank")
+		}
+		logins = append(logins, login)
+	}
+	if len(logins) == 0 {
 		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires at least one --maintainer")
+	}
+	if strings.ContainsAny(repository, "/ \t") || !strings.Contains(repository, "/") {
+		return ghissue.ObserveConfig{}, 0, fmt.Errorf("run-gh-intake repository %q must be owner/name", repository)
 	}
 	if strings.TrimSpace(envelope) == "" {
 		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires --envelope")
@@ -2980,7 +3036,7 @@ func parseGHIntakeFlags(args []string) (ghissue.ObserveConfig, time.Duration, er
 	}
 	cfg.MissionID = domain.ID(strings.TrimSpace(mission))
 	cfg.Repository = strings.TrimSpace(repository)
-	cfg.Maintainers = append([]string(nil), maintainers...)
+	cfg.Maintainers = append([]string(nil), logins...)
 	cfg.Grant = workflow.Grant{Capabilities: append([]string(nil), grantCaps...)}
 	cfg.WorkCapabilities = append([]string(nil), workCaps...)
 	cfg.ResourceEnvelopeID = domain.ID(strings.TrimSpace(envelope))
