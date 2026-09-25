@@ -152,7 +152,9 @@ func ParseIssue(item any, repository string) (Issue, error) {
 		UpdatedAt:  updatedAt.UTC(),
 	}
 	issue.Triage = ClassifyTriage(labels, title)
-	_, issue.IsPullRequest = object["pull_request"]
+	if raw, ok := object["pull_request"]; ok {
+		issue.IsPullRequest = raw != nil
+	}
 	return issue, nil
 }
 

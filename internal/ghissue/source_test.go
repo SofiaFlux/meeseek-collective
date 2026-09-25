@@ -113,6 +113,22 @@ func TestParseIssueFlagsPullRequests(t *testing.T) {
 	}
 }
 
+func TestParseIssueIgnoresNullPullRequest(t *testing.T) {
+	issue, err := ParseIssue(wireIssue(func(m map[string]any) {
+		m["pull_request"] = nil
+	}), "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue.IsPullRequest {
+		t.Fatal("null pull_request flagged as pull request")
+	}
+	kept, excluded, skipped := FilterIssues([]Issue{issue}, []string{"Maint"})
+	if len(kept) != 1 || len(excluded) != 0 || skipped != 0 {
+		t.Fatalf("kept=%d excluded=%d skipped=%d, want the issue kept", len(kept), len(excluded), skipped)
+	}
+}
+
 func TestNormalizeTokensDeduplicatesAndSortsCaseInsensitively(t *testing.T) {
 	got := normalizeTokens([]string{"Beta", "beta", " alpha ", ""})
 	if !reflect.DeepEqual(got, []string{"alpha", "Beta"}) {
