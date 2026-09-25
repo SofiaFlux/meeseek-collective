@@ -136,7 +136,9 @@ advertise that capability explicitly.
 `github.issue.read`) --work-capability <id> (additional caps only) --envelope
 --max-steps --remaining-budget --poll-interval`. Startup errors: missing
 mission/repo/maintainer/envelope, empty grant, grant without
-`github.issue.read`, non-positive limits/interval. ADO env is NOT required.
+`github.issue.read`, any work capability not grant-listed, non-positive
+limits/interval. Repository precedence: `--repo` wins when both it and
+`SUMMA42_GITHUB_REPOSITORY` are set. ADO env is NOT required.
 
 Composition is read-only: feedback forced to local-only/disabled, no
 feedback sink, no operation providers, no executor registered (contrast
@@ -149,8 +151,7 @@ and an empty executor map.
 |---|---|
 | list/page/transport/malformed-Link error | tick error (Run aborts) |
 | unparseable item | exclusion `unparseable-issue`, processing continues |
-| `Ensure` error (mission invalid, etc.) | exclusion `ensure-failed` |
-| `EnsureAndMaterialize` error (atomic; nothing persisted) | exclusion `ensure-failed` |
+| `EnsureAndMaterialize` error (atomic: no case, no Task; the snapshot blob may exist as an orphan, which is tolerated) | exclusion `ensure-failed` |
 | hit path `MaterializeTask` error | `Failed` entry, retried on the next tick while the issue is still eligible |
 | `Find` error (store) | tick error |
 | `Put` error (disk) | tick error — no case without evidence |
