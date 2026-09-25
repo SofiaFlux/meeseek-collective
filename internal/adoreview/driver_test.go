@@ -343,7 +343,7 @@ func TestDriverMaterializesWork2Idempotently(t *testing.T) {
 		t.Fatalf("Work 2 task count = %d, want 1", count)
 	}
 	var projectCalls int
-	for _, call := range h.caller.calls {
+	for _, call := range h.caller.Calls() {
 		if call.capability == "ado.pr.get" {
 			projectCalls++
 		}
@@ -441,7 +441,7 @@ func TestDriverRejectsAmbiguousReviewEvidence(t *testing.T) {
 func TestDriverRejectsMalformedPRGetResponse(t *testing.T) {
 	h := setupDriverHarness(t, ReviewDecision{Action: DecisionApproveAction, Vote: "approve", Reason: "clean"})
 	h.driver.config.Project = "configured-project"
-	h.caller.pages = []any{[]any{"malformed"}}
+	h.caller.SetPages([]any{[]any{"malformed"}})
 
 	_, err := h.driver.StepOnce(h.ctx)
 	if err == nil || !strings.Contains(err.Error(), "not an object") {
@@ -456,7 +456,7 @@ func TestDriverRejectsMalformedPRGetResponse(t *testing.T) {
 	} else if found {
 		t.Fatalf("malformed response materialized task %+v", task)
 	}
-	h.caller.pages = []any{map[string]any{"title": "valid object"}}
+	h.caller.SetPages([]any{map[string]any{"title": "valid object"}})
 	result, err := h.driver.StepOnce(h.ctx)
 	if err != nil {
 		t.Fatal(err)

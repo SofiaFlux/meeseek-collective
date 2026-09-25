@@ -2,10 +2,12 @@ package adoreview
 
 import (
 	"context"
+	"sync"
 	"testing"
 )
 
 type fakeCaller struct {
+	mu    sync.Mutex
 	calls []fakeCall
 	pages []any
 	err   error
@@ -17,6 +19,8 @@ type fakeCall struct {
 }
 
 func (f *fakeCaller) Call(_ context.Context, capability string, request any) (any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, fakeCall{capability, request})
 	if f.err != nil {
 		return nil, f.err
@@ -29,6 +33,31 @@ func (f *fakeCaller) Call(_ context.Context, capability string, request any) (an
 	return page, nil
 }
 
+// Calls snapshots the recorded calls so a poll goroutine and the test never share the slice.
+func (f *fakeCaller) Calls() []fakeCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeCall(nil), f.calls...)
+}
+
+func (f *fakeCaller) CallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func (f *fakeCaller) SetPages(pages []any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pages = pages
+}
+
+func (f *fakeCaller) Err() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err
+}
+
 func TestListPRsUsesOrgScopeByDefault(t *testing.T) {
 	caller := &fakeCaller{pages: []any{map[string]any{"prs": []any{}}}}
 	prs, bad, err := ListPRs(context.Background(), caller, "", "")
@@ -38,12 +67,13 @@ func TestListPRsUsesOrgScopeByDefault(t *testing.T) {
 	if len(prs) != 0 || len(bad) != 0 {
 		t.Fatalf("prs = %v bad = %v, want both empty", prs, bad)
 	}
-	if len(caller.calls) != 1 || caller.calls[0].capability != "ado.pr.org_active" {
-		t.Fatalf("calls = %v, want one ado.pr.org_active", caller.calls)
+	calls := caller.Calls()
+	if len(calls) != 1 || calls[0].capability != "ado.pr.org_active" {
+		t.Fatalf("calls = %v, want one ado.pr.org_active", calls)
 	}
-	if req, ok := caller.calls[0].request.(map[string]any); ok {
+	if req, ok := calls[0].request.(map[string]any); ok {
 		if _, hasAction := req["action"]; hasAction {
-			t.Fatalf("org_active request carries action: %#v", caller.calls[0].request)
+			t.Fatalf("org_active request carries action: %#v", calls[0].request)
 		}
 	}
 }
@@ -68,10 +98,11 @@ func TestListPRsPagesProjectScope(t *testing.T) {
 	if len(prs) != 2 || prs[0].Number != 1 || prs[1].Number != 2 {
 		t.Fatalf("prs = %+v, want numbers 1,2", prs)
 	}
-	if len(caller.calls) != 2 {
-		t.Fatalf("calls = %d, want 2 pages", len(caller.calls))
+	calls := caller.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2 pages", len(calls))
 	}
-	for _, call := range caller.calls {
+	for _, call := range calls {
 		if call.capability != "ado.pr.list" {
 			t.Fatalf("call = %v, want ado.pr.list", call)
 		}

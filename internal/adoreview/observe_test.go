@@ -112,7 +112,7 @@ func TestObserveOnceReusesCaseWithoutNewEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := snapshotCount(t, store, ctx)
-	caller.pages = []any{map[string]any{"prs": []any{goodPRItem()}}}
+	caller.SetPages([]any{map[string]any{"prs": []any{goodPRItem()}}})
 	second, err := ObserveOnce(ctx, caller, cases, execSvc, evidenceStore, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -168,8 +168,8 @@ func TestRunStopsOnCancelWithoutNewPoll(t *testing.T) {
 	if err := Run(runCtx, caller, cases, execSvc, evidenceStore, cfg, time.Minute); err != nil {
 		t.Fatalf("Run = %v, want nil", err)
 	}
-	if len(caller.calls) != 0 {
-		t.Fatalf("caller calls = %d, want 0 (cancelled before first poll)", len(caller.calls))
+	if len(caller.Calls()) != 0 {
+		t.Fatalf("caller calls = %d, want 0 (cancelled before first poll)", len(caller.Calls()))
 	}
 }
 
@@ -187,7 +187,7 @@ func TestRunPollsThenStops(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	sawSecondTick := false
 	for {
-		if len(caller.calls) >= 2 {
+		if caller.CallCount() >= 2 {
 			sawSecondTick = true
 		}
 		foundCase, found, err := cases.Find(context.Background(), cfg.MissionID, "ado", "shop#1", "a:b")
@@ -210,7 +210,7 @@ func TestRunPollsThenStops(t *testing.T) {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for ELIGIBLE task (calls=%d found=%v secondTick=%v)", len(caller.calls), found, sawSecondTick)
+			t.Fatalf("timed out waiting for ELIGIBLE task (calls=%d found=%v secondTick=%v)", caller.CallCount(), found, sawSecondTick)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -223,7 +223,7 @@ func TestRunPollsThenStops(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for Run to stop")
 	}
-	if len(caller.calls) == 0 {
+	if caller.CallCount() == 0 {
 		t.Fatal("caller was never called, want at least one poll")
 	}
 	if after := snapshotCount(t, store, context.Background()); after != 1 {
@@ -237,11 +237,11 @@ func TestRunAbortsOnObserveError(t *testing.T) {
 	caller := &fakeCaller{err: errors.New("ado unavailable")}
 	if err := Run(context.Background(), caller, cases, execSvc, evidenceStore, cfg, time.Minute); err == nil {
 		t.Fatal("expected Run to return the ObserveOnce error")
-	} else if !errors.Is(err, caller.err) && err.Error() != "ado unavailable" {
+	} else if !errors.Is(err, caller.Err()) && err.Error() != "ado unavailable" {
 		t.Fatalf("Run = %v, want the caller error", err)
 	}
-	if len(caller.calls) != 1 {
-		t.Fatalf("caller calls = %d, want 1 (abort after first failed poll)", len(caller.calls))
+	if len(caller.Calls()) != 1 {
+		t.Fatalf("caller calls = %d, want 1 (abort after first failed poll)", len(caller.Calls()))
 	}
 }
 
@@ -252,8 +252,8 @@ func TestRunRejectsNonPositiveInterval(t *testing.T) {
 	if err := Run(context.Background(), caller, cases, execSvc, evidenceStore, cfg, 0); err == nil {
 		t.Fatal("expected error for non-positive poll interval")
 	}
-	if len(caller.calls) != 0 {
-		t.Fatalf("caller calls = %d, want 0 (interval guard before first poll)", len(caller.calls))
+	if len(caller.Calls()) != 0 {
+		t.Fatalf("caller calls = %d, want 0 (interval guard before first poll)", len(caller.Calls()))
 	}
 }
 
