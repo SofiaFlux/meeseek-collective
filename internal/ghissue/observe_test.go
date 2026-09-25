@@ -581,6 +581,22 @@ func TestObserveBackoffDoublesAndStaysBounded(t *testing.T) {
 	if nextBackoff(time.Hour, time.Second) != maxObserverBackoff {
 		t.Fatalf("backoff = %s, want the cap", nextBackoff(time.Hour, time.Second))
 	}
+	for _, interval := range []time.Duration{45 * time.Second, 2 * time.Minute, time.Hour} {
+		cap := max(maxObserverBackoff, interval)
+		backoff := time.Duration(0)
+		for i := 0; i < 6; i++ {
+			backoff = nextBackoff(backoff, interval)
+			if backoff < interval {
+				t.Fatalf("interval = %s: backoff = %s, want at least the interval", interval, backoff)
+			}
+			if backoff > cap {
+				t.Fatalf("interval = %s: backoff = %s, want at most %s", interval, backoff, cap)
+			}
+		}
+		if backoff != cap {
+			t.Fatalf("interval = %s: backoff = %s, want the %s cap", interval, backoff, cap)
+		}
+	}
 }
 
 func swapObserveWait(replacement func(context.Context, time.Duration) error) func() {

@@ -294,8 +294,8 @@ func nextBackoff(backoff, interval time.Duration) time.Duration {
 		backoff = interval
 	}
 	backoff *= 2
-	if backoff > maxObserverBackoff {
-		return maxObserverBackoff
+	if limit := max(maxObserverBackoff, interval); backoff > limit {
+		return limit
 	}
 	return backoff
 }
