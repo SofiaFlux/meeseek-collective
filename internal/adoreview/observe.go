@@ -144,19 +144,23 @@ func observeOne(ctx context.Context, cases *workflowcase.Service, execSvc *execu
 		return err
 	}
 	workCaps := cfg.workCapabilities()
-	created, err := cases.Ensure(ctx, workflowcase.Observation{
+	payload, err := prPayload(pr)
+	if err != nil {
+		return err
+	}
+	created, task, err := cases.EnsureAndMaterialize(ctx, execSvc, workflowcase.Observation{
 		MissionID: cfg.MissionID, Source: "ado", ObjectID: pr.ObjectID(), RevisionID: pr.RevisionID(),
 		EvidenceID: string(object.ID),
 		FirstWork:  workflow.WorkProposal{Kind: "ado.pr.review", RequiredCapabilities: workCaps, AuthorityCeiling: append([]string(nil), cfg.Grant.Capabilities...)},
 		Grant:      cfg.Grant, MaxSteps: cfg.MaxSteps, RemainingBudget: cfg.RemainingBudget,
+	}, execution.TaskRequest{
+		Objective:          fmt.Sprintf("Review ADO PR %s", pr.ObjectID()),
+		PayloadJSON:        payload,
+		AcceptanceCriteria: []string{"review evidence recorded for " + pr.RevisionID()},
+		ResourceEnvelopeID: cfg.ResourceEnvelopeID,
 	})
 	if err != nil {
 		result.Excluded = append(result.Excluded, ExcludedPR{PR: pr, Reason: ReasonEnsureFailed})
-		return nil
-	}
-	task, err := materialize(ctx, cases, execSvc, cfg, created, pr)
-	if err != nil {
-		result.Failed = append(result.Failed, FailedPR{PR: pr, Err: err.Error()})
 		return nil
 	}
 	result.Ensured = append(result.Ensured, created.ID)
@@ -179,10 +183,18 @@ func canonicalEvidence(pr PullRequest) map[string]any {
 	}
 }
 
-func materialize(ctx context.Context, cases *workflowcase.Service, execSvc *execution.Service, cfg Config, c workflowcase.Case, pr PullRequest) (domain.Task, error) {
+func prPayload(pr PullRequest) (json.RawMessage, error) {
 	payload, err := json.Marshal(map[string]any{
 		"repo": pr.Repository, "pr": pr.Number, "sourceCommit": pr.SourceCommit, "targetCommit": pr.TargetCommit,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("encode ADO review payload: %w", err)
+	}
+	return payload, nil
+}
+
+func materialize(ctx context.Context, cases *workflowcase.Service, execSvc *execution.Service, cfg Config, c workflowcase.Case, pr PullRequest) (domain.Task, error) {
+	payload, err := prPayload(pr)
 	if err != nil {
 		return domain.Task{}, err
 	}

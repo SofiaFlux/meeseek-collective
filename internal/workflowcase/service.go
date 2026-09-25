@@ -430,10 +430,17 @@ func (s *Service) Reject(ctx context.Context, caseID domain.ID, reason string, e
 	return result, nil
 }
 
-func (s *Service) Ensure(ctx context.Context, observation Observation) (Case, error) {
-	if s == nil || s.store == nil || s.clock == nil || s.purposes == nil {
-		return Case{}, errors.New("workflow case service is not configured")
-	}
+type preparedObservation struct {
+	observation Observation
+	workID      domain.ID
+	requestJSON string
+	grantJSON   string
+	workJSON    string
+	now         string
+}
+
+func (s *Service) prepareObservation(observation Observation) (preparedObservation, error) {
+	var prepared preparedObservation
 	if strings.TrimSpace(string(observation.MissionID)) == "" ||
 		strings.TrimSpace(observation.Source) == "" ||
 		strings.TrimSpace(observation.ObjectID) == "" ||
@@ -441,7 +448,7 @@ func (s *Service) Ensure(ctx context.Context, observation Observation) (Case, er
 		strings.TrimSpace(observation.EvidenceID) == "" ||
 		strings.TrimSpace(observation.FirstWork.Kind) == "" ||
 		observation.MaxSteps <= 0 || observation.RemainingBudget <= 0 {
-		return Case{}, errors.New("observation identity, evidence, first work, and positive limits are required")
+		return prepared, errors.New("observation identity, evidence, first work, and positive limits are required")
 	}
 	decision, err := workflow.Decide(workflow.Input{
 		Assessment: workflow.Assessment{
@@ -452,55 +459,75 @@ func (s *Service) Ensure(ctx context.Context, observation Observation) (Case, er
 		CompletedSteps: 0,
 	})
 	if err != nil {
-		return Case{}, fmt.Errorf("invalid first work: %w", err)
+		return prepared, fmt.Errorf("invalid first work: %w", err)
 	}
 	if decision.Outcome != workflow.OutcomeContinue {
-		return Case{}, fmt.Errorf("first work decision is %s", decision.Outcome)
+		return prepared, fmt.Errorf("first work decision is %s", decision.Outcome)
 	}
 	requestJSON, err := json.Marshal(observation)
 	if err != nil {
-		return Case{}, fmt.Errorf("encode observation: %w", err)
+		return prepared, fmt.Errorf("encode observation: %w", err)
 	}
 	grantJSON, err := json.Marshal(observation.Grant)
 	if err != nil {
-		return Case{}, fmt.Errorf("encode grant: %w", err)
+		return prepared, fmt.Errorf("encode grant: %w", err)
 	}
 	workJSON, err := json.Marshal(observation.FirstWork)
 	if err != nil {
-		return Case{}, fmt.Errorf("encode first work: %w", err)
+		return prepared, fmt.Errorf("encode first work: %w", err)
 	}
-	now := s.clock.Now().UTC().Format(time.RFC3339Nano)
-	var result Case
-	err = s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		if err := s.purposes.ValidatePurposeTx(ctx, tx, domain.PurposeRef{Kind: domain.PurposeMission, ID: observation.MissionID}); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO workflow_cases (
-			case_id, mission_id, source, object_id, revision_id, observation_evidence_id,
-			initial_request_json, grant_json, state, current_work_id, next_work_json,
-			completed_steps, max_steps, remaining_budget, progress_signature, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(mission_id, source, object_id, revision_id) DO NOTHING`,
-			domain.NewID("case"), observation.MissionID, observation.Source, observation.ObjectID,
-			observation.RevisionID, observation.EvidenceID, string(requestJSON), string(grantJSON), Active,
-			domain.NewID("work"), string(workJSON), 0, observation.MaxSteps, observation.RemainingBudget, "", now, now,
-		)
-		if err != nil {
-			return err
-		}
-		var storedRequest string
-		row := tx.QueryRowContext(ctx, `SELECT `+caseColumns+` FROM workflow_cases WHERE mission_id = ? AND source = ? AND object_id = ? AND revision_id = ?`,
-			observation.MissionID, observation.Source, observation.ObjectID, observation.RevisionID)
-		result, storedRequest, err = scanCase(row)
-		if err != nil {
-			return err
-		}
-		if storedRequest != string(requestJSON) {
-			return errors.New("observation revision already exists with a different initial request")
-		}
-		return nil
-	})
+	prepared.observation = observation
+	prepared.workID = domain.NewID("work")
+	prepared.requestJSON = string(requestJSON)
+	prepared.grantJSON = string(grantJSON)
+	prepared.workJSON = string(workJSON)
+	prepared.now = s.clock.Now().UTC().Format(time.RFC3339Nano)
+	return prepared, nil
+}
+
+func (s *Service) ensureTx(ctx context.Context, tx *sql.Tx, prepared preparedObservation) (Case, error) {
+	observation := prepared.observation
+	if err := s.purposes.ValidatePurposeTx(ctx, tx, domain.PurposeRef{Kind: domain.PurposeMission, ID: observation.MissionID}); err != nil {
+		return Case{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_cases (
+		case_id, mission_id, source, object_id, revision_id, observation_evidence_id,
+		initial_request_json, grant_json, state, current_work_id, next_work_json,
+		completed_steps, max_steps, remaining_budget, progress_signature, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(mission_id, source, object_id, revision_id) DO NOTHING`,
+		domain.NewID("case"), observation.MissionID, observation.Source, observation.ObjectID,
+		observation.RevisionID, observation.EvidenceID, prepared.requestJSON, prepared.grantJSON, Active,
+		prepared.workID, prepared.workJSON, 0, observation.MaxSteps, observation.RemainingBudget, "", prepared.now, prepared.now,
+	); err != nil {
+		return Case{}, err
+	}
+	row := tx.QueryRowContext(ctx, `SELECT `+caseColumns+` FROM workflow_cases WHERE mission_id = ? AND source = ? AND object_id = ? AND revision_id = ?`,
+		observation.MissionID, observation.Source, observation.ObjectID, observation.RevisionID)
+	result, storedRequest, err := scanCase(row)
 	if err != nil {
+		return Case{}, err
+	}
+	if storedRequest != prepared.requestJSON {
+		return Case{}, errors.New("observation revision already exists with a different initial request")
+	}
+	return result, nil
+}
+
+func (s *Service) Ensure(ctx context.Context, observation Observation) (Case, error) {
+	if s == nil || s.store == nil || s.clock == nil || s.purposes == nil {
+		return Case{}, errors.New("workflow case service is not configured")
+	}
+	prepared, err := s.prepareObservation(observation)
+	if err != nil {
+		return Case{}, err
+	}
+	var result Case
+	if err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = s.ensureTx(ctx, tx, prepared)
+		return err
+	}); err != nil {
 		return Case{}, fmt.Errorf("ensure workflow case: %w", err)
 	}
 	return result, nil

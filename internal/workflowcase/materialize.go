@@ -27,18 +27,22 @@ func (s *Service) MaterializeTask(ctx context.Context, executionSvc *execution.S
 	return s.materializeCurrentCase(ctx, executionSvc, c, template)
 }
 
-func (s *Service) materializeCurrentCase(ctx context.Context, executionSvc *execution.Service, c Case, template execution.TaskRequest) (domain.Task, error) {
+func templateForCase(c Case, template execution.TaskRequest) (execution.TaskRequest, error) {
 	if strings.TrimSpace(template.Objective) == "" ||
 		!hasNonblankCriterion(template.AcceptanceCriteria) ||
 		strings.TrimSpace(string(template.ResourceEnvelopeID)) == "" {
-		return domain.Task{}, errors.New("task template requires objective, acceptance criteria, and resource envelope")
+		return execution.TaskRequest{}, errors.New("task template requires objective, acceptance criteria, and resource envelope")
 	}
 	template.Purpose = domain.PurposeRef{Kind: domain.PurposeMission, ID: c.MissionID}
 	template.TaskClass = c.NextWork.Kind
 	template.RequiredCapabilities = append([]string(nil), c.NextWork.RequiredCapabilities...)
 	template.AuthorityCeiling = append([]string(nil), c.NextWork.AuthorityCeiling...)
 	template.IdempotencyKey = string(c.CurrentWorkID)
-	task, err := executionSvc.CreateTaskWithGuard(ctx, template, func(ctx context.Context, tx *sql.Tx) error {
+	return template, nil
+}
+
+func activeWorkGuard(c Case) execution.TaskGuard {
+	return func(ctx context.Context, tx *sql.Tx) error {
 		var active int
 		err := tx.QueryRowContext(ctx, `SELECT 1 FROM workflow_cases
 			WHERE case_id = ? AND mission_id = ? AND state = ? AND current_work_id = ?`,
@@ -47,7 +51,15 @@ func (s *Service) materializeCurrentCase(ctx context.Context, executionSvc *exec
 			return errors.New("work is not the active work for this case")
 		}
 		return err
-	})
+	}
+}
+
+func (s *Service) materializeCurrentCase(ctx context.Context, executionSvc *execution.Service, c Case, template execution.TaskRequest) (domain.Task, error) {
+	prepared, err := templateForCase(c, template)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	task, err := executionSvc.CreateTaskWithGuard(ctx, prepared, activeWorkGuard(c))
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("materialize workflow work: %w", err)
 	}

@@ -442,8 +442,38 @@ func (s *Service) ChallengeTask(ctx context.Context, taskID domain.ID, scope dom
 }
 
 func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request TaskRequest, guard TaskGuard) (domain.Task, error) {
-	var err error
-	request, err = normalizeTaskIntent(request)
+	var task domain.Task
+	err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		task, err = s.insertTaskTx(ctx, tx, parentID, request, guard)
+		return err
+	})
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return task, nil
+}
+
+// CreateTaskWithGuardInTx inserts or replays a Task inside an enclosing
+// transaction so canonical writes that must commit together share one
+// transaction. SQLite runs a single connection, so callers must never open a
+// nested transaction.
+func (s *Service) CreateTaskWithGuardInTx(ctx context.Context, tx *sql.Tx, request TaskRequest, guard TaskGuard) (domain.Task, error) {
+	if err := s.configured(); err != nil {
+		return domain.Task{}, err
+	}
+	if tx == nil {
+		return domain.Task{}, errors.New("SQL transaction is required")
+	}
+	normalized, err := normalizeRootRequest(request)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return s.insertTaskTx(ctx, tx, domain.ID(""), normalized, guard)
+}
+
+func (s *Service) insertTaskTx(ctx context.Context, tx *sql.Tx, parentID domain.ID, request TaskRequest, guard TaskGuard) (domain.Task, error) {
+	request, err := normalizeTaskIntent(request)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -493,50 +523,50 @@ func (s *Service) insertTask(ctx context.Context, parentID domain.ID, request Ta
 		return domain.Task{}, err
 	}
 
-	err = s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		if guard != nil {
-			if err := guard(ctx, tx); err != nil {
-				return err
-			}
+	if guard != nil {
+		if err := guard(ctx, tx); err != nil {
+			return domain.Task{}, err
 		}
-		result, err := tx.ExecContext(ctx, `
-			INSERT INTO tasks(
-				task_id, parent_task_id, purpose_kind, purpose_id, task_class, objective, payload_json,
-				idempotency_key, request_hash, state, current_fence,
-				acceptance_criteria_json, required_capabilities_json, required_enforcement,
-				authority_ceiling_json, resource_envelope_id, priority, earliest_start, deadline,
-				created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
-			task.ID, nullableID(parentID), task.Purpose.Kind, task.Purpose.ID, task.TaskClass,
-			task.Objective, string(task.PayloadJSON), nullableString(task.IdempotencyKey), nullableString(requestHash), task.State,
-			string(criteriaJSON), string(capabilitiesJSON), task.RequiredEnforcement,
-			string(authorityJSON), task.ResourceEnvelopeID, task.Priority,
-			nullableTime(task.EarliestStart), nullableTime(task.Deadline), formatTime(now), formatTime(now),
-		)
-		if err != nil {
-			return err
+	}
+	result, err := tx.ExecContext(ctx, `
+	INSERT INTO tasks(
+		task_id, parent_task_id, purpose_kind, purpose_id, task_class, objective, payload_json,
+		idempotency_key, request_hash, state, current_fence,
+		acceptance_criteria_json, required_capabilities_json, required_enforcement,
+		authority_ceiling_json, resource_envelope_id, priority, earliest_start, deadline,
+		created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
+		task.ID, nullableID(parentID), task.Purpose.Kind, task.Purpose.ID, task.TaskClass,
+		task.Objective, string(task.PayloadJSON), nullableString(task.IdempotencyKey), nullableString(requestHash), task.State,
+		string(criteriaJSON), string(capabilitiesJSON), task.RequiredEnforcement,
+		string(authorityJSON), task.ResourceEnvelopeID, task.Priority,
+		nullableTime(task.EarliestStart), nullableTime(task.Deadline), formatTime(now), formatTime(now),
+	)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if inserted == 1 {
+		if err := s.purpose.ValidatePurposeTx(ctx, tx, task.Purpose); err != nil {
+			return domain.Task{}, err
 		}
-		inserted, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if inserted == 1 {
-			return s.purpose.ValidatePurposeTx(ctx, tx, task.Purpose)
-		}
-		var existingID domain.ID
-		var existingHash string
-		if err := tx.QueryRowContext(ctx,
-			`SELECT task_id, request_hash FROM tasks WHERE idempotency_key = ?`, task.IdempotencyKey,
-		).Scan(&existingID, &existingHash); err != nil {
-			return err
-		}
-		if existingHash != requestHash {
-			return fmt.Errorf("task idempotency key %q conflicts with a different request", task.IdempotencyKey)
-		}
-		task, err = loadTask(ctx, tx, existingID)
-		return err
-	})
+		return task, nil
+	}
+	var existingID domain.ID
+	var existingHash string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT task_id, request_hash FROM tasks WHERE idempotency_key = ?`, task.IdempotencyKey,
+	).Scan(&existingID, &existingHash); err != nil {
+		return domain.Task{}, err
+	}
+	if existingHash != requestHash {
+		return domain.Task{}, fmt.Errorf("task idempotency key %q conflicts with a different request", task.IdempotencyKey)
+	}
+	task, err = loadTask(ctx, tx, existingID)
 	if err != nil {
 		return domain.Task{}, err
 	}
