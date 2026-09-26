@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -802,10 +803,11 @@ func parseGHIntakeFlags(args []string) (ghissue.ObserveConfig, time.Duration, er
 	}
 	logins := make([]string, 0, len(maintainers))
 	for _, login := range maintainers {
-		if strings.TrimSpace(login) == "" {
+		trimmed := strings.TrimSpace(login)
+		if trimmed == "" {
 			return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake --maintainer must not be blank")
 		}
-		logins = append(logins, login)
+		logins = append(logins, trimmed)
 	}
 	if len(logins) == 0 {
 		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires at least one --maintainer")
@@ -819,19 +821,24 @@ func parseGHIntakeFlags(args []string) (ghissue.ObserveConfig, time.Duration, er
 	if len(grantCaps) == 0 {
 		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires --grant-capability github.issue.read")
 	}
+	capabilities := make([]string, 0, len(grantCaps))
 	granted := make(map[string]struct{}, len(grantCaps))
 	for _, capability := range grantCaps {
 		if trimmed := strings.TrimSpace(capability); trimmed != "" {
+			capabilities = append(capabilities, trimmed)
 			granted[trimmed] = struct{}{}
 		}
 	}
 	if _, ok := granted["github.issue.read"]; !ok {
 		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake grant must include github.issue.read")
 	}
+	work := make([]string, 0, len(workCaps))
 	for _, capability := range workCaps {
-		if _, ok := granted[strings.TrimSpace(capability)]; !ok {
-			return ghissue.ObserveConfig{}, 0, fmt.Errorf("work capability %q is not listed in the grant", strings.TrimSpace(capability))
+		trimmed := strings.TrimSpace(capability)
+		if _, ok := granted[trimmed]; !ok {
+			return ghissue.ObserveConfig{}, 0, fmt.Errorf("work capability %q is not listed in the grant", trimmed)
 		}
+		work = append(work, trimmed)
 	}
 	if maxSteps <= 0 {
 		return ghissue.ObserveConfig{}, 0, errors.New("run-gh-intake requires a positive --max-steps")
@@ -844,9 +851,9 @@ func parseGHIntakeFlags(args []string) (ghissue.ObserveConfig, time.Duration, er
 	}
 	cfg.MissionID = domain.ID(strings.TrimSpace(mission))
 	cfg.Repository = strings.TrimSpace(repository)
-	cfg.Maintainers = append([]string(nil), logins...)
-	cfg.Grant = workflow.Grant{Capabilities: append([]string(nil), grantCaps...)}
-	cfg.WorkCapabilities = append([]string(nil), workCaps...)
+	cfg.Maintainers = logins
+	cfg.Grant = workflow.Grant{Capabilities: capabilities}
+	cfg.WorkCapabilities = work
 	cfg.ResourceEnvelopeID = domain.ID(strings.TrimSpace(envelope))
 	cfg.MaxSteps = maxSteps
 	cfg.RemainingBudget = remainingBudget
@@ -866,6 +873,55 @@ func openGHIntakeBox(ctx context.Context, cfg summa42runtime.Config) (*summa42ru
 	cfg.CapabilityProviders = nil
 	cfg.Executors = nil
 	return summa42runtime.Open(ctx, cfg)
+}
+
+// ghIntakeClientConfig builds the read-only client configuration from the
+// resolved repository and the environment. BaseURL stays unset so the client
+// applies its api.github.com default: the loopback override is a test seam the
+// CLI cannot reach.
+func ghIntakeClientConfig(repository string) ghissue.Config {
+	return ghissue.Config{
+		Repository: repository,
+		TokenFile:  strings.TrimSpace(os.Getenv("SUMMA42_GITHUB_TOKEN_FILE")),
+	}
+}
+
+// ghIntakeTickReporter writes one summary line per tick. A tick that failed
+// nothing still prints, so an idle intake and a durable-write failure are
+// distinguishable; stdout stays clean for machine consumption.
+func ghIntakeTickReporter(out io.Writer) func(ghissue.ObserveResult, error) {
+	return func(result ghissue.ObserveResult, err error) {
+		fmt.Fprintln(out, formatGHIntakeTick(result, err))
+	}
+}
+
+// formatGHIntakeTick renders one tick as a single line: the ensured and
+// materialized counts, the exclusion reason tokens, every failure with its
+// error text, the skipped pull requests and the tick error when there is one.
+// The bracketed detail is omitted while its bucket is empty.
+func formatGHIntakeTick(result ghissue.ObserveResult, err error) string {
+	line := fmt.Sprintf("gh-intake tick ensured=%d materialized=%d excluded=%d",
+		len(result.Ensured), len(result.Materialized), len(result.Excluded))
+	if len(result.Excluded) > 0 {
+		reasons := make([]string, 0, len(result.Excluded))
+		for _, excluded := range result.Excluded {
+			reasons = append(reasons, excluded.Reason)
+		}
+		line += " [" + strings.Join(reasons, ", ") + "]"
+	}
+	line += fmt.Sprintf(" failed=%d", len(result.Failed))
+	if len(result.Failed) > 0 {
+		failures := make([]string, 0, len(result.Failed))
+		for _, failed := range result.Failed {
+			failures = append(failures, failed.Issue.ObjectID()+": "+failed.Err)
+		}
+		line += " [" + strings.Join(failures, ", ") + "]"
+	}
+	line += fmt.Sprintf(" pull_requests_skipped=%d", result.PullRequestsSkipped)
+	if err != nil {
+		line += " error=" + err.Error()
+	}
+	return line
 }
 
 func runGHIntake(ctx context.Context, args []string) error {
@@ -888,10 +944,7 @@ func runGHIntake(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	client, err := ghissue.New(ghissue.Config{
-		Repository: observerCfg.Repository,
-		TokenFile:  strings.TrimSpace(os.Getenv("SUMMA42_GITHUB_TOKEN_FILE")),
-	})
+	client, err := ghissue.New(ghIntakeClientConfig(observerCfg.Repository))
 	if err != nil {
 		return fmt.Errorf("construct read-only GitHub issues client: %w", err)
 	}
@@ -907,7 +960,8 @@ func runGHIntake(ctx context.Context, args []string) error {
 	}
 	defer box.Close()
 	cases := workflowcase.New(box.Store, box.Clock, box.Purpose)
-	return ghissue.Run(ctx, client, cases, box.Execution, box.Evidence, observerCfg, pollInterval)
+	return ghissue.RunReporting(ctx, client, cases, box.Execution, box.Evidence, observerCfg, pollInterval,
+		ghIntakeTickReporter(os.Stderr))
 }
 
 func parseDriverFlags(args []string) (adoreview.DriverConfig, time.Duration, error) {

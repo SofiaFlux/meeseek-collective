@@ -300,7 +300,39 @@ func nextBackoff(backoff, interval time.Duration) time.Duration {
 	return backoff
 }
 
-func Run(ctx context.Context, lister IssueLister, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, interval time.Duration) error {
+// tickError classifies one tick. A non-empty Failed bucket counts as a tick
+// error even when ObserveOnce returned nil: the hit path records its
+// materialize failure there, so ignoring it would retry a case that cannot be
+// written durably at full rate forever.
+func tickError(result ObserveResult, err error) error {
+	if err != nil {
+		return err
+	}
+	if len(result.Failed) == 0 {
+		return nil
+	}
+	failures := make([]error, 0, len(result.Failed))
+	for _, failed := range result.Failed {
+		failures = append(failures, errors.New(failed.Err))
+	}
+	return errors.Join(failures...)
+}
+
+// observeTick runs one tick and hands the result and error to report, which
+// may be nil. Reporting happens before classification so a caller sees every
+// tick, including the one that ends the loop.
+func observeTick(ctx context.Context, lister IssueLister, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, report func(ObserveResult, error)) error {
+	result, err := ObserveOnce(ctx, lister, cases, execSvc, evidenceStore, cfg)
+	if report != nil {
+		report(result, err)
+	}
+	return tickError(result, err)
+}
+
+// RunReporting polls GitHub issues and hands every tick to report, which may
+// be nil. A caller that surfaces the report is the only way an operator can
+// tell an idle tick from one whose durable writes keep failing.
+func RunReporting(ctx context.Context, lister IssueLister, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, interval time.Duration, report func(ObserveResult, error)) error {
 	if ctx == nil {
 		return errors.New("observer context is required")
 	}
@@ -310,7 +342,7 @@ func Run(ctx context.Context, lister IssueLister, cases *workflowcase.Service, e
 	if err := ctx.Err(); err != nil {
 		return nil
 	}
-	if _, err := ObserveOnce(ctx, lister, cases, execSvc, evidenceStore, cfg); err != nil {
+	if err := observeTick(ctx, lister, cases, execSvc, evidenceStore, cfg, report); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -325,7 +357,7 @@ func Run(ctx context.Context, lister IssueLister, cases *workflowcase.Service, e
 		if err := observeWait(ctx, wait); err != nil {
 			return nil
 		}
-		if _, err := ObserveOnce(ctx, lister, cases, execSvc, evidenceStore, cfg); err != nil {
+		if err := observeTick(ctx, lister, cases, execSvc, evidenceStore, cfg, report); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -334,4 +366,8 @@ func Run(ctx context.Context, lister IssueLister, cases *workflowcase.Service, e
 		}
 		backoff = 0
 	}
+}
+
+func Run(ctx context.Context, lister IssueLister, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, interval time.Duration) error {
+	return RunReporting(ctx, lister, cases, execSvc, evidenceStore, cfg, interval, nil)
 }

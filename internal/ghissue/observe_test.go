@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -596,6 +597,110 @@ func TestObserveBackoffDoublesAndStaysBounded(t *testing.T) {
 		if backoff != cap {
 			t.Fatalf("interval = %s: backoff = %s, want the %s cap", interval, backoff, cap)
 		}
+	}
+}
+
+// A nil reporter must leave the loop and its backoff untouched: Run delegates
+// to RunReporting with one.
+func TestRunReportingWithNilCallbackBehavesAsRun(t *testing.T) {
+	run := func(reporter func(ObserveResult, error)) []time.Duration {
+		f := setupObserve(t)
+		ctx, cancel := context.WithCancel(f.ctx)
+		t.Cleanup(cancel)
+		lister := &stubLister{name: "o/r", pages: []stubPage{
+			{items: []any{wireIssue()}},
+			{err: errors.New("github returned 500")},
+			{items: []any{wireIssue(func(m map[string]any) { m["number"] = float64(8) })}},
+		}}
+		var waits []time.Duration
+		restore := swapObserveWait(func(waitCtx context.Context, d time.Duration) error {
+			waits = append(waits, d)
+			if len(waits) == 3 {
+				cancel()
+				return waitCtx.Err()
+			}
+			return nil
+		})
+		defer restore()
+		if err := RunReporting(ctx, lister, f.cases, f.execSvc, f.evidenceStore, f.cfg, time.Second, reporter); err != nil {
+			t.Fatalf("RunReporting = %v, want nil after an absorbed tick error", err)
+		}
+		return waits
+	}
+	plain := run(nil)
+	if reported := run(func(ObserveResult, error) {}); !reflect.DeepEqual(reported, plain) {
+		t.Fatalf("waits with a reporter = %v, nil reporter = %v", reported, plain)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, time.Second}
+	if !reflect.DeepEqual(plain, want) {
+		t.Fatalf("waits = %v, want %v", plain, want)
+	}
+}
+
+func TestRunReportingReportsEveryTick(t *testing.T) {
+	f := setupObserve(t)
+	ctx, cancel := context.WithCancel(f.ctx)
+	t.Cleanup(cancel)
+	lister := &stubLister{name: "o/r", pages: []stubPage{
+		{items: []any{wireIssue()}},
+		{err: errors.New("github returned 500")},
+		{items: []any{
+			wireIssue(),
+			wireIssue(func(m map[string]any) { m["number"] = float64(8) }),
+			wireIssue(func(m map[string]any) { m["user"] = map[string]any{"login": "stranger"} }),
+		}},
+	}}
+	var results []ObserveResult
+	var reported []error
+	waits := 0
+	restore := swapObserveWait(func(waitCtx context.Context, _ time.Duration) error {
+		waits++
+		if waits == 3 {
+			cancel()
+			return waitCtx.Err()
+		}
+		return nil
+	})
+	defer restore()
+	if err := RunReporting(ctx, lister, f.cases, f.execSvc, f.evidenceStore, f.cfg, time.Second,
+		func(result ObserveResult, err error) {
+			results = append(results, result)
+			reported = append(reported, err)
+		}); err != nil {
+		t.Fatalf("RunReporting = %v, want nil after an absorbed tick error", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("reported %d ticks, want one report per tick", len(results))
+	}
+	if reported[0] != nil || len(results[0].Materialized) != 1 {
+		t.Fatalf("first tick = %+v err = %v", results[0], reported[0])
+	}
+	if reported[1] == nil {
+		t.Fatal("failing tick reported a nil error")
+	}
+	if len(results[2].Excluded) != 1 || results[2].Excluded[0].Reason != ReasonNotMaintainer {
+		t.Fatalf("third tick = %+v", results[2])
+	}
+}
+
+func TestTickErrorTreatsFailedBucketAsTickError(t *testing.T) {
+	failure := FailedIssue{Issue: Issue{Repository: "o/r", Number: 7}, Err: "case row unreadable"}
+	if err := tickError(ObserveResult{}, nil); err != nil {
+		t.Fatalf("empty tick = %v, want nil", err)
+	}
+	if err := tickError(ObserveResult{Excluded: []ExcludedIssue{{Reason: ReasonNotMaintainer}}}, nil); err != nil {
+		t.Fatalf("excluded-only tick = %v, want nil (an exclusion is not a failure)", err)
+	}
+	tickFailure := errors.New("github returned 500")
+	if err := tickError(ObserveResult{Failed: []FailedIssue{failure}}, tickFailure); err != tickFailure {
+		t.Fatalf("tick error = %v, want the ObserveOnce error", err)
+	}
+	err := tickError(ObserveResult{Failed: []FailedIssue{failure}}, nil)
+	if err == nil {
+		t.Fatal("a Failed bucket with a nil ObserveOnce error must still back off")
+	}
+	if !strings.Contains(err.Error(), failure.Err) {
+		t.Fatalf("tick error = %q, want it to carry %q", err, failure.Err)
 	}
 }
 
