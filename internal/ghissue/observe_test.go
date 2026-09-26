@@ -546,6 +546,146 @@ func TestRunAbsorbsLaterTickErrorAndKeepsPolling(t *testing.T) {
 	}
 }
 
+// setNextWorkJSON writes a case's stored work proposal and returns the previous
+// one, so a test can break the hit path and repair it between ticks.
+func setNextWorkJSON(t *testing.T, f observeFixture, caseID domain.ID, value string) string {
+	t.Helper()
+	var previous string
+	if err := f.store.DB().QueryRowContext(f.ctx,
+		`SELECT next_work_json FROM workflow_cases WHERE case_id = ?`, caseID).Scan(&previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.DB().ExecContext(f.ctx,
+		`UPDATE workflow_cases SET next_work_json = ? WHERE case_id = ?`, value, caseID); err != nil {
+		t.Fatal(err)
+	}
+	return previous
+}
+
+// deniedWorkJSON demands a capability outside the proposal's own authority
+// ceiling, the shape a runtime policy denial takes: the hit path's
+// MaterializeTask fails while the case stays ACTIVE.
+const deniedWorkJSON = `{"Kind":"github.issue.triage","RequiredCapabilities":["github.issue.read","extra.cap"],"AuthorityCeiling":["github.issue.read"]}`
+
+// A per-issue failure recorded in the Failed bucket on the FIRST tick must not
+// stop the poller: the class decides fatality, never the tick position.
+func TestRunAbsorbsPerIssueFailedOnFirstTick(t *testing.T) {
+	f := setupObserve(t)
+	first, err := ObserveOnce(f.ctx,
+		&stubLister{name: "o/r", pages: []stubPage{{items: []any{wireIssue()}}}},
+		f.cases, f.execSvc, f.evidenceStore, f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := setNextWorkJSON(t, f, first.Ensured[0], deniedWorkJSON)
+	ctx, cancel := context.WithCancel(f.ctx)
+	t.Cleanup(cancel)
+	lister := &stubLister{name: "o/r", pages: []stubPage{
+		{items: []any{wireIssue()}},
+		{items: []any{wireIssue()}},
+	}}
+	var waits []time.Duration
+	var results []ObserveResult
+	restore := swapObserveWait(func(waitCtx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		if len(waits) == 1 {
+			setNextWorkJSON(t, f, first.Ensured[0], original)
+			return nil
+		}
+		cancel()
+		return waitCtx.Err()
+	})
+	defer restore()
+	if err := RunReporting(ctx, lister, f.cases, f.execSvc, f.evidenceStore, f.cfg, time.Second,
+		func(result ObserveResult, _ error) {
+			results = append(results, result)
+		}); err != nil {
+		t.Fatalf("RunReporting = %v, want nil (a Failed-only first tick is never fatal)", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("reported %d ticks, want the failing tick and its retry", len(results))
+	}
+	if len(results[0].Failed) != 1 || results[0].Failed[0].Issue.ObjectID() != "github:o/r#7" {
+		t.Fatalf("first tick failed = %+v, want issue #7", results[0].Failed)
+	}
+	if !strings.Contains(results[0].Failed[0].Err, "extra.cap") {
+		t.Fatalf("reported failure = %q, want the materialize cause", results[0].Failed[0].Err)
+	}
+	if len(results[1].Failed) != 0 || len(results[1].Materialized) != 1 {
+		t.Fatalf("retry tick = %+v, want the same case materialized once the write works", results[1])
+	}
+	if results[1].Materialized[0] != first.Materialized[0] {
+		t.Fatalf("retry materialized %s, want the same task %s", results[1].Materialized[0], first.Materialized[0])
+	}
+	if want := []time.Duration{2 * time.Second, time.Second}; !reflect.DeepEqual(waits, want) {
+		t.Fatalf("waits = %v, want %v (a per-issue first tick backs off like any other failing tick)", waits, want)
+	}
+}
+
+// A per-issue error returned by ObserveOnce on the FIRST tick must not stop the
+// poller either, and must be discoverable as its own class.
+func TestRunAbsorbsPerIssueErrorOnFirstTick(t *testing.T) {
+	f := setupObserve(t)
+	first, err := ObserveOnce(f.ctx,
+		&stubLister{name: "o/r", pages: []stubPage{{items: []any{wireIssue()}}}},
+		f.cases, f.execSvc, f.evidenceStore, f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := setNextWorkJSON(t, f, first.Ensured[0], "{oops")
+	ctx, cancel := context.WithCancel(f.ctx)
+	t.Cleanup(cancel)
+	page := func() stubPage {
+		return stubPage{items: []any{
+			wireIssue(),
+			wireIssue(func(m map[string]any) { m["number"] = float64(8) }),
+		}}
+	}
+	lister := &stubLister{name: "o/r", pages: []stubPage{page(), page()}}
+	var waits []time.Duration
+	var results []ObserveResult
+	var reported []error
+	restore := swapObserveWait(func(waitCtx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		if len(waits) == 1 {
+			setNextWorkJSON(t, f, first.Ensured[0], original)
+			return nil
+		}
+		cancel()
+		return waitCtx.Err()
+	})
+	defer restore()
+	if err := RunReporting(ctx, lister, f.cases, f.execSvc, f.evidenceStore, f.cfg, time.Second,
+		func(result ObserveResult, err error) {
+			results = append(results, result)
+			reported = append(reported, err)
+		}); err != nil {
+		t.Fatalf("RunReporting = %v, want nil (a per-issue first tick is never fatal)", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("reported %d ticks, want the failing tick and its retry", len(results))
+	}
+	if len(results[0].Failed) != 1 || results[0].Failed[0].Issue.ObjectID() != "github:o/r#7" {
+		t.Fatalf("first tick failed = %+v, want only the unreadable case", results[0].Failed)
+	}
+	if len(results[0].Materialized) != 1 {
+		t.Fatalf("first tick = %+v, want the healthy issue still processed", results[0])
+	}
+	var classified *PerIssueError
+	if !errors.As(reported[0], &classified) {
+		t.Fatalf("first tick error = %v, want a *PerIssueError", reported[0])
+	}
+	if errors.Unwrap(classified) == nil {
+		t.Fatal("PerIssueError must unwrap to the collected per-issue errors")
+	}
+	if len(results[1].Failed) != 0 || len(results[1].Materialized) != 2 {
+		t.Fatalf("retry tick = %+v, want both issues materialized", results[1])
+	}
+	if want := []time.Duration{2 * time.Second, time.Second}; !reflect.DeepEqual(waits, want) {
+		t.Fatalf("waits = %v, want %v", waits, want)
+	}
+}
+
 func TestRunStopsOnCancellationBetweenTicks(t *testing.T) {
 	f := setupObserve(t)
 	ctx, cancel := context.WithCancel(f.ctx)
@@ -701,6 +841,49 @@ func TestTickErrorTreatsFailedBucketAsTickError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), failure.Err) {
 		t.Fatalf("tick error = %q, want it to carry %q", err, failure.Err)
+	}
+}
+
+// A tick that also carries a tick-level error stays fatal whatever the Failed
+// bucket holds, and a Failed-only tick is always classified per-issue.
+func TestTickErrorClassifiesFatalityByClassNotByBucket(t *testing.T) {
+	failure := FailedIssue{Issue: Issue{Repository: "o/r", Number: 7}, Err: "case row unreadable"}
+	failedOnly := tickError(ObserveResult{Failed: []FailedIssue{failure}}, nil)
+	if !perIssueError(failedOnly) {
+		t.Fatalf("Failed-only tick = %v, want a per-issue error", failedOnly)
+	}
+	perIssue := tickError(ObserveResult{}, &PerIssueError{Err: errors.New("case row unreadable")})
+	if !perIssueError(perIssue) {
+		t.Fatalf("ObserveOnce per-issue error = %v, want a per-issue error", perIssue)
+	}
+	tickLevel := errors.New("github returned 500")
+	mixed := tickError(ObserveResult{Failed: []FailedIssue{failure}}, tickLevel)
+	if mixed != tickLevel {
+		t.Fatalf("mixed tick = %v, want the tick-level error unchanged", mixed)
+	}
+	if perIssueError(mixed) {
+		t.Fatal("a tick-level error must stay fatal alongside per-issue failures")
+	}
+}
+
+func TestPerIssueErrorIsDiscoverableAndUnwrapsToCause(t *testing.T) {
+	cause := errors.New(`required capability "extra.cap" exceeds task authority ceiling`)
+	wrapped := &PerIssueError{Err: cause}
+	var classified *PerIssueError
+	if !errors.As(wrapped, &classified) {
+		t.Fatalf("errors.As did not discover %T", wrapped)
+	}
+	if classified != wrapped {
+		t.Fatalf("errors.As = %+v, want the wrapping error", classified)
+	}
+	if !errors.Is(wrapped, cause) {
+		t.Fatalf("%v does not unwrap to the cause %v", wrapped, cause)
+	}
+	if errors.Unwrap(wrapped) != cause {
+		t.Fatalf("Unwrap = %v, want the cause", errors.Unwrap(wrapped))
+	}
+	if wrapped.Error() != cause.Error() {
+		t.Fatalf("Error() = %q, want %q", wrapped.Error(), cause.Error())
 	}
 }
 

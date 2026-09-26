@@ -112,6 +112,18 @@ type FailedIssue struct {
 	Err   string
 }
 
+// PerIssueError classifies the failures of individual issues in an otherwise
+// successful tick: the tick did its job, but these issues could not be
+// registered durably. Run absorbs it on every tick, so an unretriable cause such
+// as a policy denial can never stop intake for the other issues.
+type PerIssueError struct {
+	Err error
+}
+
+func (e *PerIssueError) Error() string { return e.Err.Error() }
+
+func (e *PerIssueError) Unwrap() error { return e.Err }
+
 // ObserveResult summarizes one tick.
 type ObserveResult struct {
 	Ensured             []domain.ID
@@ -156,7 +168,10 @@ func ObserveOnce(ctx context.Context, lister IssueLister, cases *workflowcase.Se
 			failures = append(failures, err)
 		}
 	}
-	return result, errors.Join(failures...)
+	if joined := errors.Join(failures...); joined != nil {
+		return result, &PerIssueError{Err: joined}
+	}
+	return result, nil
 }
 
 func observeIssue(ctx context.Context, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, issue Issue, result *ObserveResult) error {
@@ -300,10 +315,10 @@ func nextBackoff(backoff, interval time.Duration) time.Duration {
 	return backoff
 }
 
-// tickError classifies one tick. A non-empty Failed bucket counts as a tick
-// error even when ObserveOnce returned nil: the hit path records its
-// materialize failure there, so ignoring it would retry a case that cannot be
-// written durably at full rate forever.
+// tickError classifies one tick. The hit path records its materialize failure
+// in the Failed bucket without returning an error, so a tick can fail per issue
+// either way; both are PerIssueError. An error that is not per-issue means the
+// tick could not do its job at all, and stays fatal on the first tick.
 func tickError(result ObserveResult, err error) error {
 	if err != nil {
 		return err
@@ -315,7 +330,16 @@ func tickError(result ObserveResult, err error) error {
 	for _, failed := range result.Failed {
 		failures = append(failures, errors.New(failed.Err))
 	}
-	return errors.Join(failures...)
+	return &PerIssueError{Err: errors.Join(failures...)}
+}
+
+// perIssueError reports whether a tick failed only per issue. Those are
+// reported and backed off on every tick, while a tick-level error is fatal on
+// the first tick: collect, transport and config failures mean the setup is
+// wrong, and nothing later would succeed either.
+func perIssueError(err error) bool {
+	var perIssue *PerIssueError
+	return errors.As(err, &perIssue)
 }
 
 // observeTick runs one tick and hands the result and error to report, which
@@ -331,7 +355,10 @@ func observeTick(ctx context.Context, lister IssueLister, cases *workflowcase.Se
 
 // RunReporting polls GitHub issues and hands every tick to report, which may
 // be nil. A caller that surfaces the report is the only way an operator can
-// tell an idle tick from one whose durable writes keep failing.
+// tell an idle tick from one whose durable writes keep failing. A tick that
+// failed only per issue is backed off and retried on every tick; a tick-level
+// error is fatal on the first tick, because a collect, transport or config
+// failure there is a setup error that no later tick would survive.
 func RunReporting(ctx context.Context, lister IssueLister, cases *workflowcase.Service, execSvc *execution.Service, evidenceStore *evidence.Store, cfg ObserveConfig, interval time.Duration, report func(ObserveResult, error)) error {
 	if ctx == nil {
 		return errors.New("observer context is required")
@@ -342,13 +369,16 @@ func RunReporting(ctx context.Context, lister IssueLister, cases *workflowcase.S
 	if err := ctx.Err(); err != nil {
 		return nil
 	}
+	var backoff time.Duration
 	if err := observeTick(ctx, lister, cases, execSvc, evidenceStore, cfg, report); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
-		return err
+		if !perIssueError(err) {
+			return err
+		}
+		backoff = nextBackoff(backoff, interval)
 	}
-	var backoff time.Duration
 	for {
 		wait := interval
 		if backoff > 0 {

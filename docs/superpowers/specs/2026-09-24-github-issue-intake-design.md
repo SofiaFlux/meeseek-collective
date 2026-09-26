@@ -177,12 +177,12 @@ and an empty executor map.
 
 | Condition | Result |
 |---|---|
-| list/page/transport/malformed-Link error | tick error (Run aborts) |
+| list/page/transport/malformed-Link/repeated-cursor error | tick-level error: fatal on the first tick, absorbed behind the bounded backoff afterwards |
 | unparseable item | exclusion `unparseable-issue`, processing continues |
 | `EnsureAndMaterialize` error (atomic: no case, no Task; the snapshot blob may exist as an orphan, which is tolerated) | exclusion `ensure-failed` |
-| hit path `MaterializeTask` error | `Failed` entry, retried on the next tick while the issue is still eligible |
-| `Find` error (store) | tick error |
-| `Put` error (disk) | tick error — no case without evidence |
+| hit path `MaterializeTask` error | per-issue error: `Failed` entry, reported every tick and retried on the next tick while the issue is still eligible — never fatal |
+| `Find` error (store) | per-issue error: reported every tick, backed off and retried on the next tick — never fatal |
+| `Put` error (disk) | per-issue error: reported every tick, backed off and retried on the next tick — never fatal; no case without evidence |
 | hit, case state ≠ `ACTIVE` | skip `case-not-active` |
 | context cancelled mid-tick | Run returns nil |
 
