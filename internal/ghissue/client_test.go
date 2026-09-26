@@ -25,6 +25,18 @@ func tokenFile(t *testing.T, content string) string {
 
 const validIssueJSON = `{"number":7,"title":"t","body":"","state":"open","user":{"login":"maint"},"assignees":[],"labels":[],"updated_at":"2026-09-24T10:00:00Z","html_url":"https://github.com/o/r/issues/7"}`
 
+// The two Link headers below are the documented responses of GitHub's own
+// repository-issues pagination, quoted verbatim: the target uses the numeric
+// repository path and carries only the pagination parameters.
+const (
+	githubPageOnlyLink = `<https://api.github.com/repositories/1300192/issues?page=2>; rel="prev", ` +
+		`<https://api.github.com/repositories/1300192/issues?page=4>; rel="next", ` +
+		`<https://api.github.com/repositories/1300192/issues?page=515>; rel="last", ` +
+		`<https://api.github.com/repositories/1300192/issues?page=1>; rel="first"`
+	githubPerPageLink = `<https://api.github.com/repositories/1300192/issues?per_page=2&page=2>; rel="next", ` +
+		`<https://api.github.com/repositories/1300192/issues?per_page=2&page=7715>; rel="last"`
+)
+
 func TestListIssuesRequestsOpenIssuesPageWithBearerToken(t *testing.T) {
 	var seen *http.Request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,35 +79,51 @@ func TestListIssuesRequestsOpenIssuesPageWithBearerToken(t *testing.T) {
 	}
 }
 
-func TestListIssuesFollowsLinkPagination(t *testing.T) {
-	var paths []string
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.String())
-		if r.URL.Query().Get("page") == "2" {
-			_, _ = w.Write([]byte("[]"))
-			return
-		}
-		w.Header().Set("Link", `<`+server.URL+`/repos/o/r/issues?state=open&per_page=100&page=2>; rel="next"`)
-		_, _ = w.Write([]byte("[" + validIssueJSON + "]"))
-	}))
-	defer server.Close()
-	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
-	if err != nil {
-		t.Fatal(err)
+// The two Link headers below are the documented responses of GitHub's own
+// repository-issues pagination: the target uses the numeric repository path and
+// carries only the pagination parameters. Only the api.github.com origin is
+// rewritten to the test server, so path and query stay verbatim. Each header
+// advances to the page its own rel="next" names.
+func TestListIssuesFollowsGitHubDocumentedLinkHeaders(t *testing.T) {
+	headers := map[string]struct {
+		link     string
+		wantPage string
+	}{
+		"page only":     {githubPageOnlyLink, "4"},
+		"with per_page": {githubPerPageLink, "2"},
 	}
-	_, _, next, err := client.ListIssues(context.Background(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(next, "page=2") {
-		t.Fatalf("next = %q, want page-2 cursor", next)
-	}
-	if _, _, last, err := client.ListIssues(context.Background(), next); err != nil || last != "" {
-		t.Fatalf("last=%q err=%v", last, err)
-	}
-	if len(paths) != 2 || !strings.Contains(paths[1], "page=2") {
-		t.Fatalf("paths = %v", paths)
+	for name, header := range headers {
+		t.Run(name, func(t *testing.T) {
+			var paths []string
+			var served int
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path+"?"+r.URL.RawQuery)
+				served++
+				if served > 1 {
+					_, _ = w.Write([]byte("[]"))
+					return
+				}
+				w.Header().Set("Link", strings.ReplaceAll(header.link, "https://api.github.com", server.URL))
+				_, _ = w.Write([]byte("[" + validIssueJSON + "]"))
+			}))
+			defer server.Close()
+			client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, next, err := client.ListIssues(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, last, err := client.ListIssues(context.Background(), next); err != nil || last != "" {
+				t.Fatalf("last=%q err=%v", last, err)
+			}
+			want := "/repos/o/r/issues?state=open&per_page=100&page=" + header.wantPage
+			if len(paths) != 2 || paths[1] != want {
+				t.Fatalf("requests = %v, want the follow-up request %q", paths, want)
+			}
+		})
 	}
 }
 
@@ -175,11 +203,11 @@ func TestNewRejectsUnsafeConfiguration(t *testing.T) {
 	}
 }
 
-func TestListIssuesRejectsUnsafeTokenFiles(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("[]"))
-	}))
-	defer server.Close()
+// Trigger: a typo in SUMMA42_GITHUB_TOKEN_FILE used to pass New untouched, so
+// the Box opened and created its evidence directory before the first tick died
+// on a stat error. Every other credential-shaped mistake here is a startup
+// error; this one must be too.
+func TestNewRejectsUnusableTokenFiles(t *testing.T) {
 	loose := filepath.Join(t.TempDir(), "loose")
 	if err := os.WriteFile(loose, []byte("sekrit"), 0o644); err != nil {
 		t.Fatal(err)
@@ -191,13 +219,34 @@ func TestListIssuesRejectsUnsafeTokenFiles(t *testing.T) {
 		"directory":         t.TempDir(),
 	}
 	for name, path := range paths {
-		client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: path})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, _, _, err := client.ListIssues(context.Background(), ""); err == nil {
-			t.Fatalf("%s: expected error", name)
-		}
+		t.Run(name, func(t *testing.T) {
+			if _, err := New(Config{BaseURL: "https://api.github.com", Repository: "o/r", TokenFile: path}); err == nil {
+				t.Fatal("expected a startup error")
+			}
+		})
+	}
+}
+
+// The token contents must not be cached: a rotated file with loosened
+// permissions has to be caught by the next request, not only at startup.
+func TestListIssuesReReadsTokenFilePerRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer server.Close()
+	path := tokenFile(t, "sekrit")
+	client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := client.ListIssues(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := client.ListIssues(context.Background(), ""); err == nil {
+		t.Fatal("expected the per-request read to reject the rotated credential file")
 	}
 }
 
@@ -270,15 +319,18 @@ func TestNewDefaultsResponseCapToSixteenMiB(t *testing.T) {
 	}
 }
 
-func TestListIssuesRejectsNextLinkWithUnpinnedQuery(t *testing.T) {
+func TestListIssuesRejectsNextLinkWithUnexpectedQuery(t *testing.T) {
 	cases := []struct {
 		name  string
 		query string
 	}{
 		{"closed state", "state=closed&per_page=100&page=2"},
-		{"missing state", "per_page=100&page=2"},
-		{"wrong per page", "state=open&per_page=50&page=2"},
-		{"extra parameter", "state=open&per_page=100&page=2&direction=desc"},
+		{"pinned state", "state=open&per_page=100&page=2"},
+		{"missing page", "per_page=100"},
+		{"page one", "per_page=100&page=1"},
+		{"non numeric page", "per_page=100&page=next"},
+		{"repeated page", "per_page=100&page=2&page=3"},
+		{"extra parameter", "per_page=2&page=2&direction=desc"},
 		{"no query", ""},
 	}
 	for _, test := range cases {
@@ -286,7 +338,7 @@ func TestListIssuesRejectsNextLinkWithUnpinnedQuery(t *testing.T) {
 		var server *httptest.Server
 		server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests++
-			w.Header().Set("Link", `<`+server.URL+`/repos/o/r/issues?`+test.query+`>; rel="next"`)
+			w.Header().Set("Link", `<`+server.URL+`/repositories/1300192/issues?`+test.query+`>; rel="next"`)
 			_, _ = w.Write([]byte("[]"))
 		}))
 		client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
@@ -334,8 +386,11 @@ func TestListIssuesRejectsUnsafeLinkHeaders(t *testing.T) {
 		"userinfo target": func(origin string) string {
 			return `<http://user:pass@` + strings.TrimPrefix(origin, "http://") + `/repos/o/r/issues?page=2>; rel="next"`
 		},
-		"fragment target":  func(origin string) string { return `<` + origin + `/repos/o/r/issues?page=2#frag>; rel="next"` },
-		"foreign resource": func(origin string) string { return `<` + origin + `/repos/o/other/issues?page=2>; rel="next"` },
+		"fragment target": func(origin string) string { return `<` + origin + `/repos/o/r/issues?page=2#frag>; rel="next"` },
+		"repeated next": func(origin string) string {
+			return `<` + origin + `/repositories/1300192/issues?page=2>; rel="next", <` +
+				origin + `/repositories/1300192/issues?page=3>; rel="next"`
+		},
 	}
 	for name, build := range links {
 		var server *httptest.Server
@@ -359,12 +414,12 @@ func TestListIssuesFollowsQuotedNextLinkAndIgnoresPrev(t *testing.T) {
 	var nextCalls int
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.RawQuery, "page=2") {
+		if strings.Contains(r.URL.RawQuery, "page=4") {
 			nextCalls++
 			_, _ = w.Write([]byte("[" + validIssueJSON + "]"))
 			return
 		}
-		w.Header().Set("Link", `<`+server.URL+`/repos/o/r/issues?state=open&per_page=100&page=2>; rel="next", <`+server.URL+`/repos/o/r/issues?page=9>; rel="prev"`)
+		w.Header().Set("Link", strings.ReplaceAll(githubPageOnlyLink, "https://api.github.com", server.URL))
 		_, _ = w.Write([]byte("[]"))
 	}))
 	defer server.Close()
@@ -376,8 +431,8 @@ func TestListIssuesFollowsQuotedNextLinkAndIgnoresPrev(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(cursor, "page=2") {
-		t.Fatalf("cursor = %q, want page 2", cursor)
+	if cursor != "4" {
+		t.Fatalf("cursor = %q, want the page the next link names", cursor)
 	}
 	if _, _, _, err := client.ListIssues(context.Background(), cursor); err != nil {
 		t.Fatal(err)

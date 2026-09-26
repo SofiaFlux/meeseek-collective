@@ -160,7 +160,7 @@ func observeOne(ctx context.Context, cases *workflowcase.Service, execSvc *execu
 		ResourceEnvelopeID: cfg.ResourceEnvelopeID,
 	})
 	if err != nil {
-		result.Excluded = append(result.Excluded, ExcludedPR{PR: pr, Reason: ReasonEnsureFailed})
+		result.Excluded = append(result.Excluded, ExcludedPR{PR: pr, Reason: ReasonEnsureFailed, Detail: err.Error()})
 		return nil
 	}
 	result.Ensured = append(result.Ensured, created.ID)

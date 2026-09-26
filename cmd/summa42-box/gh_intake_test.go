@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -190,10 +191,14 @@ func TestOpenGHIntakeBoxStripsWritableComposition(t *testing.T) {
 }
 
 func TestGHIntakeClientConfigReadsTokenFileAndKeepsGitHubBase(t *testing.T) {
-	t.Setenv("SUMMA42_GITHUB_TOKEN_FILE", "  /secrets/gh-token  ")
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("sekrit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUMMA42_GITHUB_TOKEN_FILE", "  "+token+"  ")
 	t.Setenv("SUMMA42_GITHUB_BASE_URL", "http://127.0.0.1:8080")
 	cfg := ghIntakeClientConfig("o/r")
-	if cfg.Repository != "o/r" || cfg.TokenFile != "/secrets/gh-token" {
+	if cfg.Repository != "o/r" || cfg.TokenFile != token {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 	if cfg.BaseURL != "" {
@@ -206,8 +211,40 @@ func TestGHIntakeClientConfigReadsTokenFileAndKeepsGitHubBase(t *testing.T) {
 	if client.Name() != "o/r" {
 		t.Fatalf("client repository = %q", client.Name())
 	}
-	if _, err := ghissue.New(ghissue.Config{Repository: "o/r", TokenFile: "t", BaseURL: "http://127.0.0.1:8080"}); err != nil {
+	if _, err := ghissue.New(ghissue.Config{Repository: "o/r", TokenFile: token, BaseURL: "http://127.0.0.1:8080"}); err != nil {
 		t.Fatalf("loopback base URL must stay a client-level seam the CLI cannot reach: %v", err)
+	}
+	// A credential path that is not usable must be a startup error, so the Box
+	// is never opened and no evidence directory created for a run that cannot
+	// make a single request.
+	if _, err := ghissue.New(ghissue.Config{Repository: "o/r", TokenFile: "/secrets/typo"}); err == nil {
+		t.Fatal("expected a startup error for an unusable token path")
+	}
+}
+
+// Trigger: bare reason tokens cannot tell an operator whether issues are
+// legitimately held or every durable write in this Box is failing, and a
+// per-issue failure was printed twice on the same line.
+func TestFormatGHIntakeTickRendersExclusionIdentityAndCause(t *testing.T) {
+	cause := "ensure and materialize workflow case: mission is not active"
+	result := ghissue.ObserveResult{
+		Excluded: []ghissue.ExcludedIssue{
+			{Reason: ghissue.ReasonUnparseable},
+			{Issue: ghissue.Issue{Repository: "o/r", Number: 11}, Reason: ghissue.ReasonNotMaintainer},
+			{Issue: ghissue.Issue{Repository: "o/r", Number: 13}, Reason: ghissue.ReasonEnsureFailed, Detail: cause},
+		},
+		Failed:              []ghissue.FailedIssue{{Issue: ghissue.Issue{Repository: "o/r", Number: 7}, Err: "write failed"}},
+		PullRequestsSkipped: 1,
+	}
+	want := "gh-intake tick ensured=0 materialized=0 excluded=3 " +
+		"[unparseable-issue, not-maintainer github:o/r#11, ensure-failed github:o/r#13: " + cause + "] " +
+		"failed=1 [github:o/r#7: write failed] pull_requests_skipped=1"
+	if line := formatGHIntakeTick(result, errors.New("write failed")); line != want {
+		t.Fatalf("line = %q\nwant   %q", line, want)
+	}
+	tick := formatGHIntakeTick(ghissue.ObserveResult{}, errors.New("list GitHub issues: unexpected status 403"))
+	if !strings.HasSuffix(tick, " error=list GitHub issues: unexpected status 403") {
+		t.Fatalf("tick = %q, want the tick error with no per-issue bucket to duplicate it", tick)
 	}
 }
 
@@ -359,13 +396,19 @@ func TestGHIntakeTickReporterAccountsForMixedBatch(t *testing.T) {
 	}
 	for _, want := range []string{
 		"ensured=1", "materialized=1", "excluded=3",
-		ghissue.ReasonUnparseable, ghissue.ReasonNotMaintainer, ghissue.ReasonHeldByLabel,
+		ghissue.ReasonUnparseable + ",", "not-maintainer github:o/r#7", "held-by-label github:o/r#12",
 		"failed=1", tick.Failed[0].Issue.ObjectID(), tick.Failed[0].Err,
-		"pull_requests_skipped=1", "error=",
+		"pull_requests_skipped=1",
 	} {
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("summary %q does not account for %q", lines[1], want)
 		}
+	}
+	if strings.Contains(lines[1], "error=") {
+		t.Errorf("summary %q repeats the per-issue failure as a tick error", lines[1])
+	}
+	if count := strings.Count(lines[1], tick.Failed[0].Err); count != 1 {
+		t.Errorf("summary %q prints the per-issue failure %d times, want 1", lines[1], count)
 	}
 	if strings.Contains(lines[0], "failed=1") || strings.Contains(lines[0], "error=") {
 		t.Fatalf("clean first tick reported a failure: %q", lines[0])

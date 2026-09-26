@@ -36,11 +36,27 @@ New package `internal/ghissue` (mirrors `adoreview`):
   `New(Config) (*Client, error)`, `(*Client).ListIssues(ctx, cursor string)
   ([]any, []Unparseable, string, error)` and `(*Client).Name() string`. No
   generic request method, no POST/PATCH/DELETE exists on the type, so writes
-  are structurally unreachable. Each page: `GET /repos/{repo}/issues?state=open&per_page=100[&page=N]`;
-  response body capped at `MaxResponseBytes`; 401/403/5xx → sanitized errors
-  (no token echo); timeout via context. Pagination: the `Link: rel="next"`
-  header; no link ends the loop; a malformed link, a cross-origin link, or a
-  repeated `next` URL is an error (fail closed).
+  are structurally unreachable. The token file is validated in `New`
+  (existence, regular file, permission bits, non-blank content), so an unusable
+  `SUMMA42_GITHUB_TOKEN_FILE` is a startup error before the Box opens; the
+  contents are re-read per request so rotation still takes effect. Each page:
+  `GET /repos/{repo}/issues?state=open&per_page=100&page=N`; response body capped
+  at `MaxResponseBytes`; 401/403/5xx → sanitized errors (no token echo);
+  timeout via context. Pagination: the `Link: rel="next"` header; no link ends
+  the loop.
+
+  The `Link` header is never followed. It is credential-pinned (same scheme,
+  same host and port, no userinfo, no fragment) and any query key other than
+  `page` and `per_page` is rejected, but neither its path nor its filter query
+  is trusted: GitHub sends the numeric `/repositories/{id}/issues` form
+  carrying only the pagination parameters, never the request path or
+  `state=open`. Only the `page` number is extracted, and the follow-up request
+  is rebuilt from the client's own pinned base URL, repository and filter
+  query — so no part of the outgoing path or query is server-influenceable.
+  The cursor returned to the collector is that page number, not a URL. A
+  next link that cannot advance (no `page`, a non-numeric `page`, or `page` < 2)
+  is malformed; a malformed link, a cross-origin link, or a repeated `next`
+  link within one header is an error (fail closed).
 
   `Name()` returns the configured repository in `owner/name` form; the
   collector uses it to qualify object IDs. `ListIssues` splits each page: an
@@ -170,8 +186,11 @@ limits/interval. Repository precedence: `--repo` wins when both it and
 
 Composition is read-only: feedback forced to local-only/disabled, no
 feedback sink, no operation providers, no executor registered (contrast
-`runObserver`). Test asserts the opened Box has no feedback emitter/provider
-and an empty executor map.
+`runObserver`). Test asserts the opened Box has an empty executor map and no
+capability provider; the no-emission guarantee is realized by `Enabled: false`
+plus local-only mode, which is what keeps the emit executor unregistered — the
+Box's `Feedback` value is non-nil by construction, so there is no emitter
+object to assert absent.
 
 ## Error handling
 
@@ -179,7 +198,7 @@ and an empty executor map.
 |---|---|
 | list/page/transport/malformed-Link/repeated-cursor error | tick-level error: fatal on the first tick, absorbed behind the bounded backoff afterwards |
 | unparseable item | exclusion `unparseable-issue`, processing continues |
-| `EnsureAndMaterialize` error (atomic: no case, no Task; the snapshot blob may exist as an orphan, which is tolerated) | exclusion `ensure-failed` |
+| `EnsureAndMaterialize` error (atomic: no case, no Task; the snapshot blob may exist as an orphan, which is tolerated) | exclusion `ensure-failed` carrying the underlying error text, so a transient and a permanent cause are distinguishable |
 | hit path `MaterializeTask` error | per-issue error: `Failed` entry, reported every tick and retried on the next tick while the issue is still eligible — never fatal |
 | `Find` error (store) | per-issue error: reported every tick, backed off and retried on the next tick — never fatal |
 | `Put` error (disk) | per-issue error: reported every tick, backed off and retried on the next tick — never fatal; no case without evidence |
@@ -199,14 +218,18 @@ normalization; re-poll is a no-op with unchanged snapshot count and identical
 payload (`issueSnapshot` from `Case.ObservationEvidenceID`); cross-repository
 collision test (`owner-a/repo` and `owner-b/repo` issue #7 are distinct
 cases); grant
-validation errors; `case-not-active` for BLOCKED/READY/CLOSED; a scheduler
+validation errors; `case-not-active` for BLOCKED/READY/CLOSED; an
+`ensure-failed` row retaining its cause; a scheduler
 test proving an unrelated executor with capacity lacking
 `github.issue.read` never claims the Task (eligible-but-unclaimed); CLI
-composition test asserting no feedback emitter/provider and an empty executor
-map. Fake-HTTP client tests: GET-only surface (compile-level: no write
-methods), `state=open` query parameter, Link pagination, repeated/cross-
-origin/malformed Link errors, auth header present, non-2xx sanitized,
-response cap.
+composition test asserting an empty executor map and no registered capability
+provider. Fake-HTTP client tests: GET-only surface (compile-level: no write
+methods), `state=open` query parameter, pagination driven by GitHub's
+documented `Link` headers verbatim (both the `page`-only and the
+`per_page=…&page=…` form) with the follow-up request asserted to be the
+rebuilt pinned URL, unexpected-query-key/unadvancing-`page`/repeated/cross-
+origin/malformed Link errors, unusable token path rejected in `New`, per-request
+token re-read, auth header present, non-2xx sanitized, response cap.
 
 ## Scope boundary
 

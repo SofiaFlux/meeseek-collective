@@ -370,6 +370,12 @@ func TestObserveOnceExcludesEnsureFailureWithoutCase(t *testing.T) {
 	if len(result.Excluded) != 1 || result.Excluded[0].Reason != ReasonEnsureFailed {
 		t.Fatalf("excluded = %+v", result.Excluded)
 	}
+	// The token alone cannot tell an operator whether the issue is legitimately
+	// held or every durable write in this Box is failing, so the cause travels
+	// with the row.
+	if result.Excluded[0].Detail == "" {
+		t.Fatalf("excluded = %+v, want the ensure failure cause in the detail", result.Excluded)
+	}
 	if len(result.Failed) != 0 || len(result.Ensured) != 0 {
 		t.Fatalf("result = %+v", result)
 	}

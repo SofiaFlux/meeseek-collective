@@ -87,6 +87,9 @@ func New(cfg Config) (*Client, error) {
 	if tokenFile == "" {
 		return nil, errors.New("GitHub issues token file path is required")
 	}
+	if _, err := readTokenFile(tokenFile); err != nil {
+		return nil, err
+	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = defaultTimeout
@@ -166,27 +169,26 @@ func (c *Client) ListIssues(ctx context.Context, cursor string) ([]any, []Unpars
 	return items, unparseable, next, nil
 }
 
+// issuesURL builds one request URL from the client's own pinned base URL,
+// repository and filter query. The cursor contributes nothing but the page
+// number, so no part of the outgoing path or query is server-influenceable.
+func (c *Client) issuesURL(page int) string {
+	return c.baseURL.String() + "/repos/" + c.repository + "/issues?state=open&per_page=100&page=" + strconv.Itoa(page)
+}
+
+// pageURL turns a cursor back into a request URL. The cursor is the page number
+// the client derived from the last Link header, never a URL, so there is no
+// server-supplied origin, path, filter or fragment left to validate.
 func (c *Client) pageURL(cursor string) (string, error) {
-	if strings.TrimSpace(cursor) == "" {
-		return c.baseURL.String() + "/repos/" + c.repository + "/issues?state=open&per_page=100", nil
+	cursor = strings.TrimSpace(cursor)
+	if cursor == "" {
+		return c.issuesURL(1), nil
 	}
-	parsed, err := url.Parse(cursor)
-	if err != nil || !parsed.IsAbs() {
-		return "", errors.New("GitHub issues pagination cursor is not an absolute URL")
+	page, err := strconv.Atoi(cursor)
+	if err != nil || page < 1 {
+		return "", errors.New("GitHub issues pagination cursor is not a page number")
 	}
-	if parsed.Scheme != c.baseURL.Scheme || parsed.Host != c.baseURL.Host {
-		return "", errors.New("GitHub issues pagination cursor is cross-origin")
-	}
-	if parsed.User != nil || parsed.Fragment != "" {
-		return "", errors.New("GitHub issues pagination cursor is malformed")
-	}
-	if parsed.Path != "/repos/"+c.repository+"/issues" {
-		return "", errors.New("GitHub issues pagination cursor targets another resource")
-	}
-	if err := pinnedPageQuery(parsed); err != nil {
-		return "", err
-	}
-	return parsed.String(), nil
+	return c.issuesURL(page), nil
 }
 
 func (c *Client) nextCursor(link string) (string, error) {
@@ -232,47 +234,49 @@ func (c *Client) nextCursor(link string) (string, error) {
 		if parsed.User != nil || parsed.Fragment != "" {
 			return "", errors.New("GitHub issues next link is malformed")
 		}
-		if parsed.Path != "/repos/"+c.repository+"/issues" {
-			return "", errors.New("GitHub issues next link targets another resource")
-		}
-		if err := pinnedPageQuery(parsed); err != nil {
+		page, err := nextPageQuery(parsed)
+		if err != nil {
 			return "", err
 		}
 		if next != "" {
 			return "", errors.New("GitHub issues Link header repeats rel=next")
 		}
-		next = parsed.String()
+		next = strconv.Itoa(page)
 	}
 	return next, nil
 }
 
-func pinnedPageQuery(parsed *url.URL) error {
+// nextPageQuery reads the page number a next link advances to. GitHub sends the
+// numeric form carrying only the pagination parameters, so any other key is
+// rejected rather than interpreted, and a next link that cannot advance — no
+// page, a non-numeric one, or page 1 — is malformed.
+func nextPageQuery(parsed *url.URL) (int, error) {
 	query, err := url.ParseQuery(parsed.RawQuery)
 	if err != nil {
-		return errors.New("GitHub issues page query is malformed")
-	}
-	if len(query["state"]) != 1 || query["state"][0] != "open" {
-		return errors.New("GitHub issues page query must pin state=open")
-	}
-	if len(query["per_page"]) != 1 || query["per_page"][0] != "100" {
-		return errors.New("GitHub issues page query must pin per_page=100")
+		return 0, errors.New("GitHub issues page query is malformed")
 	}
 	for key := range query {
-		if key != "state" && key != "per_page" && key != "page" {
-			return errors.New("GitHub issues page query has an unexpected parameter")
+		if key != "page" && key != "per_page" {
+			return 0, errors.New("GitHub issues page query has an unexpected parameter")
 		}
 	}
-	pages := query["page"]
-	if len(pages) > 1 {
-		return errors.New("GitHub issues page query repeats the page parameter")
+	if len(query["per_page"]) > 1 {
+		return 0, errors.New("GitHub issues page query repeats the per_page parameter")
 	}
-	if len(pages) == 1 {
-		number, err := strconv.Atoi(pages[0])
-		if err != nil || number < 2 {
-			return errors.New("GitHub issues page query has an invalid page parameter")
+	if len(query["per_page"]) == 1 {
+		size, err := strconv.Atoi(query["per_page"][0])
+		if err != nil || size < 1 {
+			return 0, errors.New("GitHub issues page query has an invalid per_page parameter")
 		}
 	}
-	return nil
+	if len(query["page"]) != 1 {
+		return 0, errors.New("GitHub issues page query must carry exactly one page parameter")
+	}
+	number, err := strconv.Atoi(query["page"][0])
+	if err != nil || number < 2 {
+		return 0, errors.New("GitHub issues page query has an invalid page parameter")
+	}
+	return number, nil
 }
 
 func readTokenFile(path string) (string, error) {

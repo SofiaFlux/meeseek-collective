@@ -896,18 +896,20 @@ func ghIntakeTickReporter(out io.Writer) func(ghissue.ObserveResult, error) {
 }
 
 // formatGHIntakeTick renders one tick as a single line: the ensured and
-// materialized counts, the exclusion reason tokens, every failure with its
-// error text, the skipped pull requests and the tick error when there is one.
-// The bracketed detail is omitted while its bucket is empty.
+// materialized counts, every exclusion with its reason token, issue identity
+// and retained cause, every failure with its error text, the skipped pull
+// requests and the tick error when there is one. The bracketed detail is
+// omitted while its bucket is empty, and a tick error is printed only when the
+// failure bucket is empty, so no per-issue failure is stated twice.
 func formatGHIntakeTick(result ghissue.ObserveResult, err error) string {
 	line := fmt.Sprintf("gh-intake tick ensured=%d materialized=%d excluded=%d",
 		len(result.Ensured), len(result.Materialized), len(result.Excluded))
 	if len(result.Excluded) > 0 {
-		reasons := make([]string, 0, len(result.Excluded))
+		exclusions := make([]string, 0, len(result.Excluded))
 		for _, excluded := range result.Excluded {
-			reasons = append(reasons, excluded.Reason)
+			exclusions = append(exclusions, formatGHIntakeExclusion(excluded))
 		}
-		line += " [" + strings.Join(reasons, ", ") + "]"
+		line += " [" + strings.Join(exclusions, ", ") + "]"
 	}
 	line += fmt.Sprintf(" failed=%d", len(result.Failed))
 	if len(result.Failed) > 0 {
@@ -918,10 +920,24 @@ func formatGHIntakeTick(result ghissue.ObserveResult, err error) string {
 		line += " [" + strings.Join(failures, ", ") + "]"
 	}
 	line += fmt.Sprintf(" pull_requests_skipped=%d", result.PullRequestsSkipped)
-	if err != nil {
+	if err != nil && len(result.Failed) == 0 {
 		line += " error=" + err.Error()
 	}
 	return line
+}
+
+// formatGHIntakeExclusion renders one exclusion as its reason token, the issue
+// identity when the row carries one, and the retained cause. An unparseable
+// item never parsed, so its row has no identity to report.
+func formatGHIntakeExclusion(excluded ghissue.ExcludedIssue) string {
+	entry := excluded.Reason
+	if excluded.Issue.Repository != "" || excluded.Issue.Number != 0 {
+		entry += " " + excluded.Issue.ObjectID()
+	}
+	if excluded.Detail != "" {
+		entry += ": " + excluded.Detail
+	}
+	return entry
 }
 
 func runGHIntake(ctx context.Context, args []string) error {

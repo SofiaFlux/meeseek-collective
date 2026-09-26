@@ -45,6 +45,7 @@ type Unparseable struct {
 type ExcludedPR struct {
 	PR     PullRequest
 	Reason string
+	Detail string
 }
 
 func (p PullRequest) ObjectID() string   { return p.Repository + "#" + fmt.Sprint(p.Number) }
@@ -207,15 +208,15 @@ func FilterPRs(prs []PullRequest, reviewerID string) (kept []PullRequest, exclud
 	for _, pr := range prs {
 		switch {
 		case pr.IsDraft:
-			excluded = append(excluded, ExcludedPR{pr, ReasonDraft})
+			excluded = append(excluded, ExcludedPR{PR: pr, Reason: ReasonDraft})
 		case pr.AuthorID != "" && pr.AuthorID == reviewerID:
-			excluded = append(excluded, ExcludedPR{pr, ReasonSelfAuthored})
+			excluded = append(excluded, ExcludedPR{PR: pr, Reason: ReasonSelfAuthored})
 		case hasDirectReviewer(pr, reviewerID):
 			kept = append(kept, pr)
 		case hasGroupReviewer(pr, reviewerID):
-			excluded = append(excluded, ExcludedPR{pr, ReasonGroupOnly})
+			excluded = append(excluded, ExcludedPR{PR: pr, Reason: ReasonGroupOnly})
 		default:
-			excluded = append(excluded, ExcludedPR{pr, ReasonUnconfirmedAssignment})
+			excluded = append(excluded, ExcludedPR{PR: pr, Reason: ReasonUnconfirmedAssignment})
 		}
 	}
 	return kept, excluded

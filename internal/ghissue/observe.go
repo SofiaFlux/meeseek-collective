@@ -208,7 +208,7 @@ func observeIssue(ctx context.Context, cases *workflowcase.Service, execSvc *exe
 		Grant: cfg.Grant, MaxSteps: cfg.MaxSteps, RemainingBudget: cfg.RemainingBudget,
 	}, template)
 	if err != nil {
-		result.Excluded = append(result.Excluded, ExcludedIssue{Issue: issue, Reason: ReasonEnsureFailed})
+		result.Excluded = append(result.Excluded, ExcludedIssue{Issue: issue, Reason: ReasonEnsureFailed, Detail: err.Error()})
 		return nil
 	}
 	result.Ensured = append(result.Ensured, created.ID)

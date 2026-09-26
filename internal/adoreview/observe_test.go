@@ -398,6 +398,9 @@ func TestObserveOnceEnsureFailureYieldsExclusion(t *testing.T) {
 	if len(result.Excluded) != 1 || result.Excluded[0].Reason != ReasonEnsureFailed {
 		t.Fatalf("excluded = %+v, want one ensure-failed entry", result.Excluded)
 	}
+	if result.Excluded[0].Detail == "" {
+		t.Fatalf("excluded = %+v, want the ensure failure cause in the detail", result.Excluded)
+	}
 	if len(result.Failed) != 0 || len(result.Ensured) != 0 || len(result.Materialized) != 0 {
 		t.Fatalf("result = %+v, want only the ensure-failed exclusion", result)
 	}
