@@ -25,9 +25,16 @@ func tokenFile(t *testing.T, content string) string {
 
 const validIssueJSON = `{"number":7,"title":"t","body":"","state":"open","user":{"login":"maint"},"assignees":[],"labels":[],"updated_at":"2026-09-24T10:00:00Z","html_url":"https://github.com/o/r/issues/7"}`
 
-// The two Link headers below are the documented responses of GitHub's own
-// repository-issues pagination, quoted verbatim: the target uses the numeric
-// repository path and carries only the pagination parameters.
+// Both Link headers below follow the form GitHub documents for its own
+// repository-issues pagination,
+// <.../repositories/1300192/issues?per_page=…&page=…>; rel="…",
+// whose target uses the numeric repository path and carries only the pagination
+// parameters. githubPageOnlyLink is that documented form byte-for-byte in path
+// and query. githubPerPageLink is derived from it rather than quoted: same
+// documented form, but with per_page set to the page size this client pins
+// (pageSize) instead of the one in GitHub's own example. Only the
+// api.github.com origin is rewritten to the test server, and nothing else
+// about either header is.
 const (
 	githubPageOnlyLink = `<https://api.github.com/repositories/1300192/issues?page=2>; rel="prev", ` +
 		`<https://api.github.com/repositories/1300192/issues?page=4>; rel="next", ` +
@@ -79,11 +86,11 @@ func TestListIssuesRequestsOpenIssuesPageWithBearerToken(t *testing.T) {
 	}
 }
 
-// The two Link headers below are the documented responses of GitHub's own
-// repository-issues pagination: the target uses the numeric repository path and
-// carries only the pagination parameters. Only the api.github.com origin is
-// rewritten to the test server, so path and query stay verbatim. Each header
-// advances to the page its own rel="next" names.
+// The two Link headers below are described where they are defined: both follow
+// the form GitHub documents for its own repository-issues pagination, and only
+// the api.github.com origin is rewritten to the test server, so path and query
+// stay byte-for-byte as written there. Each header advances to the page its own
+// rel="next" names.
 func TestListIssuesFollowsGitHubDocumentedLinkHeaders(t *testing.T) {
 	headers := map[string]struct {
 		link     string

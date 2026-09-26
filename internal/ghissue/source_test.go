@@ -443,15 +443,18 @@ func TestCollectIssuesWalksIncreasingCursorsUnderTheCap(t *testing.T) {
 
 // A next link that does not advance to a strictly later page cannot make
 // progress, so the collector refuses it instead of walking a cursor backwards.
+// Only the three backwards cases reach the monotonic non-advancing check: a
+// repeated cursor is caught earlier by the repeated-cursor guard, which
+// TestCollectIssuesRejectsRepeatedCursor covers on its own.
 func TestCollectIssuesRejectsCursorThatDoesNotAdvance(t *testing.T) {
 	cursors := []struct {
 		name  string
 		pages []string
 	}{
-		{"backwards by one", []string{"2", "1"}},
-		{"backwards by more", []string{"5", "2"}},
-		{"back to the first page", []string{"3", "1"}},
-		{"repeated page", []string{"2", "2"}},
+		{"backwards by one, monotonic check", []string{"2", "1"}},
+		{"backwards by more, monotonic check", []string{"5", "2"}},
+		{"back to the first page, monotonic check", []string{"3", "1"}},
+		{"repeated page, repeated-cursor guard", []string{"2", "2"}},
 	}
 	for _, test := range cursors {
 		pages := make([]stubPage, 0, len(test.pages))
