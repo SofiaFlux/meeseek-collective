@@ -43,7 +43,7 @@ New package `internal/ghissue` (mirrors `adoreview`):
   `GET /repos/{repo}/issues?state=open&per_page=100&page=N`; response body capped
   at `MaxResponseBytes`; 401/403/5xx → sanitized errors (no token echo);
   timeout via context. Pagination: the `Link: rel="next"` header; no link ends
-  the loop.
+  the loop, and the collector's page cap ends it when links keep coming.
 
   The `Link` header is never followed. It is credential-pinned (same scheme,
   same host and port, no userinfo, no fragment) and any query key other than
@@ -54,18 +54,30 @@ New package `internal/ghissue` (mirrors `adoreview`):
   is rebuilt from the client's own pinned base URL, repository and filter
   query — so no part of the outgoing path or query is server-influenceable.
   The cursor returned to the collector is that page number, not a URL. A
-  next link that cannot advance (no `page`, a non-numeric `page`, or `page` < 2)
-  is malformed; a malformed link, a cross-origin link, or a repeated `next`
-  link within one header is an error (fail closed).
+  next link that cannot advance is malformed: no `page`, a non-numeric
+  `page`, `page` < 2, a repeated `page`, or a `per_page` that is not a
+  positive integer equal to the pinned `100` (the follow-up request is
+  rebuilt with that page size, so a disagreeing `per_page` would make the
+  page number name a different window of issues and silently skip or
+  duplicate issues across the page boundary). A malformed link, a
+  cross-origin link, or a repeated `next` link within one header is an error
+  (fail closed).
 
   `Name()` returns the configured repository in `owner/name` form; the
   collector uses it to qualify object IDs. `ListIssues` splits each page: an
   item missing a required wire field becomes one `Unparseable` (processing
   continues), the remaining items are returned raw. The required-field check
   is the single shared helper `classifyWireItem` in source.go, reused by
-  `ParseIssue`, so client and parser cannot disagree. Pagination loops and
-  repeated-cursor detection live in the collector (`CollectIssues`), keeping
-  the client stateless.
+  `ParseIssue`, so client and parser cannot disagree. Pagination loops,
+  repeated-cursor detection and the page cap live in the collector
+  (`CollectIssues`), keeping the client stateless. A next cursor that is a page
+  number must advance strictly: a repeat and a page that does not go forward
+  are both errors, because a link that keeps advancing must not walk the
+  collector backwards or in place. One collection fetches at most
+  `maxCollectionPages` = 1000 pages — 100 000 issues at the pinned page size,
+  far beyond any plausible repository — so a server whose next link never
+  ends the sequence is stopped rather than followed for the life of the
+  process.
 
 ## Flow (exact order — evidence before Ensure)
 
@@ -196,7 +208,7 @@ object to assert absent.
 
 | Condition | Result |
 |---|---|
-| list/page/transport/malformed-Link/repeated-cursor error | tick-level error: fatal on the first tick, absorbed behind the bounded backoff afterwards |
+| list/page/transport/malformed-Link/repeated-cursor/non-advancing-cursor/page-cap error | tick-level error: fatal on the first tick, absorbed behind the bounded backoff afterwards; a collection stopped by the cap or a non-advancing cursor is never returned as a partial success |
 | unparseable item | exclusion `unparseable-issue`, processing continues |
 | `EnsureAndMaterialize` error (atomic: no case, no Task; the snapshot blob may exist as an orphan, which is tolerated) | exclusion `ensure-failed` carrying the underlying error text, so a transient and a permanent cause are distinguishable |
 | hit path `MaterializeTask` error | per-issue error: `Failed` entry, reported every tick and retried on the next tick while the issue is still eligible — never fatal |

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -373,6 +374,105 @@ func TestCollectIssuesRejectsRepeatedCursor(t *testing.T) {
 	}
 	if !reflect.DeepEqual(lister.calls, []string{"", "same"}) {
 		t.Fatalf("calls = %v, want the repeated cursor never refetched", lister.calls)
+	}
+}
+
+// A lister that hands out a strictly increasing cursor on every page, past the
+// cap, must be stopped at the cap: the page at the cap is fetched, the one past
+// it is not, and the collection fails as a tick-level error rather than
+// returning the pages it happened to collect.
+func TestCollectIssuesRejectsCollectionPastThePageCap(t *testing.T) {
+	pages := make([]stubPage, 0, maxCollectionPages+1)
+	for page := 1; page <= maxCollectionPages+1; page++ {
+		next := ""
+		if page < maxCollectionPages+1 {
+			next = strconv.Itoa(page + 1)
+		}
+		pages = append(pages, stubPage{
+			items: []any{wireIssue(func(m map[string]any) { m["number"] = float64(page) })},
+			next:  next,
+		})
+	}
+	lister := &stubLister{name: "o/r", pages: pages}
+	issues, unparseable, err := CollectIssues(context.Background(), lister)
+	if err == nil {
+		t.Fatal("expected an error once the page cap is exceeded")
+	}
+	if perIssueError(err) {
+		t.Fatalf("err = %v, want a tick-level error, not a per-issue one", err)
+	}
+	if issues != nil || unparseable != nil {
+		t.Fatalf("issues=%d unparseable=%d, want no partial collection", len(issues), len(unparseable))
+	}
+	if len(lister.calls) != maxCollectionPages {
+		t.Fatalf("page fetches = %d, want exactly %d", len(lister.calls), maxCollectionPages)
+	}
+	if lister.calls[0] != "" || lister.calls[maxCollectionPages-1] != strconv.Itoa(maxCollectionPages) {
+		t.Fatalf("first and last fetched cursors = %q %q", lister.calls[0], lister.calls[maxCollectionPages-1])
+	}
+}
+
+// A collection that fits under the cap and ends on a page without a next link
+// is the ordinary case: it still returns every page, and the last page's empty
+// next cursor ends the loop.
+func TestCollectIssuesWalksIncreasingCursorsUnderTheCap(t *testing.T) {
+	lister := &stubLister{name: "o/r", pages: []stubPage{
+		{items: []any{wireIssue(func(m map[string]any) { m["number"] = float64(1) })}, next: "2"},
+		{items: []any{wireIssue(func(m map[string]any) { m["number"] = float64(2) })}, next: "3"},
+		{
+			items: []any{wireIssue(func(m map[string]any) { m["number"] = float64(3) })},
+			bad:   []Unparseable{{Raw: map[string]any{"number": float64(4)}}},
+		},
+	}}
+	issues, unparseable, err := CollectIssues(context.Background(), lister)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 3 || len(unparseable) != 1 {
+		t.Fatalf("issues=%d unparseable=%d, want 3 and 1", len(issues), len(unparseable))
+	}
+	for i, issue := range issues {
+		if want := "github:o/r#" + strconv.Itoa(i+1); issue.ObjectID() != want {
+			t.Fatalf("issue %d = %q, want %q", i, issue.ObjectID(), want)
+		}
+	}
+	if !reflect.DeepEqual(lister.calls, []string{"", "2", "3"}) {
+		t.Fatalf("calls = %v, want every page fetched once", lister.calls)
+	}
+}
+
+// A next link that does not advance to a strictly later page cannot make
+// progress, so the collector refuses it instead of walking a cursor backwards.
+func TestCollectIssuesRejectsCursorThatDoesNotAdvance(t *testing.T) {
+	cursors := []struct {
+		name  string
+		pages []string
+	}{
+		{"backwards by one", []string{"2", "1"}},
+		{"backwards by more", []string{"5", "2"}},
+		{"back to the first page", []string{"3", "1"}},
+		{"repeated page", []string{"2", "2"}},
+	}
+	for _, test := range cursors {
+		pages := make([]stubPage, 0, len(test.pages))
+		for _, next := range test.pages {
+			pages = append(pages, stubPage{items: []any{wireIssue()}, next: next})
+		}
+		pages = append(pages, stubPage{items: []any{wireIssue()}})
+		lister := &stubLister{name: "o/r", pages: pages}
+		issues, _, err := CollectIssues(context.Background(), lister)
+		if err == nil {
+			t.Fatalf("%s: expected an error", test.name)
+		}
+		if perIssueError(err) {
+			t.Fatalf("%s: err = %v, want a tick-level error", test.name, err)
+		}
+		if issues != nil {
+			t.Fatalf("%s: issues = %d, want no partial collection", test.name, len(issues))
+		}
+		if want := []string{"", test.pages[0]}; !reflect.DeepEqual(lister.calls, want) {
+			t.Fatalf("%s: calls = %v, want %v", test.name, lister.calls, want)
+		}
 	}
 }
 

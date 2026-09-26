@@ -22,6 +22,7 @@ const (
 	defaultTimeout    = 20 * time.Second
 	defaultMaxBytes   = 16 << 20
 	userAgent         = "summa42-ghissue/1"
+	pageSize          = 100
 )
 
 // rejectRedirect keeps bearer credentials pinned to the configured origin:
@@ -173,7 +174,8 @@ func (c *Client) ListIssues(ctx context.Context, cursor string) ([]any, []Unpars
 // repository and filter query. The cursor contributes nothing but the page
 // number, so no part of the outgoing path or query is server-influenceable.
 func (c *Client) issuesURL(page int) string {
-	return c.baseURL.String() + "/repos/" + c.repository + "/issues?state=open&per_page=100&page=" + strconv.Itoa(page)
+	return c.baseURL.String() + "/repos/" + c.repository + "/issues?state=open&per_page=" +
+		strconv.Itoa(pageSize) + "&page=" + strconv.Itoa(page)
 }
 
 // pageURL turns a cursor back into a request URL. The cursor is the page number
@@ -249,7 +251,10 @@ func (c *Client) nextCursor(link string) (string, error) {
 // nextPageQuery reads the page number a next link advances to. GitHub sends the
 // numeric form carrying only the pagination parameters, so any other key is
 // rejected rather than interpreted, and a next link that cannot advance — no
-// page, a non-numeric one, or page 1 — is malformed.
+// page, a non-numeric one, or page 1 — is malformed. A per_page is accepted
+// only when it is the pinned page size, because the next request is rebuilt
+// with that size: a disagreeing one would make the page number a different
+// window of issues.
 func nextPageQuery(parsed *url.URL) (int, error) {
 	query, err := url.ParseQuery(parsed.RawQuery)
 	if err != nil {
@@ -267,6 +272,9 @@ func nextPageQuery(parsed *url.URL) (int, error) {
 		size, err := strconv.Atoi(query["per_page"][0])
 		if err != nil || size < 1 {
 			return 0, errors.New("GitHub issues page query has an invalid per_page parameter")
+		}
+		if size != pageSize {
+			return 0, errors.New("GitHub issues page query per_page disagrees with the pinned page size")
 		}
 	}
 	if len(query["page"]) != 1 {

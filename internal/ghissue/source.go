@@ -28,6 +28,11 @@ const (
 	TriageUnclassified = "unclassified"
 )
 
+// maxCollectionPages bounds one collection at 100 000 issues, the pinned page
+// size times this many pages — far beyond any plausible repository — so a next
+// link that never stops advancing cannot grow the collector without bound.
+const maxCollectionPages = 1000
+
 var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 // Issue is one parsed GitHub issue revision.
@@ -216,15 +221,20 @@ func CollectIssues(ctx context.Context, lister IssueLister) ([]Issue, []Unparsea
 		unparseable []Unparseable
 		seen        = map[string]struct{}{}
 		cursor      string
+		fetched     int
 	)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
+		if fetched >= maxCollectionPages {
+			return nil, nil, fmt.Errorf("GitHub issues pagination exceeded the %d page collection limit", maxCollectionPages)
+		}
 		items, bad, next, err := lister.ListIssues(ctx, cursor)
 		if err != nil {
 			return nil, nil, err
 		}
+		fetched++
 		unparseable = append(unparseable, bad...)
 		for _, item := range items {
 			issue, err := ParseIssue(item, repository)
@@ -240,9 +250,25 @@ func CollectIssues(ctx context.Context, lister IssueLister) ([]Issue, []Unparsea
 		if _, repeated := seen[next]; repeated {
 			return nil, nil, errors.New("GitHub issues pagination repeated a next cursor")
 		}
+		if current, ok := cursorPage(cursor); ok {
+			if advanced, numeric := cursorPage(next); numeric && advanced <= current {
+				return nil, nil, errors.New("GitHub issues pagination did not advance to a later page")
+			}
+		}
 		seen[next] = struct{}{}
 		cursor = next
 	}
+}
+
+// cursorPage reads a cursor the client derived from a Link header as the page
+// number it names. A cursor that is not a page number is opaque here, and only
+// repeat detection can catch it.
+func cursorPage(cursor string) (int, bool) {
+	page, err := strconv.Atoi(strings.TrimSpace(cursor))
+	if err != nil || page < 1 {
+		return 0, false
+	}
+	return page, true
 }
 
 func CanonicalSnapshot(issue Issue) ([]byte, error) {

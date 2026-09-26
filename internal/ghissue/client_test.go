@@ -33,8 +33,8 @@ const (
 		`<https://api.github.com/repositories/1300192/issues?page=4>; rel="next", ` +
 		`<https://api.github.com/repositories/1300192/issues?page=515>; rel="last", ` +
 		`<https://api.github.com/repositories/1300192/issues?page=1>; rel="first"`
-	githubPerPageLink = `<https://api.github.com/repositories/1300192/issues?per_page=2&page=2>; rel="next", ` +
-		`<https://api.github.com/repositories/1300192/issues?per_page=2&page=7715>; rel="last"`
+	githubPerPageLink = `<https://api.github.com/repositories/1300192/issues?per_page=100&page=2>; rel="next", ` +
+		`<https://api.github.com/repositories/1300192/issues?per_page=100&page=7715>; rel="last"`
 )
 
 func TestListIssuesRequestsOpenIssuesPageWithBearerToken(t *testing.T) {
@@ -352,6 +352,66 @@ func TestListIssuesRejectsNextLinkWithUnexpectedQuery(t *testing.T) {
 		}
 		if requests != 1 {
 			t.Fatalf("%s: requests = %d, want 1", test.name, requests)
+		}
+	}
+}
+
+// The client rebuilds every follow-up request from its own pinned page size, so
+// a next link whose per_page disagrees would make the page number mean a
+// different window of issues: it is rejected rather than reinterpreted, while
+// the absent and pinned forms stay valid.
+func TestListIssuesRejectsNextLinkWithUnpinnedPerPage(t *testing.T) {
+	cases := []struct {
+		name    string
+		perPage string
+		wantErr bool
+	}{
+		{"absent", "", false},
+		{"pinned", "per_page=100&", false},
+		{"smaller window", "per_page=50&", true},
+		{"larger window", "per_page=200&", true},
+		{"zero", "per_page=0&", true},
+		{"negative", "per_page=-1&", true},
+		{"non numeric", "per_page=many&", true},
+	}
+	for _, test := range cases {
+		var paths []string
+		var server *httptest.Server
+		server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths = append(paths, r.URL.Path+"?"+r.URL.RawQuery)
+			if len(paths) == 1 {
+				w.Header().Set("Link", `<`+server.URL+`/repositories/1300192/issues?`+test.perPage+`page=2>; rel="next"`)
+			}
+			_, _ = w.Write([]byte("[]"))
+		}))
+		client, err := New(Config{BaseURL: server.URL, Repository: "o/r", TokenFile: tokenFile(t, "sekrit")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, next, err := client.ListIssues(context.Background(), "")
+		if err == nil {
+			var last string
+			_, _, last, err = client.ListIssues(context.Background(), next)
+			if err == nil && (next != "2" || last != "") {
+				t.Fatalf("%s: next=%q last=%q, want the page 2 next and no further page", test.name, next, last)
+			}
+		}
+		server.Close()
+		if test.wantErr {
+			if err == nil {
+				t.Fatalf("%s: expected an error", test.name)
+			}
+			if len(paths) != 1 {
+				t.Fatalf("%s: requests = %v, want the rejected link never followed", test.name, paths)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: err = %v", test.name, err)
+		}
+		want := "/repos/o/r/issues?state=open&per_page=100&page=2"
+		if len(paths) != 2 || paths[1] != want {
+			t.Fatalf("%s: requests = %v, want the pinned follow-up %q", test.name, paths, want)
 		}
 	}
 }
